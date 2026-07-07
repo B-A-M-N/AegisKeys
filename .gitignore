@@ -16,6 +16,7 @@ vault.enc
 # Build output
 aegiskeys
 aegiskeys-fixed
+aegiskeys-*
 knoxkeys
 dist/
 *.test
@@ -27,3 +28,11 @@ dist/
 .vscode/
 *.swp
 .aider*
+
+# Local tool caches and scratch files
+.crush/
+.gemini_security/
+.aider.chat.history.md
+.aider.tags.cache.v4/
+env
+printenv
