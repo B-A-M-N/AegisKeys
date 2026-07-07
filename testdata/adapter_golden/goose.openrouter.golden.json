@@ -1,0 +1,23 @@
+{
+  "app": "goose",
+  "command": "goose",
+  "env_keys": [
+    "GOOSE_MODEL",
+    "GOOSE_PROVIDER",
+    "GOOSE_PROVIDER__HOST",
+    "OPENAI_BASE_URL",
+    "OPENROUTER_API_KEY"
+  ],
+  "files": [
+    {
+      "path": "$HOME/.config/goose/config.yaml",
+      "format": "yaml",
+      "scope": "user",
+      "merge_policy": "yaml_merge"
+    }
+  ],
+  "preview": [
+    "Profile: verify-goose",
+    "Provider: OpenRouter (openai)"
+  ]
+}

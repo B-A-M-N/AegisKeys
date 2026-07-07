@@ -1,0 +1,22 @@
+{
+  "adapter": "aider",
+  "provider": "openrouter",
+  "model": "anthropic/claude-sonnet-4.5",
+  "command": "aider",
+  "expected_env_keys": [
+    "OPENROUTER_API_KEY",
+    "OPENAI_BASE_URL",
+    "AIDER_OPENAI_API_BASE"
+  ],
+  "forbidden_surfaces": [
+    "preview",
+    "files"
+  ],
+  "manual_result": "launched and consumed injected credential",
+  "verified_gates": {
+    "render_golden": true,
+    "no_secret_leak": true,
+    "config_merge": true,
+    "launch_smoke": true
+  }
+}

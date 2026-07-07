@@ -1,0 +1,20 @@
+{
+  "app": "qwen",
+  "command": "qwen",
+  "env_keys": [
+    "OPENAI_BASE_URL",
+    "OPENROUTER_API_KEY"
+  ],
+  "files": [
+    {
+      "path": "$HOME/.qwen/settings.json",
+      "format": "json",
+      "scope": "user",
+      "merge_policy": "json_merge"
+    }
+  ],
+  "preview": [
+    "Profile: verify-qwen",
+    "Provider: OpenRouter (openai)"
+  ]
+}

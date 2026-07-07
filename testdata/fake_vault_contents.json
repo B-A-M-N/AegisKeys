@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "keys": [
+    {
+      "id": "key_demo000000000001",
+      "provider_slug": "openrouter",
+      "label": "demo-openrouter",
+      "secret": "sk-or-v1-DEMO-DEMO-DEMO-DEMO-DEMO",
+      "created_at": "2026-07-06T00:00:00Z",
+      "updated_at": "2026-07-06T00:00:00Z",
+      "tags": ["demo"]
+    }
+  ]
+}

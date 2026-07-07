@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go test *)",
+      "Bash(/tmp/aegiskeys-test *)",
+      "Bash(/tmp/aegiskeys-audit -c /tmp/audit profile create --name test-profile --provider openrouter --key key_e129be7c11c3d7a52c5a3a5765743ccd --app aider)",
+      "Bash(/tmp/aegiskeys-audit -c /tmp/audit env --profile test-profile)",
+      "Bash(go version *)",
+      "Bash(go build *)",
+      "Bash(echo \"BUILD_EXIT=$?\")"
+    ]
+  },
+  "enabledMcpjsonServers": [
+    "ghidra"
+  ]
+}

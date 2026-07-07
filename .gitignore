@@ -1,0 +1,29 @@
+# AegisKeys local secret/config artifacts
+.aegiskeys/
+aegiskeys.local.*
+vault.enc
+*.vault
+*.secret
+*.secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.token
+*.log
+
+# Build output
+aegiskeys
+aegiskeys-fixed
+knoxkeys
+dist/
+*.test
+*.out
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+.aider*

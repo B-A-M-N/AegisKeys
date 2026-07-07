@@ -1,0 +1,24 @@
+{
+  "adapter": "goose",
+  "provider": "openrouter",
+  "model": "anthropic/claude-sonnet-4.5",
+  "command": "goose",
+  "expected_env_keys": [
+    "OPENROUTER_API_KEY",
+    "OPENAI_BASE_URL",
+    "GOOSE_PROVIDER",
+    "GOOSE_MODEL"
+  ],
+  "forbidden_surfaces": [
+    "args",
+    "preview",
+    "files"
+  ],
+  "manual_result": "launched and consumed injected credential",
+  "verified_gates": {
+    "render_golden": true,
+    "no_secret_leak": true,
+    "config_merge": true,
+    "launch_smoke": true
+  }
+}

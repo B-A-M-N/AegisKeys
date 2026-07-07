@@ -1,0 +1,20 @@
+{
+  "app": "crush",
+  "command": "crush",
+  "env_keys": [
+    "OPENAI_BASE_URL",
+    "OPENROUTER_API_KEY"
+  ],
+  "files": [
+    {
+      "path": "$HOME/.config/crush/crush.json",
+      "format": "json",
+      "scope": "user",
+      "merge_policy": "json_merge"
+    }
+  ],
+  "preview": [
+    "Profile: verify-crush",
+    "Provider: OpenRouter (openai)"
+  ]
+}

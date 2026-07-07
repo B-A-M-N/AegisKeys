@@ -1,0 +1,18 @@
+{
+  "app": "claude",
+  "command": "claude",
+  "env_keys": [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "OPENAI_BASE_URL"
+  ],
+  "preview": [
+    "Profile: verify-claude",
+    "Provider: OpenRouter (openai)"
+  ],
+  "hazards": [
+    "warn:Claude Code OAuth/persisted auth may shadow AegisKeys"
+  ]
+}

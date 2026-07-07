@@ -1,0 +1,202 @@
+# AGENTS.md — AegisKeys
+
+A local-first, secure terminal app (Go 1.25) that stores API **provider** metadata and **secrets** separately, then injects the correct credentials into coding agents/CLIs. AegisKeys renders **app-specific launch configuration** — env vars, CLI args, and config files — so coding agents get credentials in the exact format each one expects.
+
+> Canonical specs: `SPEC.md` (full product spec, CLI surface, storage layout, threat model) and `TUI_GUIDE.md` (Charm v2 TUI architecture, screen-by-screen, pitfalls). Read those before non-trivial work.
+
+---
+
+## Build Status (read first)
+
+As of the latest build:
+- `go build -buildvcs=false ./...` passes (VCS stamping errors unless `-buildvcs=false` is set, due to .git metadata in this checkout).
+- `go test ./...` passes across all packages.
+- `go vet ./...` is clean.
+- `gofmt -l .` is empty.
+- Full CLI (Cobra) with all SPEC §18 commands implemented and tested end-to-end.
+- An interactive TUI (bubbletea v2) with password-unlock, 9 screens, multi-field add forms with provider/key selection, model-slot collection, and real child-process launch via `tea.ExecProcess`.
+- **Adapter system** (`internal/adapter`) — per-app renderers implementing `AppAdapter` contract interface with `AppSupportContract` metadata for all targets: Generic, Crush, Aider, Cline, Hermes, Qwen Code, Goose, Claude Code, Mistral Vibe, Zed, IntelliJ.
+- **Provider protocol/model catalog** (`internal/provider`) — rich provider metadata with auth spec, endpoints, model catalog, capabilities, app hints.
+- **Proxy support** (`internal/proxy`) — auto-start local proxies (SOCKS5/HTTP) when apps need them.
+- **Model slots** — profiles support per-app model roles including feature-specific slots (compression/vision/web_extract for Hermes, inline_assistant/commit_message/thread_summary for Zed).
+- **Config file rendering** with merge/backup/redaction semantics (`internal/adapter/filewriter.go`); TOML/XML policies refuse to overwrite existing user/project config until parser-backed merge/patch support exists.
+- **Hard boundary enforcement**: `ValidateLaunchStrategy` is the single mandatory gate called at the end of `ResolveLaunchStrategy`. It now calls `ValidateContract` to ensure adapter contracts are fully and honestly declared before any contract field is trusted. All launch resolves — `run`, `env`, `envfile`, TUI, and tests — flow through this gate. TUI command override is revalidated after mutation.
+- **Adapter contracts strengthened**: `ValidateContract` requires `ConfigFiles` when `CanPatchConfig=true`, `ValidationChecks` when `verified`, `DisplayName`, `DefaultCommand` when `CanLaunch=true`, `Fix` on high/critical hazards, and known enum values for support/confidence/surface/render-mode fields.
+- **Adapter confidence truthfulness**: `manual_proof` is distinct from `verified`; Generic, Crush, Aider, Qwen Code, Goose, and Claude Code are `verified` with proof JSON under `testdata/adapter_proofs/`, render goldens under `testdata/adapter_golden/`, and all four automated gates true.
+- **Adapter proof doctor**: `doctor` reports adapter confidence/proof status, fails falsely verified adapters, and warns if repo-local manual-proof files are missing when `testdata/adapter_proofs/` is discoverable.
+- **Provider HTTPS enforcement**: `ValidateStrict` rejects non-https base URLs for non-local providers (loopback exempted), including CLI `provider add/edit/validate`.
+- **Secret argv protection**: `key add` and `vault add` never accept raw secret flags; secrets are read through no-echo prompts. Launch validation rejects raw-secret substrings in argv, preview, config file content, and non-injecting env plans.
+- **Vault overwrite protection**: `SaveVault`/`SaveVaultWithKey` refuse to overwrite an existing vault if the password/session key cannot reopen the on-disk envelope.
+- **Filewriter symlink protection**: `rejectSymlinkParents` walks every parent directory; `expandPath` only expands HOME/XDG_CONFIG_HOME/TMPDIR (no ambient env injection).
+- **Secret cleanup**: `lockVault` runs on every quit path (`ctrl+c`, `q`) to zero the derived key.
+- **Wizard** — app-first profile creation with real model-slot input collection and `wizardCanAdvance` validation.
+- Unit tests for all packages: `internal/{secret,provider,profile,adapter,proxy,runner,tui}`.
+
+### Architecture
+
+**Three-domain model + adapter layer:**
+
+| Domain | Package | On Disk | Secret? |
+|--------|---------|---------|---------|
+| **Providers** (metadata) | `internal/provider` | `providers.json` | No |
+| **Secrets** (API keys) | `internal/secret` | `vault.enc` (Argon2id → AES-256-GCM) | Yes |
+| **Profiles** (binding) | `internal/profile` | `profiles.json` | No (refs key id) |
+| **Adapter** (rendering) | `internal/adapter` | — | No |
+| **Proxy** (tunneling) | `internal/proxy` | — | No |
+| **Runner** (execution) | `internal/runner` | — | No |
+
+**Profile → Launch Plan flow:**
+```
+Profile (provider + key + models + target app)
+  → ResolveLaunchPlan(profile, provider, key, adapterRegistry)
+    → adapter.Render() → LaunchPlan{Command, Args, Env, Files}
+      → runner.PrepareCommand()/runner.Run() writes files, builds sanitized env, launches child
+```
+
+**Provider model:**
+- `Protocol` — openai / anthropic / google / local
+- `AuthSpec` — bearer/header/query/none + env var
+- `EndpointSpec` — base URL, API path, models URL
+- `ModelCatalogSpec` — static/dynamic/manual/local + refresh config
+- `Capabilities` — tool_use, vision, streaming, function_calling
+- `AppHints` — per-application config hints
+
+**Profile model:**
+- `Target` — app, render mode, command override
+- `Models` — ModelSlots{Main, Fast, Weak, Editor, Planner, Actor, Subagent, Catalog, Fallbacks}
+- `Files` — TargetConfigFile{Path, Format, Content}
+- `Env`, `Args` — user overrides
+
+**Per-app model slots:**
+| App | Slots |
+|-----|-------|
+| Aider | main, weak, editor |
+| Cline | planner, actor |
+| Goose | main, fast |
+| Hermes | main, auxiliary |
+| Claude Code | main |
+| Qwen Code | main |
+| Crush | main |
+| Mistral Vibe | main |
+
+**Per-app config files:**
+- Qwen Code → `~/.qwen/settings.json` (modelProviders)
+- Cline → `~/.cline/data/settings/providers.json`
+- Goose → `~/.config/goose/config.yaml`
+- Hermes → `~/.hermes/config.yaml`
+- Vibe → `~/.vibe/config.toml`
+- Crush → `~/.config/crush/crush.json`
+
+### Commands
+
+```bash
+go build -buildvcs=false ./...   # passes
+go test ./...      # runs all tests
+go vet ./...       # clean
+gofmt -l .         # empty
+```
+
+Ensure `gofmt -l .` is empty.
+
+Module name is **`aegiskeys`** (lowercase, single word). Intended CLI surface (SPEC §18, **implemented**):
+
+```
+aegiskeys init | tui | version | lock | unlock | doctor | audit
+aegiskeys provider {list|add|inspect|remove|edit|search|validate|export}
+aegiskeys key {add|list|rotate|delete|reveal}
+aegiskeys profile {create|list|inspect|delete}
+aegiskeys run --profile <name> -- <command>
+aegiskeys env --profile <name> [--export]
+aegiskeys envfile --profile <name> | shred-envfile <path>
+aegiskeys adapter verify [--app <id>] [--installed]
+aegiskeys completion {bash|zsh|fish|powershell}
+```
+
+### Dependency Portability
+
+`go.mod` must remain portable: do not commit machine-local `replace` directives for the Charm v2 stack. Use `charm.land/.../v2` import paths, never `github.com/charmbracelet/...`.
+
+---
+
+## Architecture
+
+Three-domain model, kept deliberately separated (SPEC §3):
+
+| Domain | Package | On-disk | Secret? |
+|--------|---------|---------|---------|
+| **Providers** (metadata) | `internal/provider` | `providers.json` | No |
+| **Secrets** (API keys) | `internal/secret` | `vault.enc` (encrypted) | Yes |
+| **Profiles** (binding) | `internal/profile` | `profiles.json` | No (references key id) |
+
+Plus: `internal/config` (paths + app config), `internal/runner` (child-process env injection), `internal/audit` (append-only JSONL log), `internal/security` (doctor checks + output redaction), `internal/app` (placeholder top-level struct, not yet wired), `internal/tui` (Charm v2 UI, only `styles.go` so far).
+
+### Config directory layout (SPEC §7)
+
+```
+~/.config/aegiskeys/
+├── config.json     0600
+├── providers.json  0600
+├── profiles.json   0600
+├── vault.enc       0600   (Argon2id-derived key → AES-256-GCM)
+├── audit.log       0600
+└── tmp/            0700   (temp env files, 0600)
+```
+
+`DefaultConfigDir()` → `~/.config/aegiskeys`; `EnsureDir` mkdirs with `0700`.
+
+### Data flow (target)
+
+`provider.Registry` → `[]Provider`; `secret.Vault` → `[]MaskedKeyItem`; `profile.Store` → `[]Profile`. While unlocked, the TUI root model owns a vault session containing decrypted secrets and a derived key so it can add/rotate/delete/launch without retaining the master password. Child views render masked data only; `lockVault` zeroes the derived key and clears decrypted secret strings.
+
+---
+
+## Conventions observed in current code
+
+- **Load functions are first-run friendly**: `LoadRegistry`, `LoadStore`, `LoadConfig` return a sensible default (`NewRegistry()`, `NewStore()`, `DefaultConfig()`) when the file is missing, only erroring on malformed JSON. Preserve this — do not turn missing-file into a hard error.
+- **File perms enforced at write time**: every save uses `0600`; dirs use `0700`. Never write config/vault/profile/audit files looser.
+- **Time fields set on mutate**: `Add`/`Save` set `CreatedAt`+`UpdatedAt` to `time.Now()`. `SaveStore` re-stamps `UpdatedAt` on every save (note: it overwrites all timestamps on every write).
+- **Uniqueness enforced**: provider slug (`Registry.Add`), profile name (`Store.Add`). Aliases must not collide (`Store.Validate`).
+- **JSON indent is inconsistent** today: config uses 1-space indent, registry/profile use 2-space. Match whatever the file you're editing already uses.
+- **IDs**: secret records use `key_` + 8 random hex bytes (`secret.NewID`).
+- **Provider IDs vs slugs**: `Provider` has both `ID` and `Slug`; defaults set them equal. Slugs are the user-facing key.
+
+---
+
+## Security invariants (do not violate)
+
+These are the project's core contracts (SPEC §6, §10). Violating any of them is a critical defect:
+
+1. **Never serialize the raw secret.** `SecretRecord.Secret` carries `json:"-"`. `Vault.Serialize()` rebuilds a Safe struct that omits it. When adding fields to `SecretRecord`, never give the `Secret` field a real JSON tag.
+2. **Display only masked values.** Everything shown to the user goes through `MaskedKeyItem` and `MaskSecret()` (`sk-or-v1-...91ef` style; secrets ≤8 chars → `<hidden>`). The TUI root may hold a decrypted vault session while unlocked for mutations/launch, but rendered views and child screen state must not expose raw secrets.
+3. **Redact all output** that might contain secrets via `security.Redact()` (bearer tokens, `api_key=`/`token=`/`secret=`/`password=`, and long `UPPER=value` env assignments) and `runner.BuildEnvString(..., redact=true)`. There is also `secret.RedactEnv`.
+4. **Audit log contains metadata only** — never key values. `audit.Event` has no secret field by design.
+5. **Child-process-scoped injection only.** `runner.Run` builds the child env and never exports to the parent shell. Preserve exit codes (it already does via `syscall.WaitStatus`).
+6. **Fail closed.** Decryption errors return wrapped errors (`OpenEnvelope` → "decryption failed (wrong password?)").
+
+### Known design detail in crypto (was a latent bug, now fixed)
+
+`internal/secret/crypto.go` `SealEnvelope` uses `block.Seal(nil, decodeB64(nonce), []byte(plaintext), nil)` — args in the correct `Seal(dst, nonce, plaintext, ad)` order. If you ever see this reverted to `Seal(nil, plaintext, nonce, ...)`, it's a bug (nonce/plaintext swapped).
+
+---
+
+## TUI notes (from TUI_GUIDE.md)
+
+- Stack: Bubble Tea v2 + Bubbles + Lip Gloss + Huh + Glamour, optional Fang over Cobra. All `charm.land/.../v2`.
+- Palette names in `styles.go`: Vault Gold (`214`), Iron Gray (`240`), Muted Blue (`39`), Signal Green (`46`), Warning Amber (`214`), Danger Red (`196`).
+- **Async rule**: all blocking I/O (vault unlock, doctor) must go through `tea.Cmd` returning a message — never call services synchronously in `Update`.
+- **TUI delegates business logic** to `internal/*`; TUI may orchestrate commands/messages but must use adapter/runner/secret/profile services for validation, launch prep, and persistence.
+- Status is never color-only: always include text (`✓ OK`, `! WARN`, `✗ FAIL`).
+- Child-process launches exit/suspend the TUI, run the child, then resume — do not run the child inside a viewport.
+- Global keys: `Tab`/`Shift+Tab` switch screens, `1`–`8` jump, `Ctrl+L` lock vault, `q`/`Ctrl+C` quit from dashboard (else back).
+
+---
+
+## Suggested next steps (post-MVP)
+
+These are now implemented; remaining work is polish and future features:
+
+- Add OS keyring integration for vault-key storage (SPEC §8 optional).
+- Add parser-backed TOML/XML merge/patch support for non-destructive existing config updates.
+- Add platform-specific doctor checks such as shell history scanning.
+- Add a `docs/future-work.md` (SPEC §27).
+- Add VHS demo tapes for the TUI (TUI_GUIDE §8).

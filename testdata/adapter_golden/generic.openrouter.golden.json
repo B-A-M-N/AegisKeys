@@ -1,0 +1,13 @@
+{
+  "app": "generic",
+  "command": "generic-smoke",
+  "env_keys": [
+    "OPENAI_BASE_URL",
+    "OPENAI_MODEL",
+    "OPENROUTER_API_KEY"
+  ],
+  "preview": [
+    "Profile: verify-generic",
+    "Provider: OpenRouter (openai)"
+  ]
+}

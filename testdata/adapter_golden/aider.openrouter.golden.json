@@ -1,0 +1,22 @@
+{
+  "app": "aider",
+  "command": "aider",
+  "args": [
+    "--env-file",
+    "/dev/null",
+    "--model",
+    "anthropic/claude-sonnet-4.5"
+  ],
+  "env_keys": [
+    "AIDER_OPENAI_API_BASE",
+    "OPENAI_BASE_URL",
+    "OPENROUTER_API_KEY"
+  ],
+  "preview": [
+    "Profile: verify-aider",
+    "Provider: OpenRouter (openai)"
+  ],
+  "hazards": [
+    "high:Aider loads .env files with override behavior"
+  ]
+}
