@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/crypto/argon2"
@@ -16,9 +17,9 @@ func TestMaskSecret(t *testing.T) {
 		{"", "<hidden>"},
 		{"abc", "<hidden>"},
 		{"12345678", "<hidden>"},
-		{"123456789", "1234...6789"},
-		{"sk-test-1234567890abcdef", "sk-t...cdef"},
-		{"sk-or-v1-abcdef1234567890", "sk-o...7890"},
+		{"123456789", "...6789"},
+		{"sk-test-1234567890abcdef", "...cdef"},
+		{"sk-or-v1-abcdef1234567890", "...7890"},
 	}
 	for _, c := range cases {
 		if got := MaskSecret(c.in); got != c.want {
@@ -38,7 +39,7 @@ func TestToMasked(t *testing.T) {
 	if m.ID != rec.ID {
 		t.Errorf("ID = %q, want %q", m.ID, rec.ID)
 	}
-	if m.MaskedSecret != "sk-1...cdef" {
+	if m.MaskedSecret != "...cdef" {
 		t.Errorf("MaskedSecret = %q, want %q", m.MaskedSecret, "sk-1...cdef")
 	}
 	if m.LastUsed != "never" {
@@ -374,5 +375,31 @@ func TestClampKDFParams(t *testing.T) {
 		if got != c.want {
 			t.Errorf("ClampKDFParams(%+v) = %+v, want %+v", c.in, got, c.want)
 		}
+	}
+}
+
+func TestSerialize_IncludesScratchPads(t *testing.T) {
+	v := &Vault{
+		Version: 2,
+		Keys: []SecretRecord{
+			{ID: "key_1", Label: "test", Secret: "sk-secret123", Kind: SecretAPIKey},
+		},
+		ScratchPads: []ScratchPadRecord{
+			{ID: "sp_1", Title: "notes", Kind: ScratchPadGeneral, Body: "secret billing notes"},
+		},
+	}
+	data, err := v.Serialize()
+	if err != nil {
+		t.Fatalf("Serialize: %v", err)
+	}
+	s := string(data)
+	if !strings.Contains(s, "scratch_pads") {
+		t.Error("Serialize must include scratch_pads section")
+	}
+	if !strings.Contains(s, "sp_1") {
+		t.Error("Serialize must include scratchpad IDs")
+	}
+	if strings.Contains(s, "sk-secret123") {
+		t.Error("Serialize must never contain raw secrets")
 	}
 }

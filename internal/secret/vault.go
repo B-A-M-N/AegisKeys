@@ -99,6 +99,16 @@ func migrateVaultRecords(v *Vault) {
 	for i := range v.Keys {
 		migrateSecretV1ToV2(&v.Keys[i])
 	}
+	// ScratchPads were added after launch; existing vaults have nil slices.
+	// Ensure a non-nil slice so callers can append without nil checks.
+	if v.ScratchPads == nil {
+		v.ScratchPads = []ScratchPadRecord{}
+	}
+	for i := range v.ScratchPads {
+		if v.ScratchPads[i].Kind == "" {
+			v.ScratchPads[i].Kind = ScratchPadGeneral
+		}
+	}
 }
 
 // withVaultWriteLock serializes vault writes so concurrent saves cannot
@@ -149,22 +159,37 @@ func loadVaultByKey(path string, key [32]byte) (*Vault, error) {
 	return v, nil
 }
 
-// mergeOnDiskKeys preserves keys that were committed by a concurrent save and
-// are not already present in the working set, preventing silent data loss.
-// The working set wins for matching IDs (it reflects the latest in-memory edit).
+// mergeOnDiskKeys preserves keys and scratchpads that were committed by a
+// concurrent save and are not already present in the working set, preventing
+// silent data loss. The working set wins for matching IDs (it reflects the
+// latest in-memory edit).
 func mergeOnDiskKeys(working *Vault, onDisk *Vault) *Vault {
 	if onDisk == nil {
 		return working
 	}
-	have := make(map[string]bool, len(working.Keys))
-	for _, k := range working.Keys {
-		have[k.ID] = true
+	keyHave := make(map[string]bool, len(working.Keys))
+	merged := &Vault{
+		Version:     working.Version,
+		Keys:        append([]SecretRecord{}, working.Keys...),
+		ScratchPads: append([]ScratchPadRecord{}, working.ScratchPads...),
 	}
-	merged := &Vault{Version: working.Version, Keys: append([]SecretRecord{}, working.Keys...)}
+	for _, k := range working.Keys {
+		keyHave[k.ID] = true
+	}
+	scratchHave := make(map[string]bool, len(working.ScratchPads))
+	for _, s := range working.ScratchPads {
+		scratchHave[s.ID] = true
+	}
 	for _, k := range onDisk.Keys {
-		if !have[k.ID] {
+		if !keyHave[k.ID] {
 			merged.Keys = append(merged.Keys, k)
-			have[k.ID] = true
+			keyHave[k.ID] = true
+		}
+	}
+	for _, s := range onDisk.ScratchPads {
+		if !scratchHave[s.ID] {
+			merged.ScratchPads = append(merged.ScratchPads, s)
+			scratchHave[s.ID] = true
 		}
 	}
 	return merged
@@ -374,6 +399,102 @@ func (v *Vault) Touch(id string) {
 	rec.LastUsedAt = &now
 }
 
+// ScratchPad CRUD ---------------------------------------------------------
+
+// AddScratchPad appends a new scratchpad, generating an ID and timestamps if
+// unset. Returns an error if a record with the same ID already exists.
+func (v *Vault) AddScratchPad(rec ScratchPadRecord) error {
+	if rec.ID == "" {
+		id, err := NewID()
+		if err != nil {
+			return fmt.Errorf("generate scratchpad id: %w", err)
+		}
+		rec.ID = id
+	}
+	for _, s := range v.ScratchPads {
+		if s.ID == rec.ID {
+			return fmt.Errorf("scratchpad %s already exists", rec.ID)
+		}
+	}
+	now := time.Now()
+	if rec.CreatedAt.IsZero() {
+		rec.CreatedAt = now
+	}
+	rec.UpdatedAt = now
+	if rec.Kind == "" {
+		rec.Kind = ScratchPadGeneral
+	}
+	v.ScratchPads = append(v.ScratchPads, rec)
+	return nil
+}
+
+// UpdateScratchPad applies a partial update to the scratchpad with the given
+// id. Empty/nil fields in update are ignored so callers can send only the
+// fields they intend to change.
+func (v *Vault) UpdateScratchPad(id string, update ScratchPadRecord) error {
+	rec := v.GetScratchPad(id)
+	if rec == nil {
+		return fmt.Errorf("scratchpad not found: %s", id)
+	}
+	if update.Title != "" {
+		rec.Title = update.Title
+	}
+	if update.Body != "" {
+		rec.Body = update.Body
+	}
+	if update.Kind != "" {
+		rec.Kind = update.Kind
+	}
+	if update.ProviderSlug != "" {
+		rec.ProviderSlug = update.ProviderSlug
+	}
+	if update.KeyID != "" {
+		rec.KeyID = update.KeyID
+	}
+	if update.Tags != nil {
+		rec.Tags = update.Tags
+	}
+	// Archived is a bool — explicit updates only. Callers must set the field.
+	rec.Archived = update.Archived
+	rec.UpdatedAt = time.Now()
+	return nil
+}
+
+// RemoveScratchPad deletes the scratchpad with the given id. Returns an error
+// if absent.
+func (v *Vault) RemoveScratchPad(id string) error {
+	for i := range v.ScratchPads {
+		if v.ScratchPads[i].ID == id {
+			v.ScratchPads = append(v.ScratchPads[:i], v.ScratchPads[i+1:]...)
+			return nil
+		}
+	}
+	return fmt.Errorf("scratchpad not found: %s", id)
+}
+
+// GetScratchPad returns a pointer to the scratchpad with the given ID, or nil.
+func (v *Vault) GetScratchPad(id string) *ScratchPadRecord {
+	for i := range v.ScratchPads {
+		if v.ScratchPads[i].ID == id {
+			return &v.ScratchPads[i]
+		}
+	}
+	return nil
+}
+
+// Key note helpers ----------------------------------------------------------
+
+// UpdateKeyPrivateNote sets the encrypted private note on a key record.
+func (v *Vault) UpdateKeyPrivateNote(id, note string) error {
+	rec := v.Get(id)
+	if rec == nil {
+		return fmt.Errorf("key not found: %s", id)
+	}
+	rec.PrivateNote = note
+	rec.UpdatedAt = time.Now()
+	return nil
+}
+
 func equalFold(a, b string) bool {
 	if len(a) != len(b) {
 		return false
@@ -406,8 +527,24 @@ func equalFold(a, b string) bool {
 // ---------------------------------------------------------------------------
 
 type vaultStore struct {
-	Version int                 `json:"version"`
-	Keys    []secretRecordStore `json:"keys"`
+	Version     int                 `json:"version"`
+	Keys        []secretRecordStore `json:"keys"`
+	ScratchPads []scratchPadStore   `json:"scratch_pads,omitempty"`
+}
+
+// scratchPadStore is the on-disk shape for a scratchpad. Like
+// secretRecordStore, it deliberately includes the encrypted Body field.
+type scratchPadStore struct {
+	ID           string    `json:"id"`
+	Kind         string    `json:"kind"`
+	Title        string    `json:"title"`
+	Body         string    `json:"body"`
+	ProviderSlug string    `json:"provider_slug,omitempty"`
+	KeyID        string    `json:"key_id,omitempty"`
+	Tags         []string  `json:"tags,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	Archived     bool      `json:"archived,omitempty"`
 }
 
 type secretRecordStore struct {
@@ -475,6 +612,20 @@ func toStore(v *Vault) vaultStore {
 			Policy:        k.Policy,
 		})
 	}
+	for _, s := range v.ScratchPads {
+		store.ScratchPads = append(store.ScratchPads, scratchPadStore{
+			ID:           s.ID,
+			Kind:         string(s.Kind),
+			Title:        s.Title,
+			Body:         s.Body,
+			ProviderSlug: s.ProviderSlug,
+			KeyID:        s.KeyID,
+			Tags:         s.Tags,
+			CreatedAt:    s.CreatedAt,
+			UpdatedAt:    s.UpdatedAt,
+			Archived:     s.Archived,
+		})
+	}
 	return store
 }
 
@@ -506,6 +657,20 @@ func fromStore(store *vaultStore) *Vault {
 			Exportable:    k.Exportable,
 			Archived:      k.Archived,
 			Policy:        k.Policy,
+		})
+	}
+	for _, s := range store.ScratchPads {
+		v.ScratchPads = append(v.ScratchPads, ScratchPadRecord{
+			ID:           s.ID,
+			Kind:         ScratchPadKind(s.Kind),
+			Title:        s.Title,
+			Body:         s.Body,
+			ProviderSlug: s.ProviderSlug,
+			KeyID:        s.KeyID,
+			Tags:         s.Tags,
+			CreatedAt:    s.CreatedAt,
+			UpdatedAt:    s.UpdatedAt,
+			Archived:     s.Archived,
 		})
 	}
 	return v

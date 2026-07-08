@@ -149,6 +149,32 @@ func (CrushAdapter) Render(p profile.Profile, prov provider.Provider, key *secre
 	}, nil
 }
 
+// RenderCatalog implements ProviderCatalogAdapter for Crush. It writes a
+// provider catalog containing metadata for all compatible providers and
+// injects env vars with the actual secrets.
+func (CrushAdapter) RenderCatalog(ctx ProviderCatalogRenderContext) (*LaunchStrategy, error) {
+	env, err := buildCatalogEnv(ctx.Profile, ctx.Providers, ctx.KeysByProvider)
+	if err != nil {
+		return nil, err
+	}
+
+	file := buildCrushCatalogConfig(ctx)
+
+	return &LaunchStrategy{
+		Plan: LaunchPlan{
+			Command: "crush",
+			Env:     env,
+			Files:   []FileWrite{file},
+			Preview: []string{
+				fmt.Sprintf("Launch %s with Crush", ctx.Profile.Name),
+				fmt.Sprintf("Write Crush provider catalog: %d providers", len(ctx.Providers)),
+				"Secrets remain env-only",
+			},
+		},
+		Support: CrushAdapter{}.Contract(),
+	}, nil
+}
+
 func buildCrushConfig(p profile.Profile, prov provider.Provider) FileWrite {
 	providers := map[string]any{
 		prov.Slug: map[string]any{
@@ -162,6 +188,70 @@ func buildCrushConfig(p profile.Profile, prov provider.Provider) FileWrite {
 		"providers": providers,
 		"options":   map[string]any{"disable_provider_auto_update": false},
 	}, "", "  ")
+	return FileWrite{
+		Path:         "$HOME/.config/crush/crush.json",
+		Format:       "json",
+		Content:      string(content),
+		Scope:        ScopeUser,
+		MergePolicy:  MergeJSON,
+		BackupPolicy: BackupRedacted,
+		RedactCheck:  true,
+		Description:  "Crush provider catalog; secrets remain env-only",
+	}
+}
+
+// buildCrushCatalogConfig writes a Crush provider catalog containing metadata
+// for all compatible providers. Secrets are NOT written here; they are
+// injected via env vars at launch time.
+func buildCrushCatalogConfig(ctx ProviderCatalogRenderContext) FileWrite {
+	modelProviders := map[string]any{}
+
+	for _, prov := range ctx.Providers {
+		entry := map[string]any{
+			"id":       prov.Slug,
+			"name":     prov.DisplayName(),
+			"base_url": prov.CanonicalBaseURL(),
+		}
+		// Only set api_key_env for providers that need a credential.
+		// Local/no-auth providers (Ollama) must not have any credential field.
+		if envVar := prov.CanonicalEnvVar(); envVar != "" {
+			entry["api_key_env"] = envVar
+		}
+
+		switch prov.Compatibility {
+		case provider.CompatOpenAI, provider.CompatLocal:
+			entry["type"] = "openai-compatible"
+		case provider.CompatAnthropic:
+			entry["type"] = "anthropic"
+		default:
+			entry["type"] = string(prov.Compatibility)
+		}
+
+		if len(prov.Models) > 0 {
+			models := make([]string, 0, len(prov.Models))
+			for _, m := range prov.Models {
+				models = append(models, m.ID)
+			}
+			entry["models"] = models
+		}
+
+		modelProviders[prov.Slug] = entry
+	}
+
+	cfg := map[string]any{
+		"model_providers": modelProviders,
+		"options":         map[string]any{"disable_provider_auto_update": false},
+	}
+
+	if ctx.SelectedProvider.Slug != "" {
+		cfg["default_provider"] = ctx.SelectedProvider.Slug
+	}
+	if ctx.Profile.ModelID() != "" {
+		cfg["default_model"] = ctx.Profile.ModelID()
+	}
+
+	content, _ := json.MarshalIndent(cfg, "", "  ")
+
 	return FileWrite{
 		Path:         "$HOME/.config/crush/crush.json",
 		Format:       "json",
@@ -637,6 +727,35 @@ func (QwenCodeAdapter) Render(p profile.Profile, prov provider.Provider, key *se
 	}, nil
 }
 
+// RenderCatalog implements ProviderCatalogAdapter for Qwen Code. It writes
+// all compatible providers into the modelProviders section of settings.json,
+// grouped by auth type. Each provider references its API key via envKey; the
+// actual secrets are injected via env vars at launch time.
+func (QwenCodeAdapter) RenderCatalog(ctx ProviderCatalogRenderContext) (*LaunchStrategy, error) {
+	env, err := buildCatalogEnv(ctx.Profile, ctx.Providers, ctx.KeysByProvider)
+	if err != nil {
+		return nil, err
+	}
+
+	files := []FileWrite{
+		buildQwenCatalogConfig(ctx),
+	}
+
+	return &LaunchStrategy{
+		Plan: LaunchPlan{
+			Command: "qwen",
+			Env:     env,
+			Files:   files,
+			Preview: []string{
+				fmt.Sprintf("Launch %s with Qwen Code", ctx.Profile.Name),
+				fmt.Sprintf("Write Qwen Code modelProviders: %d providers", len(ctx.Providers)),
+				"Secrets remain env-only via envKey references",
+			},
+		},
+		Support: QwenCodeAdapter{}.Contract(),
+	}, nil
+}
+
 func buildQwenConfig(p profile.Profile, prov provider.Provider) FileWrite {
 	modelID := ""
 	if p.Models.Main != nil {
@@ -669,6 +788,97 @@ func buildQwenConfig(p profile.Profile, prov provider.Provider) FileWrite {
 				"models":   models,
 			},
 		},
+	}, "", "  ")
+	return FileWrite{
+		Path:         "$HOME/.qwen/settings.json",
+		Format:       "json",
+		Content:      string(content),
+		Scope:        ScopeUser,
+		MergePolicy:  MergeJSON,
+		BackupPolicy: BackupRedacted,
+		RedactCheck:  true,
+		Description:  "Qwen Code modelProviders catalog; secrets remain env-only",
+	}
+}
+
+// qwenAuthType maps a provider's compatibility mode to Qwen Code's auth type key.
+// Keys must be valid Qwen Code auth types; unknown types silently fail.
+func qwenAuthType(compat provider.CompatibilityMode) string {
+	switch compat {
+	case provider.CompatOpenAI, provider.CompatLocal:
+		return "openai"
+	case provider.CompatAnthropic:
+		return "anthropic"
+	case provider.CompatGoogle:
+		return "gemini"
+	default:
+		return "openai"
+	}
+}
+
+// buildQwenCatalogConfig writes ALL compatible providers into Qwen Code's
+// modelProviders section, grouped by auth type. Each provider becomes a model
+// entry referencing its API key via envKey. Secrets are NOT written — they are
+// injected via env vars at launch time.
+//
+// Gotchas handled:
+//   - Duplicate (id + baseUrl) are deduped within each auth type (first wins).
+//   - generationConfig is a sealed package per provider — all fields included.
+//   - Auth type keys must be valid Qwen Code values (openai, anthropic, gemini).
+func buildQwenCatalogConfig(ctx ProviderCatalogRenderContext) FileWrite {
+	// Group providers by auth type.
+	byAuthType := map[string][]provider.Provider{}
+	for _, prov := range ctx.Providers {
+		authType := qwenAuthType(prov.Compatibility)
+		byAuthType[authType] = append(byAuthType[authType], prov)
+	}
+
+	modelProviders := map[string]any{}
+	for authType, providers := range byAuthType {
+		// Dedup by id + baseUrl within same auth type (first wins).
+		seen := map[string]bool{}
+		models := []map[string]any{}
+		for _, prov := range providers {
+			// Use slug as the model id (unique per provider in our registry).
+			// Append baseUrl to create uniqueness when multiple providers
+			// share the same slug (unlikely but safe).
+			key := prov.Slug + "|" + prov.CanonicalBaseURL()
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+
+			entry := map[string]any{
+				"id":      prov.Slug,
+				"name":    prov.DisplayName(),
+				"baseUrl": prov.CanonicalBaseURL(),
+			}
+			// Only set envKey for providers that need a credential.
+			// Local/no-auth providers must not carry a fake credential field.
+			if envVar := prov.CanonicalEnvVar(); envVar != "" {
+				entry["envKey"] = envVar
+			}
+			entry["generationConfig"] = map[string]any{
+				"timeout":           120000,
+				"maxRetries":        3,
+				"contextWindowSize": 128000,
+				"samplingParams": map[string]any{
+					"temperature": 0.2,
+					"max_tokens":  8192,
+				},
+			}
+			models = append(models, entry)
+		}
+		if len(models) > 0 {
+			modelProviders[authType] = map[string]any{
+				"protocol": authType,
+				"models":   models,
+			}
+		}
+	}
+
+	content, _ := json.MarshalIndent(map[string]any{
+		"modelProviders": modelProviders,
 	}, "", "  ")
 	return FileWrite{
 		Path:         "$HOME/.qwen/settings.json",
@@ -1358,6 +1568,53 @@ func buildBaseEnv(_ profile.Profile, prov provider.Provider, key *secret.SecretR
 	for k, v := range prov.ExtraEnv {
 		if looksSecretName(k) {
 			return nil, fmt.Errorf("provider %q ExtraEnv %q looks secret; store it as a key", prov.Slug, k)
+		}
+		env[k] = v
+	}
+
+	return env, nil
+}
+
+// buildCatalogEnv injects one env var per catalog provider that has a key.
+// Config-file apps (Crush, OpenCode, MiMo) reference these env var names
+// in their provider catalog; the actual secrets stay out of the config file.
+func buildCatalogEnv(
+	p profile.Profile,
+	providers []provider.Provider,
+	keys map[string]*secret.SecretRecord,
+) (map[string]string, error) {
+	env := make(map[string]string)
+
+	for _, prov := range providers {
+		envName := prov.CanonicalEnvVar()
+		if envName == "" {
+			continue // local/no-auth provider
+		}
+
+		key := keys[prov.Slug]
+		if key == nil {
+			continue
+		}
+
+		if err := key.AllowAccess(secret.AccessInjectEnv); err != nil {
+			return nil, fmt.Errorf("key %s cannot be launch-injected: %w", key.ID, err)
+		}
+
+		// Prevent two providers from fighting over the same env var with different values.
+		if existing, ok := env[envName]; ok && existing != key.Secret {
+			return nil, fmt.Errorf(
+				"providers share env var %s with different keys; give them unique env vars",
+				envName,
+			)
+		}
+
+		env[envName] = key.Secret
+	}
+
+	// Allow non-secret profile env only.
+	for k, v := range p.Env {
+		if looksSecretName(k) {
+			return nil, fmt.Errorf("profile env %q looks credential-like; store it as a key", k)
 		}
 		env[k] = v
 	}

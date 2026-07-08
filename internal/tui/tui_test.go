@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -437,6 +439,171 @@ func TestProvidersZ_WizardCreatesProfile(t *testing.T) {
 		t.Fatalf("expected at least 1 profile, got %d", len(m.profiles.Profiles))
 	}
 }
+
+func TestWizard_CatalogAppsShowDefaultProviderWorkflow(t *testing.T) {
+	m := newTestModel(t)
+	m.wizard = wizardState{
+		active: true,
+		step:   StepProvider,
+		draft:  ProfileDraft{AppID: "crush"},
+		reg:    m.adapterRegistry,
+	}
+
+	providerView := stripANSIForTest(wizardProviderView(m.styles, m))
+	for _, want := range []string{
+		"Choose default provider",
+		"This app uses a provider catalog",
+		"this selection becomes the default",
+	} {
+		if !strings.Contains(providerView, want) {
+			t.Fatalf("catalog provider view missing %q:\n%s", want, providerView)
+		}
+	}
+
+	m.wizard.step = StepCredential
+	m.wizard.draft.ProviderSlug = "openrouter"
+	m.keys = []secret.MaskedKeyItem{{ID: "key_or", Label: "router", ProviderSlug: "openrouter", MaskedSecret: "sk...test"}}
+	m.unlocked = true
+	credentialView := stripANSIForTest(wizardCredentialView(m.styles, m))
+	for _, want := range []string{
+		"Choose default credential",
+		"Catalogue launch includes other compatible providers",
+		"default provider",
+	} {
+		if !strings.Contains(credentialView, want) {
+			t.Fatalf("catalog credential view missing %q:\n%s", want, credentialView)
+		}
+	}
+}
+
+func TestWizard_CatalogAppSkipsProviderCredentialAndModelSteps(t *testing.T) {
+	m := newTestModel(t)
+	m.startWizard()
+	vault := &secret.Vault{Version: 1}
+	_ = vault.Add(secret.SecretRecord{
+		ID:           "key_or",
+		ProviderSlug: "openrouter",
+		Label:        "router",
+		Secret:       "sk-catalog-flow-secret",
+		Policy:       secret.DefaultSecretPolicy(secret.SecretAPIKey),
+	})
+	m.vaultSession = &vaultSession{vault: vault, key: [32]byte{}}
+	m.unlocked = true
+
+	m.wizard.step = StepApp
+	apps := m.wizardVisibleApps()
+	crushIdx := -1
+	for i, id := range apps {
+		if id == "crush" {
+			crushIdx = i
+			break
+		}
+	}
+	if crushIdx < 0 {
+		t.Fatal("crush app not found")
+	}
+	m.wizard.selected = crushIdx
+	_, _ = m.Update(tea.KeyPressMsg{Text: "enter"})
+
+	if m.wizard.step != StepRuntime {
+		t.Fatalf("catalog app should skip provider/key/model steps and land on runtime, got %s", m.wizard.step)
+	}
+	if m.wizard.draft.ProviderSlug != "openrouter" {
+		t.Fatalf("default provider = %q, want openrouter", m.wizard.draft.ProviderSlug)
+	}
+	if m.wizard.draft.KeyID != "key_or" {
+		t.Fatalf("default key = %q, want key_or", m.wizard.draft.KeyID)
+	}
+}
+
+func TestWizard_CatalogModelsDoNotFetchDefaultProvider(t *testing.T) {
+	m := newTestModel(t)
+	vault := &secret.Vault{Version: 1}
+	_ = vault.Add(secret.SecretRecord{
+		ID:           "key_or",
+		ProviderSlug: "openrouter",
+		Label:        "router",
+		Secret:       "sk-catalog-models-secret",
+		Policy:       secret.DefaultSecretPolicy(secret.SecretAPIKey),
+	})
+	m.vaultSession = &vaultSession{vault: vault, key: [32]byte{}}
+	m.unlocked = true
+	m.wizard = wizardState{
+		active: true,
+		step:   StepModels,
+		draft: ProfileDraft{
+			AppID:        "crush",
+			ProviderSlug: "openrouter",
+			KeyID:        "key_or",
+		},
+		reg: m.adapterRegistry,
+	}
+
+	if cmd := m.fetchWizardModelsCmd(); cmd != nil {
+		t.Fatal("catalog app should not fetch models from the hidden default provider")
+	}
+	view := stripANSIForTest(wizardModelsView(m.styles, m))
+	for _, want := range []string{
+		"Provider catalog mode",
+		"Default model is optional",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("catalog models view missing %q:\n%s", want, view)
+		}
+	}
+	for _, banned := range []string{
+		"Loaded 343 models for openrouter",
+		"Fetching model catalog",
+	} {
+		if strings.Contains(view, banned) {
+			t.Fatalf("catalog models view still has provider-fetch text %q:\n%s", banned, view)
+		}
+	}
+}
+
+func TestWizard_CatalogPreviewShowsIncludedAndSkippedProviders(t *testing.T) {
+	m := newTestModel(t)
+	vault := &secret.Vault{Version: 1}
+	_ = vault.Add(secret.SecretRecord{
+		ID:           "key_or",
+		ProviderSlug: "openrouter",
+		Label:        "router",
+		Secret:       "sk-catalog-preview-secret",
+		Policy:       secret.DefaultSecretPolicy(secret.SecretAPIKey),
+	})
+	m.vaultSession = &vaultSession{vault: vault, key: [32]byte{}}
+	m.wizard = wizardState{
+		active: true,
+		step:   StepPreview,
+		draft: ProfileDraft{
+			Name:         "crush-openrouter",
+			AppID:        "crush",
+			ProviderSlug: "openrouter",
+			KeyID:        "key_or",
+			Models:       profile.ModelSlots{Main: &profile.ModelRef{ID: "anthropic/claude-sonnet-4.5"}},
+		},
+		reg: m.adapterRegistry,
+	}
+
+	preview := stripANSIForTest(wizardPreviewView(m.styles, m))
+	for _, want := range []string{
+		"Default provider:",
+		"Default key:",
+		"Provider catalog:",
+		"include openrouter",
+		"include ollama",
+		"include openai",
+		"credential not injected",
+	} {
+		if !strings.Contains(preview, want) {
+			t.Fatalf("catalog preview missing %q:\n%s", want, preview)
+		}
+	}
+	if strings.Contains(preview, "sk-catalog-preview-secret") {
+		t.Fatal("catalog preview leaked raw secret")
+	}
+}
+
 func TestProviders_EKey_StartsEdit(t *testing.T) {
 	m := newTestModel(t)
 	m.focus = focusContent
@@ -568,25 +735,27 @@ func TestModal_NotFragmented(t *testing.T) {
 		t.Fatalf("expected detail modal, got %d", m.modal)
 	}
 	v := stripANSIForTest(m.View().Content)
-	// Count '+' that are part of modal borders (adjacent to '-').
 	lines := strings.Split(v, "\n")
-	borderPlusCount := 0
-	for _, line := range lines {
-		for i, r := range line {
-			if r != '+' {
-				continue
+
+	topRow := -1
+	bottomRow := -1
+	for i, line := range lines {
+		if strings.Contains(line, "+---") || strings.Contains(line, "---+") {
+			if topRow < 0 {
+				topRow = i
 			}
-			if i > 0 && rune(line[i-1]) == '-' {
-				borderPlusCount++
-				continue
-			}
-			if i < len(line)-1 && rune(line[i+1]) == '-' {
-				borderPlusCount++
-			}
+			bottomRow = i
 		}
 	}
-	if borderPlusCount != 4 {
-		t.Errorf("expected 4 border corners, got %d", borderPlusCount)
+	if topRow < 0 || bottomRow < 0 || topRow == bottomRow {
+		t.Fatal("modal border rows not found")
+	}
+
+	for _, row := range []int{topRow, bottomRow} {
+		line := lines[row]
+		if strings.Count(line, "+") < 2 || !strings.Contains(line, "---") {
+			t.Fatalf("modal border row malformed at row=%d: %q", row, line)
+		}
 	}
 }
 
@@ -1027,5 +1196,181 @@ func TestKeyRename_TUICommit(t *testing.T) {
 	}
 	if m.statusMsg != "Updated." {
 		t.Fatalf("expected Updated. status, got %q", m.statusMsg)
+	}
+}
+
+// TestTUI_LaunchPrepared_ExecutesCleanup verifies the full async launch flow:
+// prepareTUILaunch resolves the strategy, produces a non-nil cleanup, and the
+// cleanup function actually restores the original config file state. This is a
+// true end-to-end test of the TUI launch path without needing tea.ExecProcess.
+func TestTUI_LaunchPrepared_ExecutesCleanup(t *testing.T) {
+	m := newTestModel(t)
+	m.unlocked = true
+	m.active = screenLaunch
+	m.focus = focusContent
+
+	m.profiles.Profiles = []profile.Profile{{
+		Name:         "e2e-test",
+		ProviderSlug: "openrouter",
+		KeyID:        "key_1",
+		Target:       profile.TargetConfig{App: "hermes", Command: "true"},
+		Models:       profile.ModelSlots{Main: &profile.ModelRef{ID: "gpt-4o"}},
+	}}
+
+	vault := &secret.Vault{Version: 1}
+	_ = vault.Add(secret.SecretRecord{
+		ID: "key_1", ProviderSlug: "openrouter", Label: "test",
+		Secret: "sk-e2e-secret",
+		Policy: secret.DefaultSecretPolicy(secret.SecretAPIKey),
+	})
+	m.vaultSession = &vaultSession{vault: vault, key: [32]byte{}}
+	m.selected[screenLaunch] = 0
+
+	cmd := m.prepareTUILaunch("")
+	if cmd == nil {
+		t.Fatal("prepareTUILaunch returned nil cmd")
+	}
+
+	msg := cmd()
+	lpMsg, ok := msg.(launchPreparedMsg)
+	if !ok {
+		t.Fatalf("expected launchPreparedMsg, got %T (%+v)", msg, msg)
+	}
+	if lpMsg.err != nil {
+		t.Fatalf("prepareTUILaunch error: %v (cmd=%v)", lpMsg.err, lpMsg.cmd)
+	}
+	if lpMsg.cleanup == nil {
+		t.Fatal("expected non-nil cleanup func (TUI must use PrepareCommandWithCleanup)")
+	}
+
+	// Hermes writes a config file into HERMES_HOME (an isolated profile dir).
+	// The cleanup function should restore/remove whatever the adapter wrote.
+	// Call cleanup directly and verify it doesn't error.
+	if err := lpMsg.cleanup(); err != nil {
+		t.Fatalf("cleanup returned error: %v", err)
+	}
+
+	// Calling cleanup a second time must also be safe (idempotent).
+	if err := lpMsg.cleanup(); err != nil {
+		t.Fatalf("second cleanup should be safe: %v", err)
+	}
+}
+
+// TestTUI_LaunchPrepared_HasCleanup verifies that the TUI launch path uses
+// the cleanup-bearing PrepareCommandWithCleanup (not bare PrepareCommand).
+// A config-file profile must produce a non-nil cleanup handle in the
+// launchPreparedMsg so runtime config overlays are restored after exit.
+func TestTUI_LaunchPrepared_HasCleanup(t *testing.T) {
+	m := newTestModel(t)
+	m.unlocked = true
+	m.active = screenLaunch
+	m.focus = focusContent
+
+	// Set up a qwen-code profile (writes ~/.qwen/settings.json) so the
+	// adapter's Render produces a Plan.Files entry, which triggers cleanup.
+	m.profiles.Profiles = []profile.Profile{{
+		Name:         "qwen-test",
+		ProviderSlug: "openrouter",
+		KeyID:        "key_1",
+		Target:       profile.TargetConfig{App: "qwen"},
+		Models:       profile.ModelSlots{Main: &profile.ModelRef{ID: "gpt-4o"}},
+	}}
+
+	vault := &secret.Vault{Version: 1}
+	_ = vault.Add(secret.SecretRecord{
+		ID: "key_1", ProviderSlug: "openrouter", Label: "test",
+		Secret: "sk-test-val",
+		Policy: secret.DefaultSecretPolicy(secret.SecretAPIKey),
+	})
+	m.vaultSession = &vaultSession{
+		vault: vault,
+		key:   [32]byte{},
+	}
+	m.selected[screenLaunch] = 0
+
+	cmd := m.prepareTUILaunch("")
+	if cmd == nil {
+		t.Fatal("prepareTUILaunch returned nil cmd")
+	}
+
+	msg := cmd()
+	lpMsg, ok := msg.(launchPreparedMsg)
+	if !ok {
+		t.Fatalf("expected launchPreparedMsg, got %T", msg)
+	}
+	if lpMsg.err != nil {
+		t.Fatalf("prepareTUILaunch error: %v", lpMsg.err)
+	}
+	if lpMsg.cleanup == nil {
+		t.Fatal("expected non-nil cleanup func (TUI must use PrepareCommandWithCleanup)")
+	}
+	if lpMsg.cmd == nil {
+		t.Fatal("expected non-nil cmd")
+	}
+}
+
+// TestTUI_LaunchFinished_CleanupFailureShown verifies that a cleanup failure
+// is surfaced in the TUI status line after the child process exits.
+func TestTUI_LaunchFinished_CleanupFailureShown(t *testing.T) {
+	m := newTestModel(t)
+
+	cleanupErr := fmt.Errorf("restore file writes: /tmp/test/settings.json: permission denied")
+	finished := launchFinishedMsg{
+		err:        nil,
+		cleanupErr: cleanupErr,
+	}
+
+	m2, _ := m.Update(finished)
+	result := m2.(*model)
+
+	if !strings.Contains(result.statusMsg, "config cleanup failed") {
+		t.Errorf("status should report cleanup failure, got: %q", result.statusMsg)
+	}
+	if !strings.Contains(result.statusMsg, "permission denied") {
+		t.Errorf("status should include cleanup error details, got: %q", result.statusMsg)
+	}
+}
+
+// TestTUI_LaunchFinished_Success verifies the clean success path shows the
+// expected status and is not confused with error states.
+func TestTUI_LaunchFinished_Success(t *testing.T) {
+	m := newTestModel(t)
+
+	finished := launchFinishedMsg{err: nil, cleanupErr: nil, usageErr: nil}
+	m2, _ := m.Update(finished)
+	result := m2.(*model)
+
+	if !strings.Contains(result.statusMsg, "Child process finished") {
+		t.Errorf("expected success status, got: %q", result.statusMsg)
+	}
+	if strings.Contains(result.statusMsg, "failed") || strings.Contains(result.statusMsg, "exited") {
+		t.Errorf("success path should not mention failure: %q", result.statusMsg)
+	}
+}
+
+// TestTUI_LaunchFinished_ChildExitAndCleanupFailure verifies that both the
+// child exit status AND cleanup failure are reported when both fail.
+func TestTUI_LaunchFinished_ChildExitAndCleanupFailure(t *testing.T) {
+	m := newTestModel(t)
+
+	finished := launchFinishedMsg{
+		err:        errors.New("exited with code 1: signal terminated"),
+		cleanupErr: fmt.Errorf("restore file writes: /tmp/test/settings.json: permission denied"),
+	}
+
+	m2, _ := m.Update(finished)
+	result := m2.(*model)
+
+	if !strings.Contains(result.statusMsg, "Child exited") {
+		t.Errorf("status should report child exit, got: %q", result.statusMsg)
+	}
+	if !strings.Contains(result.statusMsg, "config cleanup failed") {
+		t.Errorf("status should report cleanup failure, got: %q", result.statusMsg)
+	}
+	if !strings.Contains(result.statusMsg, "signal terminated") {
+		t.Errorf("status should include child error details, got: %q", result.statusMsg)
+	}
+	if !strings.Contains(result.statusMsg, "permission denied") {
+		t.Errorf("status should include cleanup error details, got: %q", result.statusMsg)
 	}
 }

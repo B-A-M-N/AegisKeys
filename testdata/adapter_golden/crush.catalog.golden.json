@@ -1,0 +1,23 @@
+{
+  "app": "crush",
+  "command": "crush",
+  "env_keys": [
+    "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY"
+  ],
+  "files": [
+    {
+      "path": "$HOME/.config/crush/crush.json",
+      "format": "json",
+      "scope": "user",
+      "merge_policy": "json_merge",
+      "description": "Crush provider catalog; secrets remain env-only"
+    }
+  ],
+  "preview": [
+    "Launch catalog-crush with Crush",
+    "Write Crush provider catalog: 3 providers",
+    "Secrets remain env-only"
+  ],
+  "config_body": "{\n  \"default_model\": \"anthropic/claude-sonnet-4.5\",\n  \"default_provider\": \"openrouter\",\n  \"model_providers\": {\n    \"ollama\": {\n      \"base_url\": \"http://localhost:11434/v1\",\n      \"id\": \"ollama\",\n      \"models\": [\n        \"qwen2.5-coder\"\n      ],\n      \"name\": \"Ollama\",\n      \"type\": \"openai-compatible\"\n    },\n    \"openai\": {\n      \"api_key_env\": \"OPENAI_API_KEY\",\n      \"base_url\": \"https://api.openai.com/v1\",\n      \"id\": \"openai\",\n      \"models\": [\n        \"gpt-4o\"\n      ],\n      \"name\": \"OpenAI\",\n      \"type\": \"openai-compatible\"\n    },\n    \"openrouter\": {\n      \"api_key_env\": \"OPENROUTER_API_KEY\",\n      \"base_url\": \"https://openrouter.ai/api/v1\",\n      \"id\": \"openrouter\",\n      \"models\": [\n        \"anthropic/claude-sonnet-4.5\"\n      ],\n      \"name\": \"OpenRouter\",\n      \"type\": \"openai-compatible\"\n    }\n  },\n  \"options\": {\n    \"disable_provider_auto_update\": false\n  }\n}"
+}

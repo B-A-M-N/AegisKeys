@@ -407,7 +407,7 @@ func (m *model) commitWizardModels() error {
 		if val == "" {
 			val = slot.Default
 		}
-		if val == "" && !slot.Optional {
+		if val == "" && !slot.Optional && !m.wizardUsesProviderCatalog() {
 			return fmt.Errorf("required model slot %q is empty", slot.Name)
 		}
 		if val == "" {
@@ -520,6 +520,12 @@ func (m *model) wizardAdvance() (tea.Model, tea.Cmd) {
 				if _, ok := m.adapterRegistry.Get(id); ok {
 					if idx == m.wizard.selected {
 						m.wizard.draft.AppID = id
+						if m.wizardUsesProviderCatalog() {
+							if err := m.selectWizardCatalogDefault(); err != nil {
+								m.wizard.errMsg = err.Error()
+								return m, nil
+							}
+						}
 						return m, m.enterWizardStep(m.wizard.NextStep())
 					}
 					idx++
@@ -721,6 +727,10 @@ func (m *model) enterWizardStep(step WizardStep) tea.Cmd {
 		// across provider changes.
 		m.wizard.fetchedModels = nil
 		m.wizard.fetchingModels = false
+		if m.wizardUsesProviderCatalog() {
+			m.statusMsg = "Provider catalog mode: default provider selected automatically."
+			return nil
+		}
 		// If the provider is dynamic and we have a key in the vault session,
 		// kick off a live fetch in the background.
 		if cmd := m.fetchWizardModelsCmd(); cmd != nil {
@@ -750,13 +760,17 @@ func (m *model) enterWizardStep(step WizardStep) tea.Cmd {
 // for the wizard's selected provider, or nil if the provider is not dynamic
 // or no API key is available.
 func (m *model) fetchWizardModelsCmd() tea.Cmd {
+	if m.wizardUsesProviderCatalog() {
+		return nil
+	}
 	prov := m.providers.Find(m.wizard.draft.ProviderSlug)
 	if prov == nil {
 		return nil
 	}
-	// Only fetch for dynamic/refreshable providers.
-	if prov.ModelPolicy.Source != provider.ModelSourceDynamic &&
-		prov.Catalog.Source != "dynamic" {
+	// Fetch for any provider that can refresh its model catalog — including
+	// static-configured providers that expose a refresh endpoint. Static models
+	// are the configured allowlist; the refresh URL is the discovery source.
+	if !prov.CanRefreshModels() {
 		return nil
 	}
 	// We need an unlocked vault to resolve the key secret.

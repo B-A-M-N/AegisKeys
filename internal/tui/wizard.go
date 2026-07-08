@@ -111,19 +111,27 @@ type wizardState struct {
 // NextStep derives the next step from the draft + app contract.
 func (w *wizardState) NextStep() WizardStep {
 	c := adapter.AppSupportContract{}
+	usesCatalog := false
 	if a, ok := w.reg.Get(w.draft.AppID); ok {
 		c = a.Contract()
+		_, usesCatalog = a.(adapter.ProviderCatalogAdapter)
 	}
 
 	switch w.step {
 	case StepIntent:
 		if w.draft.AppID != "" {
+			if usesCatalog {
+				return StepRuntime
+			}
 			return StepProvider
 		}
 		return StepApp
 
 	case StepApp:
 		// Skip surface selection for now (most apps have one surface).
+		if usesCatalog {
+			return StepRuntime
+		}
 		return StepProvider
 
 	case StepProvider:
@@ -166,6 +174,10 @@ func (w *wizardState) NextStep() WizardStep {
 
 // PrevStep returns the previous step.
 func (w *wizardState) PrevStep() WizardStep {
+	usesCatalog := false
+	if a, ok := w.reg.Get(w.draft.AppID); ok {
+		_, usesCatalog = a.(adapter.ProviderCatalogAdapter)
+	}
 	switch w.step {
 	case StepApp:
 		return StepIntent
@@ -177,11 +189,17 @@ func (w *wizardState) PrevStep() WizardStep {
 	case StepCredential:
 		return StepProvider
 	case StepModels:
+		if usesCatalog {
+			return StepApp
+		}
 		if _, ok := w.reg.Get(w.draft.AppID); ok {
 			return StepProvider
 		}
 		return StepProvider
 	case StepRuntime:
+		if usesCatalog {
+			return StepApp
+		}
 		return StepModels
 	case StepHazards:
 		return StepRuntime
@@ -256,7 +274,7 @@ var appGroups = []appGroup{
 	{
 		title:       "FULL ENV / CLI",
 		description: "AegisKeys injects secrets and launches",
-		adapterIDs:  []string{"aider", "hermes", "crush", "qwen", "claude", "cline", "goose", "vibe", "mimo", "openhands", "gemini", "copilot", "continue"},
+		adapterIDs:  []string{"aider", "hermes", "crush", "qwen", "claude", "cline", "goose", "vibe", "codex", "mimo", "opencode", "openhands", "gemini", "copilot", "continue"},
 	},
 	{
 		title:       "ADVANCED GUI / IDE",
@@ -352,6 +370,8 @@ func appConfigDir(appID string) string {
 		return filepath.Join(home, ".config", "goose")
 	case "vibe":
 		return filepath.Join(home, ".vibe")
+	case "opencode":
+		return filepath.Join(home, ".config", "opencode")
 	case "zed":
 		return filepath.Join(home, ".config", "zed")
 	case "intellij":
@@ -398,9 +418,122 @@ func (m *model) supportBadge(appID string) string {
 		case adapter.SupportManualCredential:
 			mode = "MANUAL"
 		}
+		if _, ok := a.(adapter.ProviderCatalogAdapter); ok {
+			mode = "CATALOG"
+		}
 		return fmt.Sprintf("%s/%s", mode, adapter.DemotedConfidence(c))
 	}
 	return "CUSTOM"
+}
+
+// wizardUsesProviderCatalog reports whether the selected app renders a
+// multi-provider catalog instead of a single provider-only launch config.
+func (m *model) wizardUsesProviderCatalog() bool {
+	a, ok := m.adapterRegistry.Get(m.wizard.draft.AppID)
+	if !ok || a == nil {
+		return false
+	}
+	_, ok = a.(adapter.ProviderCatalogAdapter)
+	return ok
+}
+
+type wizardCatalogProviderStatus struct {
+	Name     string
+	Slug     string
+	Included bool
+	Reason   string
+}
+
+// wizardCatalogProviderStatuses mirrors the catalog resolver's inclusion rules
+// without exposing secret values: compatible local/no-auth providers are
+// included, compatible keyed providers are included when an injectable key is
+// present, and everything else is shown as skipped with a reason.
+func (m *model) wizardCatalogProviderStatuses() []wizardCatalogProviderStatus {
+	a, ok := m.adapterRegistry.Get(m.wizard.draft.AppID)
+	if !ok || a == nil {
+		return nil
+	}
+	out := make([]wizardCatalogProviderStatus, 0, len(m.providers.Providers))
+	for i := range m.providers.Providers {
+		prov := m.providers.Providers[i]
+		prov.Normalize()
+		status := wizardCatalogProviderStatus{
+			Name: prov.DisplayName(),
+			Slug: prov.Slug,
+		}
+		if !a.SupportsProvider(prov) {
+			status.Reason = "unsupported provider type"
+			out = append(out, status)
+			continue
+		}
+		if !prov.NeedsKey() {
+			status.Included = true
+			status.Reason = "local/no credential"
+			out = append(out, status)
+			continue
+		}
+		if m.wizardHasInjectableKey(prov.Slug) {
+			status.Included = true
+			status.Reason = "credential available"
+		} else {
+			status.Included = true
+			status.Reason = "credential not injected"
+		}
+		out = append(out, status)
+	}
+	return out
+}
+
+func (m *model) wizardHasInjectableKey(providerSlug string) bool {
+	return m.wizardFirstInjectableKeyID(providerSlug) != ""
+}
+
+func (m *model) wizardFirstInjectableKeyID(providerSlug string) string {
+	if m.vaultSession != nil && m.vaultSession.vault != nil {
+		for i := range m.vaultSession.vault.Keys {
+			rec := &m.vaultSession.vault.Keys[i]
+			if rec.ProviderSlug == providerSlug && rec.AllowAccess(secret.AccessInjectEnv) == nil {
+				return rec.ID
+			}
+		}
+		return ""
+	}
+	return ""
+}
+
+func (m *model) selectWizardCatalogDefault() error {
+	a, ok := m.adapterRegistry.Get(m.wizard.draft.AppID)
+	if !ok || a == nil {
+		return fmt.Errorf("adapter %q is not registered", m.wizard.draft.AppID)
+	}
+
+	var localDefault string
+	for i := range m.providers.Providers {
+		prov := m.providers.Providers[i]
+		prov.Normalize()
+		if !a.SupportsProvider(prov) {
+			continue
+		}
+		if !prov.NeedsKey() {
+			if localDefault == "" {
+				localDefault = prov.Slug
+			}
+			continue
+		}
+		if keyID := m.wizardFirstInjectableKeyID(prov.Slug); keyID != "" {
+			m.wizard.draft.ProviderSlug = prov.Slug
+			m.wizard.draft.KeyID = keyID
+			return nil
+		}
+	}
+
+	if localDefault != "" {
+		m.wizard.draft.ProviderSlug = localDefault
+		m.wizard.draft.KeyID = ""
+		return nil
+	}
+
+	return fmt.Errorf("No launch-ready providers for this catalog. Unlock the vault and add a key for a compatible provider, or add a local/no-key provider.")
 }
 
 // wizardVisibleKeys returns keys matching the selected provider (or all keys
@@ -439,6 +572,20 @@ func (m *model) wizardVisibleApps() []string {
 // the static list stored in providers.json. Falls back to static if neither
 // is available.
 func (m *model) wizardModelCandidates(slot string) []provider.ProviderModel {
+	if m.wizardUsesProviderCatalog() {
+		var models []provider.ProviderModel
+		for _, st := range m.wizardCatalogProviderStatuses() {
+			if !st.Included {
+				continue
+			}
+			prov := m.providers.Find(st.Slug)
+			if prov == nil {
+				continue
+			}
+			models = append(models, prov.Models...)
+		}
+		return models
+	}
 	if m.wizard.draft.ProviderSlug == "" {
 		return nil
 	}

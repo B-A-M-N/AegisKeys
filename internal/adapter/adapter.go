@@ -60,6 +60,30 @@ type AppAdapter interface {
 	DefaultCommand() string
 }
 
+// ProviderCatalogRenderContext carries all providers and keys for catalog-capable apps.
+type ProviderCatalogRenderContext struct {
+	Profile          profile.Profile
+	SelectedProvider provider.Provider
+	SelectedKey      *secret.SecretRecord
+
+	// All usable providers for this app (metadata only, no secrets).
+	Providers []provider.Provider
+
+	// One launch-injectable key per provider slug.
+	KeysByProvider map[string]*secret.SecretRecord
+}
+
+// ProviderCatalogAdapter is implemented by adapters that configure apps
+// with a full provider catalog (e.g. Crush, OpenCode, MiMo). The app's
+// config file lists provider metadata (base URL, env var, models) while
+// secrets remain env-only.
+type ProviderCatalogAdapter interface {
+	AppAdapter
+
+	// RenderCatalog builds a launch strategy using the full provider catalog.
+	RenderCatalog(ctx ProviderCatalogRenderContext) (*LaunchStrategy, error)
+}
+
 // Registry holds all known adapters.
 type Registry struct {
 	adapters map[string]AppAdapter
@@ -72,7 +96,7 @@ func NewRegistry() *Registry {
 		adapters: make(map[string]AppAdapter),
 		order: []string{
 			"generic", "crush", "aider", "cline", "hermes", "qwen", "claude", "vibe", "goose",
-			"codex", "mimo", "openhands", "gemini", "copilot", "continue",
+			"codex", "mimo", "opencode", "openhands", "gemini", "copilot", "continue",
 			"zed", "intellij",
 			"roo", "kilo", "cursor",
 		},
@@ -89,6 +113,7 @@ func NewRegistry() *Registry {
 		GooseAdapter{},
 		CodexAdapter{},
 		MiMoOpenCodeAdapter{},
+		OpenCodeAdapter{},
 		OpenHandsAdapter{},
 		GeminiCLIAdapter{},
 		CopilotCLIAdapter{},

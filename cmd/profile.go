@@ -135,7 +135,7 @@ var profileCreateCmd = &cobra.Command{
 			return err
 		}
 
-		if strategy, err := adapter.ResolveLaunchStrategyForMode(p, *prov, rec, adapterReg, adapter.ResolveSave); err == nil {
+		if strategy, err := adapter.ResolveLaunchStrategyCatalog(p, *prov, rec, adapterReg, reg, v, adapter.ResolveSave); err == nil {
 			if len(strategy.Hazards) > 0 {
 				fmt.Println("Warnings:")
 				for _, h := range strategy.Hazards {

@@ -72,7 +72,7 @@ var envfileCmd = &cobra.Command{
 		// as `run` and `env`, so envfile contents match actual injection.
 		// Pass the full record so its access Policy is honored.
 		adapterReg := adapter.NewRegistry()
-		strategy, err := adapter.ResolveLaunchStrategy(*prof, *prov, rec, adapterReg)
+		strategy, err := adapter.ResolveLaunchStrategyCatalog(*prof, *prov, rec, adapterReg, reg, v, adapter.ResolvePreview)
 		if err != nil {
 			return err
 		}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strings"
 	"time"
 
 	"aegiskeys/internal/fsutil"
@@ -171,6 +172,42 @@ func (r *Registry) MergeDefaults(defaults []Provider) bool {
 	}
 
 	return changed
+}
+
+// SetStaticModels replaces the curated model allowlist for a provider. It
+// dedupes by ID, marks each model Static=true, sets ModelPolicy.Source to
+// ModelSourceStatic, and refreshes Catalog + timestamps. It does NOT mutate the
+// provider on disk — callers must Save().
+func (r *Registry) SetStaticModels(slug string, models []ProviderModel) error {
+	p := r.Find(slug)
+	if p == nil {
+		return errors.New("provider not found: " + slug)
+	}
+
+	seen := map[string]bool{}
+	out := make([]ProviderModel, 0, len(models))
+	for _, m := range models {
+		m.ID = strings.TrimSpace(m.ID)
+		if m.ID == "" || seen[m.ID] {
+			continue
+		}
+		m.Static = true
+		out = append(out, m)
+		seen[m.ID] = true
+	}
+
+	p.Models = out
+	p.ModelPolicy.Source = ModelSourceStatic
+	if p.Catalog.Source == "" {
+		p.Catalog.Source = "dynamic"
+	}
+	if p.ModelPolicy.RefreshURL == "" {
+		p.ModelPolicy.RefreshURL = p.Catalog.RefreshURL
+	}
+	p.UpdatedAt = time.Now()
+	p.Normalize()
+
+	return p.ValidateStrict()
 }
 
 // Remove deletes the provider with the given slug. Returns an error if absent.

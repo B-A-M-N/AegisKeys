@@ -1,6 +1,6 @@
 # AGENTS.md — AegisKeys
 
-A local-first, secure terminal app (Go 1.25) that stores API **provider** metadata and **secrets** separately, then injects the correct credentials into coding agents/CLIs. AegisKeys renders **app-specific launch configuration** — env vars, CLI args, and config files — so coding agents get credentials in the exact format each one expects.
+A local-first, secure terminal app (Go 1.25.11+) that stores API **provider** metadata and **secrets** separately, then injects the correct credentials into coding agents/CLIs. AegisKeys renders **app-specific launch configuration** — env vars, CLI args, and config files — so coding agents get credentials in the exact format each one expects.
 
 > Canonical specs: `SPEC.md` (full product spec, CLI surface, storage layout, threat model) and `TUI_GUIDE.md` (Charm v2 TUI architecture, screen-by-screen, pitfalls). Read those before non-trivial work.
 
@@ -13,24 +13,26 @@ As of the latest build:
 - `go test ./...` passes across all packages.
 - `go vet ./...` is clean.
 - `gofmt -l .` is empty.
+- `go run golang.org/x/vuln/cmd/govulncheck@latest ./...` reports no reachable vulnerabilities when run with Go 1.25.11+.
 - Full CLI (Cobra) with all SPEC §18 commands implemented and tested end-to-end.
 - An interactive TUI (bubbletea v2) with password-unlock, 9 screens, multi-field add forms with provider/key selection, model-slot collection, and real child-process launch via `tea.ExecProcess`.
-- **Adapter system** (`internal/adapter`) — per-app renderers implementing `AppAdapter` contract interface with `AppSupportContract` metadata for all targets: Generic, Crush, Aider, Cline, Hermes, Qwen Code, Goose, Claude Code, Mistral Vibe, Zed, IntelliJ.
+- **Adapter system** (`internal/adapter`) — per-app renderers implementing `AppAdapter` contract interface with `AppSupportContract` metadata for 20 targets: Generic, Crush, Aider, Cline, Hermes, Qwen Code, Goose, Claude Code, Mistral Vibe, Codex, MiMo, OpenCode, OpenHands, Gemini CLI, Copilot CLI, Continue, Roo Code, Kilo Code, Cursor, Zed, IntelliJ.
 - **Provider protocol/model catalog** (`internal/provider`) — rich provider metadata with auth spec, endpoints, model catalog, capabilities, app hints.
 - **Proxy support** (`internal/proxy`) — auto-start local proxies (SOCKS5/HTTP) when apps need them.
 - **Model slots** — profiles support per-app model roles including feature-specific slots (compression/vision/web_extract for Hermes, inline_assistant/commit_message/thread_summary for Zed).
 - **Config file rendering** with merge/backup/redaction semantics (`internal/adapter/filewriter.go`); TOML/XML policies refuse to overwrite existing user/project config until parser-backed merge/patch support exists.
-- **Hard boundary enforcement**: `ValidateLaunchStrategy` is the single mandatory gate called at the end of `ResolveLaunchStrategy`. It now calls `ValidateContract` to ensure adapter contracts are fully and honestly declared before any contract field is trusted. All launch resolves — `run`, `env`, `envfile`, TUI, and tests — flow through this gate. TUI command override is revalidated after mutation.
+- **Hard boundary enforcement**: `ValidateLaunchStrategyForMode` is the mandatory gate. It calls `ValidateContract` to ensure adapter contracts are fully and honestly declared before any contract field is trusted, then checks raw-secret-leak, profile-env-override, and blocked-strategy invariants. `ResolveLaunchStrategy` calls it for `ResolveRun`; `ResolveLaunchStrategyCatalog` calls it for preview/run/save modes; `ResolveRunConfig` calls `ValidateLaunchStrategy` separately as a second gate; profile save validation and TUI launch both revalidate.
 - **Adapter contracts strengthened**: `ValidateContract` requires `ConfigFiles` when `CanPatchConfig=true`, `ValidationChecks` when `verified`, `DisplayName`, `DefaultCommand` when `CanLaunch=true`, `Fix` on high/critical hazards, and known enum values for support/confidence/surface/render-mode fields.
-- **Adapter confidence truthfulness**: `manual_proof` is distinct from `verified`; Generic, Crush, Aider, Qwen Code, Goose, and Claude Code are `verified` with proof JSON under `testdata/adapter_proofs/`, render goldens under `testdata/adapter_golden/`, and all four automated gates true.
+- **Adapter confidence truthfulness**: `manual_proof` is distinct from `verified`; Generic, Crush, Aider, Qwen Code, Goose, and Claude Code are `verified` with proof JSON under `testdata/adapter_proofs/`, render goldens under `testdata/adapter_golden/`, and all four automated gates true. Catalog adapters (Crush, MiMo, OpenCode) have catalog golden snapshots and config no-secret checks.
 - **Adapter proof doctor**: `doctor` reports adapter confidence/proof status, fails falsely verified adapters, and warns if repo-local manual-proof files are missing when `testdata/adapter_proofs/` is discoverable.
 - **Provider HTTPS enforcement**: `ValidateStrict` rejects non-https base URLs for non-local providers (loopback exempted), including CLI `provider add/edit/validate`.
-- **Secret argv protection**: `key add` and `vault add` never accept raw secret flags; secrets are read through no-echo prompts. Launch validation rejects raw-secret substrings in argv, preview, config file content, and non-injecting env plans.
+- **Secret argv protection**: `key add`, `vault add`, `key rotate`, and `vault reveal` never accept raw secret flags; secrets are read through no-echo prompts. The sole exception is `init --password` for non-interactive automation (flagged as less secure). Launch validation rejects raw-secret substrings in argv, preview, config file content, and non-injecting env plans.
 - **Vault overwrite protection**: `SaveVault`/`SaveVaultWithKey` refuse to overwrite an existing vault if the password/session key cannot reopen the on-disk envelope.
 - **Filewriter symlink protection**: `rejectSymlinkParents` walks every parent directory; `expandPath` only expands HOME/XDG_CONFIG_HOME/TMPDIR (no ambient env injection).
 - **Secret cleanup**: `lockVault` runs on every quit path (`ctrl+c`, `q`) to zero the derived key.
 - **Wizard** — app-first profile creation with real model-slot input collection and `wizardCanAdvance` validation.
-- Unit tests for all packages: `internal/{secret,provider,profile,adapter,proxy,runner,tui}`.
+- Unit tests for all packages: `internal/{secret,provider,profile,adapter,proxy,runner,redact,security,tui,config,audit}`.
+- **Env allowlist enforced on all launch paths**: both `Run()` (strategy-driven) and `RunLegacy()` filter parent env through `baseEnvForClass` (CLI vs GUI/IDE) before `BuildChildEnv`, stripping non-allowlisted and secret-looking vars so unrelated parent secrets do not leak into child processes.
 
 ### Architecture
 
@@ -167,7 +169,7 @@ Plus: `internal/config` (paths + app config), `internal/runner` (child-process e
 These are the project's core contracts (SPEC §6, §10). Violating any of them is a critical defect:
 
 1. **Never serialize the raw secret.** `SecretRecord.Secret` carries `json:"-"`. `Vault.Serialize()` rebuilds a Safe struct that omits it. When adding fields to `SecretRecord`, never give the `Secret` field a real JSON tag.
-2. **Display only masked values.** Everything shown to the user goes through `MaskedKeyItem` and `MaskSecret()` (`sk-or-v1-...91ef` style; secrets ≤8 chars → `<hidden>`). The TUI root may hold a decrypted vault session while unlocked for mutations/launch, but rendered views and child screen state must not expose raw secrets.
+2. **Display only masked values.** Everything shown to the user goes through `MaskedKeyItem` and `MaskSecret()` (`...91ef` style — only last 4 chars shown; secrets ≤8 chars → `<hidden>`). The TUI root may hold a decrypted vault session while unlocked for mutations/launch, but rendered views and child screen state must not expose raw secrets.
 3. **Redact all output** that might contain secrets via `security.Redact()` (bearer tokens, `api_key=`/`token=`/`secret=`/`password=`, and long `UPPER=value` env assignments) and `runner.BuildEnvString(..., redact=true)`. There is also `secret.RedactEnv`.
 4. **Audit log contains metadata only** — never key values. `audit.Event` has no secret field by design.
 5. **Child-process-scoped injection only.** `runner.Run` builds the child env and never exports to the parent shell. Preserve exit codes (it already does via `syscall.WaitStatus`).

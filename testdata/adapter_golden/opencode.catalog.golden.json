@@ -1,0 +1,23 @@
+{
+  "app": "opencode",
+  "command": "opencode",
+  "env_keys": [
+    "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY"
+  ],
+  "files": [
+    {
+      "path": "$HOME/.config/opencode/opencode.json",
+      "format": "json",
+      "scope": "user",
+      "merge_policy": "json_merge",
+      "description": "OpenCode provider catalog; secrets remain env-only"
+    }
+  ],
+  "preview": [
+    "Launch catalog-opencode with OpenCode",
+    "Write OpenCode provider catalog: 3 providers",
+    "Secrets remain child-env-only; config stores env var names"
+  ],
+  "config_body": "{\n  \"model\": \"anthropic/claude-sonnet-4.5\",\n  \"provider\": {\n    \"ollama\": {\n      \"options\": {\n        \"baseURL\": \"http://localhost:11434/v1\"\n      }\n    },\n    \"openai\": {\n      \"env\": [\n        \"OPENAI_API_KEY\"\n      ],\n      \"options\": {\n        \"baseURL\": \"https://api.openai.com/v1\"\n      }\n    },\n    \"openrouter\": {\n      \"env\": [\n        \"OPENROUTER_API_KEY\"\n      ],\n      \"options\": {\n        \"baseURL\": \"https://openrouter.ai/api/v1\"\n      }\n    }\n  }\n}"
+}

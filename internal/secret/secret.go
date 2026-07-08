@@ -36,6 +36,7 @@ type SecretPolicy struct {
 	AllowClipboard    bool `json:"allow_clipboard"`
 	AllowEnvExport    bool `json:"allow_env_export"`
 	AllowLaunchInject bool `json:"allow_launch_injection"`
+	AllowModelRefresh bool `json:"allow_model_refresh"`
 
 	RequireConfirmForReveal bool `json:"require_confirm_for_reveal"`
 	RequireConfirmForExport bool `json:"require_confirm_for_export"`
@@ -49,18 +50,21 @@ func DefaultSecretPolicy(kind SecretKind) SecretPolicy {
 	case SecretServiceAccount:
 		return SecretPolicy{
 			AllowReveal: true, AllowClipboard: true, AllowEnvExport: false, AllowLaunchInject: true,
+			AllowModelRefresh:       true,
 			RequireConfirmForReveal: true, RequireConfirmForExport: true,
 			MaxClipboardTTLSeconds: 60,
 		}
 	case SecretGeneric:
 		return SecretPolicy{
 			AllowReveal: true, AllowClipboard: true, AllowEnvExport: false, AllowLaunchInject: true,
+			AllowModelRefresh:       true,
 			RequireConfirmForReveal: true, RequireConfirmForExport: true,
 			MaxClipboardTTLSeconds: 60,
 		}
 	default:
 		return SecretPolicy{
 			AllowReveal: true, AllowClipboard: true, AllowEnvExport: false, AllowLaunchInject: true,
+			AllowModelRefresh:       true,
 			RequireConfirmForReveal: true, RequireConfirmForExport: true,
 			MaxClipboardTTLSeconds: 60,
 		}
@@ -75,6 +79,7 @@ const (
 	AccessCopyClipboard AccessMode = "copy_clipboard"
 	AccessRevealStdout  AccessMode = "reveal_stdout"
 	AccessInjectEnv     AccessMode = "inject_env"
+	AccessRefreshModels AccessMode = "refresh_models"
 )
 
 // AccessError is returned when a secret's policy forbids an access mode.
@@ -103,6 +108,10 @@ func (r SecretRecord) AllowAccess(mode AccessMode) error {
 		}
 	case AccessInjectEnv:
 		if !r.Policy.AllowLaunchInject {
+			return &AccessError{Mode: string(mode)}
+		}
+	case AccessRefreshModels:
+		if !r.Policy.AllowModelRefresh {
 			return &AccessError{Mode: string(mode)}
 		}
 	}
@@ -167,8 +176,36 @@ func migrateSecretV1ToV2(r *SecretRecord) {
 }
 
 type Vault struct {
-	Version int            `json:"version"`
-	Keys    []SecretRecord `json:"keys"`
+	Version     int                `json:"version"`
+	Keys        []SecretRecord     `json:"keys"`
+	ScratchPads []ScratchPadRecord `json:"scratch_pads,omitempty"`
+}
+
+// ScratchPadKind categorizes a scratchpad page.
+type ScratchPadKind string
+
+const (
+	ScratchPadGeneral  ScratchPadKind = "general"
+	ScratchPadProvider ScratchPadKind = "provider"
+	ScratchPadKey      ScratchPadKind = "key"
+)
+
+// ScratchPadRecord is a free-form encrypted note page stored inside the vault.
+// The Body is secret — it can contain billing notes, dashboard links, setup
+// instructions, pasted credentials, or anything the user wants encrypted
+// at rest. It is NEVER written to providers.json, profiles, audit logs, or
+// app config files.
+type ScratchPadRecord struct {
+	ID           string         `json:"id"`
+	Kind         ScratchPadKind `json:"kind"`
+	Title        string         `json:"title"`
+	Body         string         `json:"body"`
+	ProviderSlug string         `json:"provider_slug,omitempty"`
+	KeyID        string         `json:"key_id,omitempty"`
+	Tags         []string       `json:"tags,omitempty"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
+	Archived     bool           `json:"archived,omitempty"`
 }
 
 type MaskedKeyItem struct {
@@ -204,9 +241,8 @@ func MaskSecret(secret string) string {
 	if len(secret) <= 8 {
 		return "<hidden>"
 	}
-	prefix := secret[:4]
 	suffix := secret[len(secret)-4:]
-	return fmt.Sprintf("%s...%s", prefix, suffix)
+	return fmt.Sprintf("...%s", suffix)
 }
 
 func ToMasked(record SecretRecord) MaskedKeyItem {
@@ -275,9 +311,21 @@ func (v *Vault) Serialize() ([]byte, error) {
 		Archived     bool         `json:"archived,omitempty"`
 		Policy       SecretPolicy `json:"policy,omitempty"`
 	}
+	type SafeScratchPad struct {
+		ID           string         `json:"id"`
+		Kind         ScratchPadKind `json:"kind"`
+		Title        string         `json:"title"`
+		ProviderSlug string         `json:"provider_slug,omitempty"`
+		KeyID        string         `json:"key_id,omitempty"`
+		Tags         []string       `json:"tags,omitempty"`
+		CreatedAt    time.Time      `json:"created_at"`
+		UpdatedAt    time.Time      `json:"updated_at"`
+		Archived     bool           `json:"archived,omitempty"`
+	}
 	type SafeVault struct {
-		Version int          `json:"version"`
-		Keys    []SafeRecord `json:"keys"`
+		Version     int              `json:"version"`
+		Keys        []SafeRecord     `json:"keys"`
+		ScratchPads []SafeScratchPad `json:"scratch_pads,omitempty"`
 	}
 	sv := SafeVault{Version: v.Version}
 	for _, k := range v.Keys {
@@ -288,6 +336,12 @@ func (v *Vault) Serialize() ([]byte, error) {
 			CreatedAt: k.CreatedAt, UpdatedAt: k.UpdatedAt, LastUsedAt: k.LastUsedAt,
 			ExpiresAt: k.ExpiresAt, RotatesAt: k.RotatesAt,
 			RevealPolicy: k.RevealPolicy, Exportable: k.Exportable, Archived: k.Archived, Policy: k.Policy,
+		})
+	}
+	for _, s := range v.ScratchPads {
+		sv.ScratchPads = append(sv.ScratchPads, SafeScratchPad{
+			ID: s.ID, Kind: s.Kind, Title: s.Title, ProviderSlug: s.ProviderSlug,
+			KeyID: s.KeyID, Tags: s.Tags, CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt, Archived: s.Archived,
 		})
 	}
 	return json.MarshalIndent(sv, "", " ")

@@ -69,6 +69,19 @@ var guiSafeEnv = map[string]bool{
 	"QT_QPA_PLATFORM":          true,
 }
 
+// appClassFromStrategy derives the app class from the adapter contract's
+// LaunchSurfaces so the correct env allowlist is applied. If any surface is
+// "gui" or "ide", the expanded GUI env allowlist is used; otherwise the
+// minimal CLI allowlist applies.
+func appClassFromStrategy(strategy *adapter.LaunchStrategy) string {
+	for _, s := range strategy.Support.LaunchSurfaces {
+		if s == "gui" || s == "ide" {
+			return s
+		}
+	}
+	return "cli"
+}
+
 // baseEnvForClass returns the safe base env allowlist for an app class.
 // GUI/IDE apps need extra display/session vars; CLI apps use the minimal list.
 func baseEnvForClass(class string) map[string]bool {
@@ -304,11 +317,28 @@ type RunOptions struct {
 	CleanupEnvFile bool
 }
 
+// PreparedCommand is a launch command plus cleanup work that must run after
+// the child process exits.
+type PreparedCommand struct {
+	Cmd     *exec.Cmd
+	Cleanup func() error
+}
+
 // PrepareCommand validates and materializes a launch strategy, then returns the
 // exec.Cmd that should run in the caller's terminal context. CLI launches call
 // Run, while TUI launches use this with tea.ExecProcess so Bubble Tea can
 // release and restore the terminal around the child process.
 func PrepareCommand(ctx context.Context, strategy *adapter.LaunchStrategy, opts RunOptions) (*exec.Cmd, error) {
+	prepared, err := PrepareCommandWithCleanup(ctx, strategy, opts)
+	if err != nil {
+		return nil, err
+	}
+	return prepared.Cmd, nil
+}
+
+// PrepareCommandWithCleanup validates and materializes a launch strategy, then
+// returns the command plus a restore hook for runtime config file overlays.
+func PrepareCommandWithCleanup(ctx context.Context, strategy *adapter.LaunchStrategy, opts RunOptions) (*PreparedCommand, error) {
 	if strategy == nil {
 		return nil, errors.New("nil launch strategy")
 	}
@@ -324,12 +354,18 @@ func PrepareCommand(ctx context.Context, strategy *adapter.LaunchStrategy, opts 
 	if !strategy.Support.CanLaunch && !strategy.Support.CanLaunchArbitraryCommand {
 		return nil, fmt.Errorf("adapter %s cannot launch directly", strategy.Support.ID)
 	}
+	if _, err := exec.LookPath(strategy.Plan.Command); err != nil {
+		return nil, fmt.Errorf("launch command %q not found on PATH", strategy.Plan.Command)
+	}
 
 	// Apply config file writes before launching the child.
+	cleanup := func() error { return nil }
 	if len(strategy.Plan.Files) > 0 {
-		if err := adapter.ApplyFileWrites(strategy.Plan.Files, strategy.Plan.Env); err != nil {
+		restore, err := adapter.ApplyFileWritesWithRestore(strategy.Plan.Files, strategy.Plan.Env)
+		if err != nil {
 			return nil, fmt.Errorf("apply file writes: %w", err)
 		}
+		cleanup = restore
 	}
 
 	// Audit: launch_start (metadata only).
@@ -343,7 +379,8 @@ func PrepareCommand(ctx context.Context, strategy *adapter.LaunchStrategy, opts 
 	}
 
 	cmd := exec.CommandContext(ctx, strategy.Plan.Command, append(strategy.Plan.Args, opts.ExtraArgs...)...)
-	cmd.Env = BuildChildEnv(os.Environ(), strategy.Plan.Env)
+	allowlist := baseEnvForClass(appClassFromStrategy(strategy))
+	cmd.Env = BuildChildEnv(cleanBaseEnvWithAllowlist(os.Environ(), allowlist), strategy.Plan.Env)
 	if opts.WorkingDir != "" {
 		cmd.Dir = opts.WorkingDir
 	}
@@ -352,15 +389,13 @@ func PrepareCommand(ctx context.Context, strategy *adapter.LaunchStrategy, opts 
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 	}
-	return cmd, nil
+	return &PreparedCommand{Cmd: cmd, Cleanup: cleanup}, nil
 }
 
-// RunWithStrategy is the single entry point for strategy-driven launches.
-// It is the only code path that materializes file writes, builds a sanitized
-// child env, executes a child process, audits, and cleans up. Both the CLI
-// `run` command calls this function. TUI launch flows call PrepareCommand and
-// pass the result to tea.ExecProcess so the terminal is released/restored
-// correctly while still sharing the same launch preparation path.
+// RunWithStrategy is the single entry point for strategy-driven CLI launches.
+// TUI launch flows call PrepareCommandWithCleanup and pass the command to
+// tea.ExecProcess so the terminal is released/restored correctly while still
+// running the same runtime config cleanup hook.
 //
 // Invariants:
 //   - Refuses execution if strategy.Blocked, Plan.Command is empty, or
@@ -370,25 +405,32 @@ func PrepareCommand(ctx context.Context, strategy *adapter.LaunchStrategy, opts 
 //   - File writes are applied before the child starts.
 //   - All audit events carry metadata only — never raw secrets.
 func Run(ctx context.Context, strategy *adapter.LaunchStrategy, opts RunOptions) error {
-	cmd, err := PrepareCommand(ctx, strategy, opts)
+	prepared, err := PrepareCommandWithCleanup(ctx, strategy, opts)
 	if err != nil {
 		return err
 	}
 
 	if opts.DryRun {
-		return nil
+		return prepared.Cleanup()
 	}
 
-	if err := cmd.Run(); err != nil {
+	if err := prepared.Cmd.Run(); err != nil {
+		cleanupErr := prepared.Cleanup()
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
+				if cleanupErr != nil {
+					return fmt.Errorf("%w; cleanup failed: %v", &ExitError{Code: status.ExitStatus(), Err: err}, cleanupErr)
+				}
 				return &ExitError{Code: status.ExitStatus(), Err: err}
 			}
 		}
+		if cleanupErr != nil {
+			return fmt.Errorf("%w; cleanup failed: %v", err, cleanupErr)
+		}
 		return err
 	}
-	return nil
+	return prepared.Cleanup()
 }
 
 // BuildChildEnv constructs the child process environment by starting from
@@ -417,6 +459,10 @@ func BuildChildEnv(parent []string, injected map[string]string) []string {
 		out = append(out, kv)
 	}
 	for k, v := range injected {
+		if v == "" {
+			// Empty value means "unset" — already blocked from parent above
+			continue
+		}
 		out = append(out, k+"="+v)
 	}
 	sort.Strings(out)

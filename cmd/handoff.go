@@ -48,7 +48,7 @@ var handoffCmd = &cobra.Command{
 			key = v.Get(prof.KeyID)
 		}
 		adapt := adapter.NewRegistry()
-		strategy, resolveErr := adapter.ResolveLaunchStrategyForMode(*prof, *prov, key, adapt, adapter.ResolvePreview)
+		strategy, resolveErr := adapter.ResolveLaunchStrategyCatalog(*prof, *prov, key, adapt, reg, v, adapter.ResolvePreview)
 
 		fmt.Printf("=== AegisKeys Handoff: %s ===\n", prof.Name)
 		fmt.Printf("App:      %s\n", prof.TargetApp())

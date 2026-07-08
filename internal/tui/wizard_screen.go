@@ -123,7 +123,13 @@ func slotsPreview(c adapter.AppSupportContract) []string {
 // into the flat compat-view slice (wizardProviderCompatViews).
 func wizardProviderView(s *Styles, m *model) string {
 	var b strings.Builder
-	b.WriteString(s.SectionHeader.Render("Choose provider"))
+	if m.wizardUsesProviderCatalog() {
+		b.WriteString(s.SectionHeader.Render("Choose default provider"))
+		b.WriteString("\n")
+		b.WriteString(s.Muted.Render("This app uses a provider catalog. AegisKeys will configure every compatible provider with a launch-enabled key; this selection becomes the default."))
+	} else {
+		b.WriteString(s.SectionHeader.Render("Choose provider"))
+	}
 	b.WriteString("\n\n")
 	if len(m.providers.Providers) == 0 {
 		b.WriteString(s.Muted.Render("No providers registered."))
@@ -198,7 +204,13 @@ func writeProviderRow(b *strings.Builder, s *Styles, i int, v providerCompatView
 // wizardCredentialView shows key selection or inline key creation.
 func wizardCredentialView(s *Styles, m *model) string {
 	var b strings.Builder
-	b.WriteString(s.SectionHeader.Render("Choose credential"))
+	if m.wizardUsesProviderCatalog() {
+		b.WriteString(s.SectionHeader.Render("Choose default credential"))
+		b.WriteString("\n")
+		b.WriteString(s.Muted.Render("Catalogue launch includes other compatible providers that already have launch-enabled keys. This key is used for the default provider."))
+	} else {
+		b.WriteString(s.SectionHeader.Render("Choose credential"))
+	}
 	b.WriteString("\n\n")
 	if !m.unlocked {
 		b.WriteString(s.Muted.Render("Unlock the vault to select a key."))
@@ -240,8 +252,20 @@ func wizardModelsView(s *Styles, m *model) string {
 		return b.String()
 	}
 
-	// Show live fetch status.
-	if m.wizard.fetchingModels {
+	usesCatalog := m.wizardUsesProviderCatalog()
+	if usesCatalog {
+		statuses := m.wizardCatalogProviderStatuses()
+		included := 0
+		for _, st := range statuses {
+			if st.Included {
+				included++
+			}
+		}
+		b.WriteString(s.Success.Render(fmt.Sprintf("✓ Provider catalog mode: %d provider(s) included", included)))
+		b.WriteString("\n")
+		b.WriteString(s.Muted.Render("Default model is optional; the app can choose from the configured provider catalog."))
+		b.WriteString("\n\n")
+	} else if m.wizard.fetchingModels {
 		b.WriteString(s.Warning.Render("⟳ Fetching model catalog…"))
 		b.WriteString("\n\n")
 	} else if len(m.wizard.fetchedModels) > 0 {
@@ -354,6 +378,20 @@ func wizardRuntimeView(s *Styles, m *model) string {
 	appID := m.wizard.draft.AppID
 	if a, ok := m.adapterRegistry.Get(appID); ok {
 		c := a.Contract()
+		if m.wizardUsesProviderCatalog() {
+			b.WriteString(fmt.Sprintf("  %s Provider catalog config\n", s.Success.Render("✓")))
+			statuses := m.wizardCatalogProviderStatuses()
+			included := 0
+			skipped := 0
+			for _, st := range statuses {
+				if st.Included {
+					included++
+				} else {
+					skipped++
+				}
+			}
+			b.WriteString(fmt.Sprintf("    %s\n", s.Muted.Render(fmt.Sprintf("%d provider(s) included, %d skipped", included, skipped))))
+		}
 		if c.CanIsolateProfile {
 			b.WriteString(fmt.Sprintf("  %s Isolated profile directory\n", s.Success.Render("✓")))
 		}
@@ -429,9 +467,17 @@ func wizardPreviewView(s *Styles, m *model) string {
 	}
 	b.WriteString(fmt.Sprintf("  %s %s\n", s.Body.Render("Profile:"), s.KeyLabel.Render(name)))
 	b.WriteString(fmt.Sprintf("  %s %s\n", s.Body.Render("App:"), s.Value.Render(d.AppID)))
-	b.WriteString(fmt.Sprintf("  %s %s\n", s.Body.Render("Provider:"), s.Value.Render(d.ProviderSlug)))
+	if m.wizardUsesProviderCatalog() {
+		b.WriteString(fmt.Sprintf("  %s %s\n", s.Body.Render("Default provider:"), s.Value.Render(d.ProviderSlug)))
+	} else {
+		b.WriteString(fmt.Sprintf("  %s %s\n", s.Body.Render("Provider:"), s.Value.Render(d.ProviderSlug)))
+	}
 	if d.KeyID != "" {
-		b.WriteString(fmt.Sprintf("  %s %s\n", s.Body.Render("Key:"), s.KeyMasked.Render(d.KeyID)))
+		if m.wizardUsesProviderCatalog() {
+			b.WriteString(fmt.Sprintf("  %s %s\n", s.Body.Render("Default key:"), s.KeyMasked.Render(d.KeyID)))
+		} else {
+			b.WriteString(fmt.Sprintf("  %s %s\n", s.Body.Render("Key:"), s.KeyMasked.Render(d.KeyID)))
+		}
 	}
 	if d.Models.Main != nil {
 		b.WriteString(fmt.Sprintf("  %s %s\n", s.Body.Render("Main model:"), s.Value.Render(d.Models.Main.ID)))
@@ -446,6 +492,16 @@ func wizardPreviewView(s *Styles, m *model) string {
 		b.WriteString(fmt.Sprintf("  %s\n", s.Body.Render("Env:")))
 		for k, v := range d.Env {
 			b.WriteString(fmt.Sprintf("    %s=%s\n", s.KeyMasked.Render(k), s.Muted.Render(v)))
+		}
+	}
+	if m.wizardUsesProviderCatalog() {
+		b.WriteString(fmt.Sprintf("  %s\n", s.Body.Render("Provider catalog:")))
+		for _, st := range m.wizardCatalogProviderStatuses() {
+			icon := s.Warning.Render("skip")
+			if st.Included {
+				icon = s.Success.Render("include")
+			}
+			b.WriteString(fmt.Sprintf("    %s %s  %s\n", icon, s.Value.Render(st.Slug), s.Muted.Render(st.Reason)))
 		}
 	}
 	b.WriteString("\n")

@@ -28,11 +28,18 @@ dist/
 .vscode/
 *.swp
 .aider*
+.claude/
+.codex/
 
 # Local tool caches and scratch files
 .crush/
 .gemini_security/
 .aider.chat.history.md
 .aider.tags.cache.v4/
+application_env_data.md
+TIDYYING_UP.md
+conductor/
+skills/
+.agents/
 env
 printenv

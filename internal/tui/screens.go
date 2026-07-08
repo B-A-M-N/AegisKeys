@@ -317,7 +317,7 @@ func (m *model) launchView(s *Styles) string {
 		}
 		// Show hazards/manual steps for blocked adapters instead of erroring,
 		// but never expose raw secrets.
-		strategy, resolveErr = adapter.ResolveLaunchStrategyForMode(prof, *prov, key, m.adapterRegistry, adapter.ResolvePreview)
+		strategy, resolveErr = adapter.ResolveLaunchStrategyCatalog(prof, *prov, key, m.adapterRegistry, m.providers, m.vaultSession.vault, adapter.ResolvePreview)
 	}
 
 	// Show resolve errors as blocking red panels.
@@ -678,8 +678,102 @@ func (m *model) renderDetailModal() string {
 	return b.String()
 }
 
+// scratchView renders the encrypted scratchpad screen with a navigable list
+// and an editor panel. Uses Charm's textarea for multi-line editing.
+func (m *model) scratchView(s *Styles) string {
+	var b strings.Builder
+	b.WriteString(s.Title.Render("Scratchpads (encrypted)"))
+	b.WriteString("\n\n")
+
+	scratchpads := m.visibleScratchPads()
+	if len(scratchpads) == 0 {
+		b.WriteString(s.Muted.Render("No scratchpads. Press `n` to create one."))
+		return b.String()
+	}
+
+	// Left: list panel.
+	b.WriteString(s.SectionHeader.Render("Pages"))
+	b.WriteString("\n")
+	for i, sp := range scratchpads {
+		marker := m.selMarker(s, i)
+		title := sp.Title
+		if title == "" {
+			title = "(untitled)"
+		}
+		if sp.Archived {
+			title += " " + s.Warning.Render("[archived]")
+		}
+		if m.scratchListSelected == i && !m.scratchEditing {
+			b.WriteString(fmt.Sprintf("  %s %s\n", marker, s.SelectedRow.Render(truncate(title, 28))))
+		} else {
+			b.WriteString(fmt.Sprintf("  %s %s\n", marker, s.Body.Render(truncate(title, 28))))
+		}
+	}
+
+	// Right: preview/editor panel.
+	sp := m.selectedScratchPad()
+	b.WriteString("\n")
+	if sp != nil {
+		b.WriteString(s.SectionHeader.Render(sp.Title))
+		if sp.ProviderSlug != "" {
+			b.WriteString(s.Muted.Render("  " + sp.ProviderSlug))
+		}
+		b.WriteString("\n")
+
+		if m.scratchEditing {
+			b.WriteString(m.scratchTitleInput.View())
+			b.WriteString("\n")
+			b.WriteString(m.scratchBodyInput.View())
+			if m.scratchDirty {
+				b.WriteString("\n" + s.Warning.Render("[modified]"))
+			}
+		} else {
+			body := sp.Body
+			if body == "" {
+				body = s.Muted.Render("(empty)")
+			}
+			b.WriteString(s.Body.Render(body))
+		}
+	}
+
+	// Footer: contextual controls.
+	b.WriteString("\n\n")
+	if m.scratchEditing {
+		b.WriteString(s.Muted.Render("ctrl+s save  ctrl+e external editor  esc cancel"))
+	} else {
+		b.WriteString(s.Muted.Render("n new  e/enter edit  c copy body  / filter  x delete  q/Esc back · vault-encrypted"))
+	}
+	return b.String()
+}
+
+// visibleScratchPads returns the scratchpad list, applying the archive filter.
+func (m *model) visibleScratchPads() []secret.ScratchPadRecord {
+	if m.vaultSession == nil || m.vaultSession.vault == nil {
+		return nil
+	}
+	all := m.vaultSession.vault.ScratchPads
+	out := make([]secret.ScratchPadRecord, 0, len(all))
+	for _, sp := range all {
+		if sp.Archived {
+			continue
+		}
+		out = append(out, sp)
+	}
+	return out
+}
+
+// selectedScratchPad returns the scratchpad under the list cursor, or nil.
+func (m *model) selectedScratchPad() *secret.ScratchPadRecord {
+	sp := m.visibleScratchPads()
+	idx := m.scratchListSelected
+	if idx < 0 || idx >= len(sp) {
+		return nil
+	}
+	return &sp[idx]
+}
+
 // renderDeleteModal shows the delete confirmation. When a provider has
-// referencing keys, it asks for confirmation to cascade-delete (yes/no).
+// referencing keys, it asks for confirmation to cascade-delete (yes/n).
 // When a deletion is blocked for another reason, it stays open and shows why.
 func (m *model) renderDeleteModal() string {
 	if m.deleteConfirmWait {

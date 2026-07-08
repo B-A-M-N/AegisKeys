@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"time"
 
+	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 
@@ -110,6 +111,7 @@ const (
 	screenDoctor
 	screenAudit
 	screenSettings
+	screenScratch
 	screenHelp
 )
 
@@ -126,6 +128,7 @@ var screenDefs = []struct {
 	{screenDoctor, "Doctor", "6"},
 	{screenAudit, "Audit", "7"},
 	{screenSettings, "Settings", "8"},
+	{screenScratch, "Scratch", "9"},
 	{screenHelp, "Help", "?"},
 }
 
@@ -240,6 +243,17 @@ type model struct {
 	// Status line (transient).
 	statusMsg string
 
+	// Model catalog overlay on the providers screen.
+	modelCatalog modelCatalogState
+
+	// Scratchpad screen state.
+	scratchListSelected int
+	scratchEditing      bool
+	scratchEditingID    string
+	scratchTitleInput   textinput.Model
+	scratchBodyInput    textarea.Model
+	scratchDirty        bool
+
 	// Background animation.
 	matrix *Matrix
 	// Track whether the matrix has been started.
@@ -275,6 +289,10 @@ func (s *vaultSession) Zero() {
 	if s.vault != nil {
 		for i := range s.vault.Keys {
 			s.vault.Keys[i].Secret = ""
+			s.vault.Keys[i].PrivateNote = ""
+		}
+		for i := range s.vault.ScratchPads {
+			s.vault.ScratchPads[i].Body = ""
 		}
 	}
 	s.vault = nil
@@ -301,6 +319,12 @@ func (m *model) lockVault() {
 	m.modal = modalNone
 	m.modalTarget = ""
 	m.wizard = wizardState{}
+	m.modelCatalog = modelCatalogState{}
+	m.scratchEditing = false
+	m.scratchEditingID = ""
+	m.scratchTitleInput.Reset()
+	m.scratchBodyInput.Reset()
+	m.scratchDirty = false
 	m.statusMsg = "Vault locked."
 }
 
@@ -360,6 +384,7 @@ type doctorResultMsg struct {
 type launchPreparedMsg struct {
 	profile   string
 	cmd       *exec.Cmd
+	cleanup   func() error
 	vault     *vaultSession
 	configDir string
 	keyID     string
@@ -367,13 +392,22 @@ type launchPreparedMsg struct {
 }
 
 type launchFinishedMsg struct {
-	err      error
-	usageErr error
+	err        error
+	usageErr   error
+	cleanupErr error
 }
 
 // wizardModelsFetchedMsg carries the result of an async dynamic model catalog
 // fetch triggered when the wizard enters StepModels for a dynamic provider.
 type wizardModelsFetchedMsg struct {
+	providerSlug string
+	models       []provider.ProviderModel
+	err          error
+}
+
+// modelCatalogLoadedMsg carries the result of an async model catalog refresh
+// triggered from the providers screen overlay.
+type modelCatalogLoadedMsg struct {
 	providerSlug string
 	models       []provider.ProviderModel
 	err          error

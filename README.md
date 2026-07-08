@@ -51,7 +51,9 @@ the thought of wiring credentials in by hand again.
 | Cline CLI | env + config | experimental | env + `providers.json` merge | planner, actor |
 | Claude Code | full env (OAuth warning) | verified | env injection | main |
 | Mistral Vibe | env + config | experimental | env + `config.toml` merge | main |
-| MiMo / OpenCode | env + config | experimental | env injection + config patch | main |
+| Codex CLI | full env | experimental | env injection | main, gpt54, gpt54mini, gpt53codex, gpt52codex, gpt52, gpt51codexmax, gpt51codexmini |
+| MiMo | env + config | experimental | env injection + config patch | main |
+| OpenCode | env + config | experimental | env injection + config patch | main |
 | OpenHands | env + config | experimental | env injection + config patch | main |
 | Gemini CLI | env + config | experimental | env injection + config patch | main |
 | Copilot CLI | full env | experimental | env injection | main |
@@ -100,7 +102,9 @@ service of that.
   The tool warns that the OS/clipboard manager may log it.
 - **No secret argv flags** — `key add` / `vault add` read secrets only through
   no-echo prompts. Secrets are never accepted as command-line flags, so they
-  can't leak into shell history or `ps`.
+  can't leak into shell history or `ps`. The one exception is `init --password`
+  (for non-interactive automation), which accepts the master password directly
+  and is clearly marked "less secure — visible in shell history."
 - **Hard boundary enforcement** — every launch resolve (`run`, `env`,
   `envfile`, and the TUI) flows through `ValidateLaunchStrategy`, which calls
   `ValidateContract`. An adapter must *honestly declare* its support level,
@@ -144,8 +148,8 @@ make install PREFIX="$HOME/.local"
 make release VERSION=0.1.0
 ```
 
-Requires Go 1.25. Dependencies resolve from `go.mod`/`go.sum`; no machine-local
-module replacement paths are required.
+Requires Go 1.25.11 or newer. Dependencies resolve from `go.mod`/`go.sum`; no
+machine-local module replacement paths are required.
 
 Shell completions are generated with:
 
@@ -160,7 +164,7 @@ aegiskeys completion powershell
 
 ```bash
 ./aegiskeys init                              # create vault + seed providers (interactive password)
-./aegiskeys init --password "$PW"             # non-interactive (automation; less secure — visible in shell history)
+./aegiskeys init --password "$PW"             # non-interactive; ONLY for automation (visible in shell history/process table)
 ./aegiskeys key add --provider openrouter     # add an API key (encrypted)
 ./aegiskeys profile create --name or-main \
     --provider openrouter --key <key-id> \

@@ -29,6 +29,7 @@ Tests are adversarial: they attempt to violate the claim and assert the system r
 |-------|------|--------|
 | Child receives intended secret | `runner.TestRuntimeInjection_RealRunner` (real runner.Run) | PASS |
 | Parent env unchanged | same test | PASS |
+| Non-credential parent secrets do not leak to child | `runner.TestPrepareCommand_AppliesEnvAllowlist`, `runner.TestBuildChildEnv_StripsNonCredentialVarSecrets` | PASS |
 | Config files don't contain raw secrets | `adapter.TestFileWriter_RefusesRawSecretInConfigFile` | PASS |
 | TUI launch uses shared runner preparation | `tui` launch tests + `runner.PrepareCommand` path | PASS |
 
@@ -62,6 +63,12 @@ Tests are adversarial: they attempt to violate the claim and assert the system r
 | Vault not corrupted | `secret.TestVault_Concurrent_AddSaveLoad` | PASS |
 | No data loss | `runner.TestConcurrentSave_Durability` | PASS |
 
+### 6.1 Dependency vulnerabilities
+
+| Claim | Test | Result |
+|-------|------|--------|
+| No reachable known vulnerabilities in code or standard library | `go run golang.org/x/vuln/cmd/govulncheck@latest ./...` with Go 1.25.11 | PASS |
+
 ### 7. Saved profiles resolve before use
 
 | Claim | Test | Result |
@@ -88,6 +95,8 @@ Tests are adversarial: they attempt to violate the claim and assert the system r
 | Config writes merge/apply without secret leakage | `adapter.TestAdapterVerificationGates` | PASS |
 | Launch smoke uses fake executables, no network/API calls | `runner.TestAdapterFakeExecutableLaunchSmoke` | PASS |
 | Child exit code is preserved | `runner.TestAdapterFakeExecutableLaunchSmokeExitCodePreserved` | PASS |
+| Provider-catalog adapters have golden snapshots and config no-secret checks | `adapter.TestCatalogVerificationGoldens` | PASS |
+| Provider-catalog launch path reaches fake Crush/MiMo/OpenCode executables without config leaks | `runner.TestCatalogAdapterFakeExecutableLaunchSmoke` | PASS |
 
 ## Discovered and fixed during testing
 

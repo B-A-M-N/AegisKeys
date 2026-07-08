@@ -58,7 +58,7 @@ var runCmd = &cobra.Command{
 		// buildBaseEnv honors the key's launch-injection policy instead of
 		// rejecting every key on a zero-value policy.
 		adapterReg := adapter.NewRegistry()
-		strategy, err := adapter.ResolveLaunchStrategy(*prof, *prov, rec, adapterReg)
+		strategy, err := adapter.ResolveLaunchStrategyCatalog(*prof, *prov, rec, adapterReg, reg, v, adapter.ResolveRun)
 		if err != nil {
 			return err
 		}

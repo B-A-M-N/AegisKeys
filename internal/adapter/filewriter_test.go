@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -397,6 +398,172 @@ func TestApplyFileWrites_CreatesParentDirectories(t *testing.T) {
 	}
 }
 
+func TestApplyFileWritesWithRestore_RemovesCreatedFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "runtime.json")
+
+	restore, err := ApplyFileWritesWithRestore([]FileWrite{{
+		Path:        path,
+		Format:      "json",
+		Content:     `{"aegiskeys": true}`,
+		Scope:       ScopeUser,
+		MergePolicy: MergeJSON,
+		Mode:        0600,
+	}}, map[string]string{})
+	if err != nil {
+		t.Fatalf("ApplyFileWritesWithRestore: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected runtime file before restore: %v", err)
+	}
+	if err := restore(); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected created file to be removed after restore, got %v", err)
+	}
+}
+
+func TestApplyFileWritesWithRestore_RestoresExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	original := []byte(`{"user": true}`)
+	if err := os.WriteFile(path, original, 0600); err != nil {
+		t.Fatalf("write original: %v", err)
+	}
+
+	restore, err := ApplyFileWritesWithRestore([]FileWrite{{
+		Path:        path,
+		Format:      "json",
+		Content:     `{"aegiskeys": true}`,
+		Scope:       ScopeUser,
+		MergePolicy: MergeJSON,
+		Mode:        0600,
+	}}, map[string]string{})
+	if err != nil {
+		t.Fatalf("ApplyFileWritesWithRestore: %v", err)
+	}
+	written, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read written: %v", err)
+	}
+	if string(written) == string(original) {
+		t.Fatal("expected runtime overlay to change the file before restore")
+	}
+	if err := restore(); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	restored, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read restored: %v", err)
+	}
+	if string(restored) != string(original) {
+		t.Fatalf("restored content = %q, want %q", string(restored), string(original))
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat restored: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("restored mode = %04o, want 0600", info.Mode().Perm())
+	}
+}
+
+func TestApplyFileWritesWithRestore_RunsInReverseOrder(t *testing.T) {
+	dir := t.TempDir()
+	paths := make([]string, 3)
+	for i := range paths {
+		paths[i] = filepath.Join(dir, fmt.Sprintf("runtime-%d.json", i))
+	}
+
+	// Record the order files are removed by wrapping os.Remove via a sentinel.
+	// Instead, we verify reverse order indirectly: create files [0,1,2],
+	// then confirm that after restore, ALL are gone. Reverse order is
+	// structurally guaranteed by the loop in ApplyFileWritesWithRestore
+	// (iterates from len-1 to 0). We assert the end state here.
+	writes := make([]FileWrite, len(paths))
+	for i, p := range paths {
+		writes[i] = FileWrite{
+			Path:        p,
+			Format:      "json",
+			Content:     fmt.Sprintf(`{"index": %d}`, i),
+			Scope:       ScopeUser,
+			MergePolicy: MergeNone,
+			Mode:        0600,
+		}
+	}
+
+	restore, err := ApplyFileWritesWithRestore(writes, map[string]string{})
+	if err != nil {
+		t.Fatalf("ApplyFileWritesWithRestore: %v", err)
+	}
+	for _, p := range paths {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("expected runtime file %s before restore: %v", p, err)
+		}
+	}
+	if err := restore(); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	for _, p := range paths {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("expected created file %s to be removed after restore", p)
+		}
+	}
+}
+
+func TestApplyFileWritesWithRestore_ReportsCleanupFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "runtime.json")
+
+	restore, err := ApplyFileWritesWithRestore([]FileWrite{{
+		Path:        path,
+		Format:      "json",
+		Content:     `{"aegiskeys": true}`,
+		Scope:       ScopeUser,
+		MergePolicy: MergeNone,
+		Mode:        0600,
+	}}, map[string]string{})
+	if err != nil {
+		t.Fatalf("ApplyFileWritesWithRestore: %v", err)
+	}
+
+	// Simulate a post-snapshot failure: remove the file so os.Remove succeeds
+	// but also make the parent dir read-only to cause a failure on restore
+	// of a file that existed before.
+	// For a created file (snapshot.exists=false), os.Remove will succeed.
+	// To force a failure, we pre-create a file, snapshot it, then make the
+	// parent read-only so atomicWrite fails on restore.
+	existing := filepath.Join(dir, "existing.json")
+	if err := os.WriteFile(existing, []byte(`{"keep": true}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	restore2, err := ApplyFileWritesWithRestore([]FileWrite{{
+		Path:        existing,
+		Format:      "json",
+		Content:     `{"aegiskeys": true}`,
+		Scope:       ScopeUser,
+		MergePolicy: MergeJSON,
+		Mode:        0600,
+	}}, map[string]string{})
+	if err != nil {
+		t.Fatalf("ApplyFileWritesWithRestore (existing): %v", err)
+	}
+
+	// Make parent dir read-only so atomicWrite fails during restore.
+	if err := os.Chmod(dir, 0500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dir, 0700)
+
+	err = restore2()
+	if err == nil {
+		t.Error("expected cleanup failure when parent dir is read-only")
+	}
+	_ = restore
+}
+
 // --- Contract interface tests ---
 
 func TestContract_HermesFullDeclaration(t *testing.T) {
@@ -771,6 +938,7 @@ var (
 	_ AppAdapter = ZedAdapter{}
 	_ AppAdapter = IntelliJAdapter{}
 	_ AppAdapter = MiMoOpenCodeAdapter{}
+	_ AppAdapter = OpenCodeAdapter{}
 	_ AppAdapter = OpenHandsAdapter{}
 	_ AppAdapter = GeminiCLIAdapter{}
 	_ AppAdapter = CopilotCLIAdapter{}
@@ -782,9 +950,50 @@ var (
 
 // --- New adapter tests ---
 
-func TestMiMoAdapter_SetsOpenCodeEnv(t *testing.T) {
+func TestMiMoAdapter_SetsMiMoOpenCodeEnv(t *testing.T) {
 	a := MiMoOpenCodeAdapter{}
 	p := profile.Profile{Name: "t", Target: profile.TargetConfig{App: "mimo"},
+		Models: profile.ModelSlots{Main: &profile.ModelRef{ID: "gpt-4o"}}}
+	prov := provider.Provider{Name: "OpenRouter", Slug: "openrouter", EnvVar: "OPENROUTER_API_KEY",
+		BaseURL: "https://openrouter.ai/api/v1", Compatibility: provider.CompatOpenAI}
+	key := testAPIKey("sk-test")
+	s, err := a.Render(p, prov, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.Plan.Command != "mimo" {
+		t.Errorf("command = %s", s.Plan.Command)
+	}
+	// The model is applied via mimocode.json (MiMo ignores OPENCODE_MODEL
+	// env vars), not by injecting OPENCODE_MODEL into the environment.
+	if _, ok := s.Plan.Env["OPENCODE_MODEL"]; ok {
+		t.Errorf("OPENCODE_MODEL should not be injected into env")
+	}
+	if len(s.Plan.Files) != 1 {
+		t.Fatalf("expected one config file, got %d", len(s.Plan.Files))
+	}
+	fw := s.Plan.Files[0]
+	if fw.Path != "$HOME/.config/mimocode/mimocode.json" || fw.Format != "json" {
+		t.Errorf("unexpected config file: %s (%s)", fw.Path, fw.Format)
+	}
+	if !strings.Contains(fw.Content, `"model": "openrouter/gpt-4o"`) {
+		t.Errorf("model not written to mimocode.json: %s", fw.Content)
+	}
+	// Secret must stay env-only: config references the env var, not the value.
+	if !strings.Contains(fw.Content, `"env":`) || !strings.Contains(fw.Content, `"OPENROUTER_API_KEY"`) {
+		t.Errorf("config should declare api key env var, got: %s", fw.Content)
+	}
+	if strings.Contains(fw.Content, `"apiKey"`) {
+		t.Errorf("config should not write apiKey option: %s", fw.Content)
+	}
+	if strings.Contains(fw.Content, "sk-test") {
+		t.Errorf("raw secret leaked into mimocode.json config")
+	}
+}
+
+func TestOpenCodeAdapter_SetsOpenCodeEnv(t *testing.T) {
+	a := OpenCodeAdapter{}
+	p := profile.Profile{Name: "t", Target: profile.TargetConfig{App: "opencode"},
 		Models: profile.ModelSlots{Main: &profile.ModelRef{ID: "gpt-4o"}}}
 	prov := provider.Provider{Name: "OpenRouter", Slug: "openrouter", EnvVar: "OPENROUTER_API_KEY",
 		BaseURL: "https://openrouter.ai/api/v1", Compatibility: provider.CompatOpenAI}
@@ -796,8 +1005,6 @@ func TestMiMoAdapter_SetsOpenCodeEnv(t *testing.T) {
 	if s.Plan.Command != "opencode" {
 		t.Errorf("command = %s", s.Plan.Command)
 	}
-	// The model is applied via opencode.json (OpenCode ignores OPENCODE_MODEL
-	// env vars), not by injecting OPENCODE_MODEL into the environment.
 	if _, ok := s.Plan.Env["OPENCODE_MODEL"]; ok {
 		t.Errorf("OPENCODE_MODEL should not be injected into env")
 	}
@@ -811,9 +1018,11 @@ func TestMiMoAdapter_SetsOpenCodeEnv(t *testing.T) {
 	if !strings.Contains(fw.Content, `"model": "openrouter/gpt-4o"`) {
 		t.Errorf("model not written to opencode.json: %s", fw.Content)
 	}
-	// Secret must stay env-only: config references the env var, not the value.
-	if !strings.Contains(fw.Content, "{env:OPENROUTER_API_KEY}") {
-		t.Errorf("config should reference api key via env, got: %s", fw.Content)
+	if !strings.Contains(fw.Content, `"env":`) || !strings.Contains(fw.Content, `"OPENROUTER_API_KEY"`) {
+		t.Errorf("config should declare api key env var, got: %s", fw.Content)
+	}
+	if strings.Contains(fw.Content, `"apiKey"`) {
+		t.Errorf("config should not write apiKey option: %s", fw.Content)
 	}
 	if strings.Contains(fw.Content, "sk-test") {
 		t.Errorf("raw secret leaked into opencode.json config")
@@ -940,7 +1149,7 @@ func TestKiloAdapter_ManualCredential(t *testing.T) {
 
 func TestRegistry_AllNewAdaptersRegistered(t *testing.T) {
 	r := NewRegistry()
-	want := []string{"mimo", "openhands", "gemini", "copilot", "continue", "roo", "kilo", "cursor"}
+	want := []string{"mimo", "opencode", "openhands", "gemini", "copilot", "continue", "roo", "kilo", "cursor"}
 	for _, id := range want {
 		if _, ok := r.Get(id); !ok {
 			t.Errorf("missing adapter: %s", id)

@@ -6,6 +6,7 @@ package redact
 
 import (
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -28,7 +29,7 @@ var keyPatterns = []*regexp.Regexp{
 }
 
 // highEntropyRe catches long base62-ish strings that look like secrets.
-var highEntropyRe = regexp.MustCompile(`\b[a-zA-Z0-9_-]{40,}\b`)
+var highEntropyRe = regexp.MustCompile(`\b[a-zA-Z0-9_-]{20,}\b`)
 
 // Redactor redacts both known patterns and exact vault values.
 type Redactor struct {
@@ -45,6 +46,12 @@ func NewRedactor(secrets []string) *Redactor {
 			vals = append(vals, s)
 		}
 	}
+	// Sort by length descending so longer secrets are replaced first.
+	// This prevents a shorter secret that is a substring of a longer one
+	// from being partially replaced, leaving a residual fragment behind.
+	sort.Slice(vals, func(i, j int) bool {
+		return len(vals[i]) > len(vals[j])
+	})
 	pats := make([]*regexp.Regexp, len(keyPatterns))
 	copy(pats, keyPatterns)
 	return &Redactor{exactValues: vals, patterns: pats}
@@ -73,7 +80,7 @@ type MaskedSecret struct {
 // Exact values are replaced first (longest first to avoid partial overlap),
 // then known patterns, then high-entropy strings.
 func (r *Redactor) RedactString(s string) string {
-	// 1. Exact-value matches — sort by length desc to avoid partial replaces.
+	// 1. Exact-value matches (already sorted longest-first by NewRedactor).
 	for _, v := range r.exactValues {
 		s = strings.ReplaceAll(s, v, "<redacted>")
 	}
@@ -83,7 +90,7 @@ func (r *Redactor) RedactString(s string) string {
 	}
 	// 3. High-entropy strings — only if not already inside a redaction.
 	s = highEntropyRe.ReplaceAllStringFunc(s, func(m string) string {
-		if len(m) >= 40 {
+		if len(m) >= 20 {
 			return "<redacted>"
 		}
 		return m

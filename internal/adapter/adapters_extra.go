@@ -2,6 +2,9 @@ package adapter
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"aegiskeys/internal/profile"
@@ -13,16 +16,20 @@ import (
 // Additional first-class CLI agents
 // ---------------------------------------------------------------------------
 
-// MiMoOpenCodeAdapter renders config for MiMo/OpenCode (Nous Research CLI).
-// OpenCode selects its model/provider from opencode.json (or --model) and reads
-// provider API keys from environment variables, so we patch the user's
-// opencode.json with the chosen model and provider base URL while keeping the
-// secret in the env only.
+const (
+	mimoConfigPath     = "$HOME/.config/mimocode/mimocode.json"
+	openCodeConfigPath = "$HOME/.config/opencode/opencode.json"
+)
+
+// MiMoOpenCodeAdapter renders config for MiMo (Nous Research CLI).
+// MiMo uses the OpenCode-compatible config schema and reads provider API keys
+// from environment variables, so we patch the user's mimocode.json with model
+// and provider metadata while keeping secrets env-only.
 type MiMoOpenCodeAdapter struct{}
 
 func (MiMoOpenCodeAdapter) ID() string             { return "mimo" }
-func (MiMoOpenCodeAdapter) DisplayName() string    { return "MiMo / OpenCode" }
-func (MiMoOpenCodeAdapter) DefaultCommand() string { return "opencode" }
+func (MiMoOpenCodeAdapter) DisplayName() string    { return "MiMo" }
+func (MiMoOpenCodeAdapter) DefaultCommand() string { return "mimo" }
 
 func (MiMoOpenCodeAdapter) SupportsProvider(p provider.Provider) bool {
 	return p.Compatibility == provider.CompatOpenAI ||
@@ -35,14 +42,14 @@ func (MiMoOpenCodeAdapter) CanConfigureProvider(p provider.Provider) bool { retu
 
 func (MiMoOpenCodeAdapter) Contract() AppSupportContract {
 	return AppSupportContract{
-		ID: "mimo", DisplayName: "MiMo / OpenCode", DefaultCommand: "opencode",
+		ID: "mimo", DisplayName: "MiMo", DefaultCommand: "mimo",
 		SupportLevel: SupportEnvConfig, RenderModes: []string{"env", "config_file"},
 		CredentialControl: CredentialConfigPatched,
 		SupportConfidence: ConfidenceExperimental,
 		LaunchSurfaces:    []string{"cli"},
 		CanLaunch:         true, CanInjectSecrets: true, CanPatchConfig: true,
 		ConfigFiles: []ConfigFileContract{
-			{Path: "$HOME/.config/opencode/opencode.json", Format: "json", Description: "OpenCode model/provider config"},
+			{Path: mimoConfigPath, Format: "json", Description: "MiMo model/provider config"},
 		},
 		CanManageModels: true, CanIsolateProfile: false, RequiresManualStep: false,
 		ValidationChecks: []string{"config_no_raw_secret", "model_slots_validated", "backup_before_merge"},
@@ -62,18 +69,124 @@ func (MiMoOpenCodeAdapter) Render(p profile.Profile, prov provider.Provider, key
 	if err != nil {
 		return nil, err
 	}
-	files := buildOpenCodeConfig(p, prov)
+	files := buildOpenCodeConfigFor(p, prov, mimoConfigPath, "MiMo model/provider config; secret stays env-only")
+	return &LaunchStrategy{
+		Plan:    LaunchPlan{Command: "mimo", Env: env, Files: files, Preview: buildPreview(p.Name, prov)},
+		Support: AppSupportContract{ID: "mimo", DisplayName: "MiMo", SupportLevel: SupportEnvConfig},
+	}, nil
+}
+
+// RenderCatalog implements ProviderCatalogAdapter for MiMo. It writes all
+// compatible providers into mimocode.json and injects available AegisKeys
+// secrets via child-scoped env vars.
+func (MiMoOpenCodeAdapter) RenderCatalog(ctx ProviderCatalogRenderContext) (*LaunchStrategy, error) {
+	env, err := buildCatalogEnv(ctx.Profile, ctx.Providers, ctx.KeysByProvider)
+	if err != nil {
+		return nil, err
+	}
+
+	files := buildOpenCodeCatalogConfigFor(ctx, mimoConfigPath, "MiMo provider catalog; secrets remain env-only")
+
+	return &LaunchStrategy{
+		Plan: LaunchPlan{
+			Command: "mimo",
+			Env:     env,
+			Files:   files,
+			Preview: []string{
+				fmt.Sprintf("Launch %s with MiMo", ctx.Profile.Name),
+				fmt.Sprintf("Write MiMo provider catalog: %d providers", len(ctx.Providers)),
+				"Secrets remain child-env-only; config stores env var names",
+			},
+		},
+		Support: MiMoOpenCodeAdapter{}.Contract(),
+	}, nil
+}
+
+// OpenCodeAdapter renders config for the standalone OpenCode CLI.
+type OpenCodeAdapter struct{}
+
+func (OpenCodeAdapter) ID() string             { return "opencode" }
+func (OpenCodeAdapter) DisplayName() string    { return "OpenCode" }
+func (OpenCodeAdapter) DefaultCommand() string { return "opencode" }
+
+func (OpenCodeAdapter) SupportsProvider(p provider.Provider) bool {
+	return p.Compatibility == provider.CompatOpenAI ||
+		p.Compatibility == provider.CompatAnthropic ||
+		p.Compatibility == provider.CompatLocal
+}
+
+func (OpenCodeAdapter) CanInjectCredential(p provider.Provider) bool  { return true }
+func (OpenCodeAdapter) CanConfigureProvider(p provider.Provider) bool { return true }
+
+func (OpenCodeAdapter) Contract() AppSupportContract {
+	return AppSupportContract{
+		ID: "opencode", DisplayName: "OpenCode", DefaultCommand: "opencode",
+		SupportLevel: SupportEnvConfig, RenderModes: []string{"env", "config_file"},
+		CredentialControl: CredentialConfigPatched,
+		SupportConfidence: ConfidenceExperimental,
+		LaunchSurfaces:    []string{"cli"},
+		CanLaunch:         true, CanInjectSecrets: true, CanPatchConfig: true,
+		ConfigFiles: []ConfigFileContract{
+			{Path: openCodeConfigPath, Format: "json", Description: "OpenCode model/provider config"},
+		},
+		CanManageModels: true, CanIsolateProfile: false, RequiresManualStep: false,
+		ValidationChecks: []string{"config_no_raw_secret", "model_slots_validated", "backup_before_merge"},
+		ModelSlots: []ModelSlotContract{
+			{Name: "main", Description: "Primary model"},
+		},
+		AcceptedCompatibility: []provider.CompatibilityMode{provider.CompatOpenAI, provider.CompatAnthropic, provider.CompatLocal},
+	}
+}
+
+func (OpenCodeAdapter) Validate(p profile.Profile, prov provider.Provider) ([]string, error) {
+	return nil, nil
+}
+
+func (OpenCodeAdapter) Render(p profile.Profile, prov provider.Provider, key *secret.SecretRecord) (*LaunchStrategy, error) {
+	env, err := buildBaseEnv(p, prov, key)
+	if err != nil {
+		return nil, err
+	}
+	files := buildOpenCodeConfigFor(p, prov, openCodeConfigPath, "OpenCode model/provider config; secret stays env-only")
 	return &LaunchStrategy{
 		Plan:    LaunchPlan{Command: "opencode", Env: env, Files: files, Preview: buildPreview(p.Name, prov)},
-		Support: AppSupportContract{ID: "mimo", DisplayName: "MiMo / OpenCode", SupportLevel: SupportEnvConfig},
+		Support: AppSupportContract{ID: "opencode", DisplayName: "OpenCode", SupportLevel: SupportEnvConfig},
+	}, nil
+}
+
+func (OpenCodeAdapter) RenderCatalog(ctx ProviderCatalogRenderContext) (*LaunchStrategy, error) {
+	env, err := buildCatalogEnv(ctx.Profile, ctx.Providers, ctx.KeysByProvider)
+	if err != nil {
+		return nil, err
+	}
+
+	files := buildOpenCodeCatalogConfigFor(ctx, openCodeConfigPath, "OpenCode provider catalog; secrets remain env-only")
+
+	return &LaunchStrategy{
+		Plan: LaunchPlan{
+			Command: "opencode",
+			Env:     env,
+			Files:   files,
+			Preview: []string{
+				fmt.Sprintf("Launch %s with OpenCode", ctx.Profile.Name),
+				fmt.Sprintf("Write OpenCode provider catalog: %d providers", len(ctx.Providers)),
+				"Secrets remain child-env-only; config stores env var names",
+			},
+		},
+		Support: OpenCodeAdapter{}.Contract(),
 	}, nil
 }
 
 // buildOpenCodeConfig writes the chosen model and provider base URL into the
-// user's opencode.json. The API key stays env-only (referenced via {env:...}),
-// so no raw secret is written to disk. The merge is recursive (deepMerge), so
-// existing provider blocks and other settings are preserved.
+// user's OpenCode-compatible config. The API key stays child-env-only, with
+// config declaring the env var name; no raw secret is written to disk. The
+// merge is recursive (deepMerge), so existing provider blocks and other
+// settings are preserved.
 func buildOpenCodeConfig(p profile.Profile, prov provider.Provider) []FileWrite {
+	return buildOpenCodeConfigFor(p, prov, openCodeConfigPath, "OpenCode model/provider config; secret stays env-only")
+}
+
+func buildOpenCodeConfigFor(p profile.Profile, prov provider.Provider, path, description string) []FileWrite {
 	modelID := ""
 	if p.Models.Main != nil {
 		modelID = p.Models.Main.ID
@@ -86,25 +199,80 @@ func buildOpenCodeConfig(p profile.Profile, prov provider.Provider) []FileWrite 
 			cfg["model"] = prov.Slug + "/" + modelID
 		}
 	}
-	cfg["provider"] = map[string]any{
-		prov.Slug: map[string]any{
-			"options": map[string]any{
-				"apiKey":  "{env:" + prov.CanonicalEnvVar() + "}",
-				"baseURL": prov.CanonicalBaseURL(),
-			},
+	providerEntry := map[string]any{
+		"options": map[string]any{
+			"baseURL": prov.CanonicalBaseURL(),
 		},
+	}
+	// Only declare env var for providers that need a credential.
+	// Local/no-auth providers must not carry an empty env var reference.
+	if envVar := prov.CanonicalEnvVar(); envVar != "" {
+		providerEntry["env"] = []string{envVar}
+	}
+	cfg["provider"] = map[string]any{
+		prov.Slug: providerEntry,
 	}
 	content, _ := json.MarshalIndent(cfg, "", "  ")
 	return []FileWrite{
 		{
-			Path:         "$HOME/.config/opencode/opencode.json",
+			Path:         path,
 			Format:       "json",
 			Content:      string(content),
 			Scope:        ScopeUser,
 			MergePolicy:  MergeJSON,
 			BackupPolicy: BackupRedacted,
 			RedactCheck:  true,
-			Description:  "OpenCode model/provider config; secret stays env-only",
+			Description:  description,
+		},
+	}
+}
+
+// buildOpenCodeCatalogConfig writes all compatible providers into the
+// opencode.json provider map. Secrets are injected via env vars at launch time
+// when AegisKeys has a launch-enabled key for that provider.
+func buildOpenCodeCatalogConfig(ctx ProviderCatalogRenderContext) []FileWrite {
+	return buildOpenCodeCatalogConfigFor(ctx, openCodeConfigPath, "OpenCode provider catalog; secrets remain env-only")
+}
+
+func buildOpenCodeCatalogConfigFor(ctx ProviderCatalogRenderContext, path, description string) []FileWrite {
+	modelID := ""
+	if ctx.Profile.Models.Main != nil {
+		modelID = ctx.Profile.Models.Main.ID
+	}
+	cfg := map[string]any{}
+	if modelID != "" {
+		if strings.Contains(modelID, "/") {
+			cfg["model"] = modelID
+		} else if ctx.SelectedProvider.Slug != "" {
+			cfg["model"] = ctx.SelectedProvider.Slug + "/" + modelID
+		}
+	}
+
+	providers := map[string]any{}
+	for _, prov := range ctx.Providers {
+		entry := map[string]any{
+			"options": map[string]any{
+				"baseURL": prov.CanonicalBaseURL(),
+			},
+		}
+		if _, ok := ctx.KeysByProvider[prov.Slug]; ok {
+			entry["env"] = []string{prov.CanonicalEnvVar()}
+		}
+		providers[prov.Slug] = entry
+	}
+	cfg["provider"] = providers
+
+	content, _ := json.MarshalIndent(cfg, "", "  ")
+	return []FileWrite{
+		{
+			Path:         path,
+			Format:       "json",
+			Content:      string(content),
+			Scope:        ScopeUser,
+			MergePolicy:  MergeJSON,
+			BackupPolicy: BackupRedacted,
+			RedactCheck:  true,
+			Description:  description,
 		},
 	}
 }
@@ -346,7 +514,8 @@ func (CodexAdapter) Contract() AppSupportContract {
 		CanManageModels: true, CanIsolateProfile: false, RequiresManualStep: false,
 		ValidationChecks: []string{"env_injection_only", "model_slots_validated"},
 		ModelSlots: []ModelSlotContract{
-			{Name: "main", Description: "Primary model (gpt54 equivalent)"},
+			{Name: "main", Description: "Primary model"},
+			{Name: "gpt54", Description: "GPT-5.4", Optional: true},
 			{Name: "gpt54mini", Description: "GPT-5.4 Mini", Optional: true},
 			{Name: "gpt53codex", Description: "GPT-5.3 Codex", Optional: true},
 			{Name: "gpt52codex", Description: "GPT-5.2 Codex", Optional: true},
@@ -363,15 +532,62 @@ func (CodexAdapter) Validate(p profile.Profile, prov provider.Provider) ([]strin
 }
 
 func (CodexAdapter) Render(p profile.Profile, prov provider.Provider, key *secret.SecretRecord) (*LaunchStrategy, error) {
-	env, err := buildBaseEnv(p, prov, key)
-	if err != nil {
-		return nil, err
+	env := make(map[string]string)
+
+	if key != nil {
+		if err := key.AllowAccess(secret.AccessInjectEnv); err != nil {
+			return nil, fmt.Errorf("secret %q policy blocks launch injection: %w", key.ID, err)
+		}
 	}
-	var args []string
+
+	// Codex ignores OPENAI_API_KEY and uses its own subscription unless
+	// a custom model_provider is configured. Unset standard OpenAI env
+	// vars so stale credentials don't leak.
+	unsetVars := []string{
+		"OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE",
+	}
+	for _, v := range unsetVars {
+		env[v] = ""
+	}
+
+	// Write a Codex profile config that defines a custom provider.
+	// The -c flag only handles simple key=value; TOML tables require
+	// a profile file layered via -p with CODEX_HOME set.
+	baseURL := strings.TrimRight(prov.CanonicalBaseURL(), "/")
+	providerName := prov.Name
+	profileDir, err := os.MkdirTemp("", "aegiskeys-codex-*")
+	if err != nil {
+		return nil, fmt.Errorf("create codex profile dir: %w", err)
+	}
+	profilePath := filepath.Join(profileDir, "aegiskeys.config.toml")
+	config := fmt.Sprintf(`model_provider = "aegiskeys"
+
+[model_providers.aegiskeys]
+name = %q
+base_url = %q
+env_key = "CODEX_AEGIS_API_KEY"
+wire_api = "responses"
+`, providerName, baseURL)
+	if err := os.WriteFile(profilePath, []byte(config), 0600); err != nil {
+		return nil, fmt.Errorf("write codex profile: %w", err)
+	}
+
+	// CODEX_HOME must point to the dir containing the profile so -p works.
+	env["CODEX_HOME"] = profileDir
+
+	// Set the API key in the env var referenced by env_key.
+	if key != nil {
+		env["CODEX_AEGIS_API_KEY"] = key.Secret
+	}
+
+	args := []string{}
 	if p.ModelID() != "" {
 		args = append(args, "--model", p.ModelID())
 	}
 	// Inject auxiliary codex slots as env vars for wrappers/scripts
+	if m := p.Models.Get("gpt54"); m != nil && m.ID != "" {
+		env["CODEX_MODEL_GPT54"] = m.ID
+	}
 	if m := p.Models.Get("gpt54mini"); m != nil && m.ID != "" {
 		env["CODEX_MODEL_GPT54MINI"] = m.ID
 	}
@@ -390,10 +606,100 @@ func (CodexAdapter) Render(p profile.Profile, prov provider.Provider, key *secre
 	if m := p.Models.Get("gpt51codexmini"); m != nil && m.ID != "" {
 		env["CODEX_MODEL_GPT51CODEXMINI"] = m.ID
 	}
+
 	return &LaunchStrategy{
-		Plan:    LaunchPlan{Command: "codex", Args: args, Env: env, Preview: buildPreview(p.Name, prov)},
+		Plan: LaunchPlan{
+			Command: "codex",
+			Args:    append(args, "-p", "aegiskeys"),
+			Env:     env,
+			Preview: buildPreview(p.Name, prov),
+		},
 		Support: AppSupportContract{ID: "codex", DisplayName: "Codex CLI", SupportLevel: SupportFullEnv},
 	}, nil
+}
+
+// RenderCatalog implements ProviderCatalogAdapter for Codex. It writes all
+// compatible providers into the model_providers TOML table, each referencing
+// its API key via env_key. Actual secrets are injected via env vars at launch.
+//
+// Gotcha: wire_api MUST be "responses" — that's the only format Codex supports.
+func (CodexAdapter) RenderCatalog(ctx ProviderCatalogRenderContext) (*LaunchStrategy, error) {
+	env, err := buildCatalogEnv(ctx.Profile, ctx.Providers, ctx.KeysByProvider)
+	if err != nil {
+		return nil, err
+	}
+
+	// Unset standard OpenAI env vars so Codex doesn't use its subscription.
+	// These are set to empty (which in BuildChildEnv means "remove from child").
+	for _, v := range []string{"OPENAI_BASE_URL", "OPENAI_API_BASE"} {
+		env[v] = ""
+	}
+
+	// Write a Codex profile config with all providers.
+	profileDir, err := os.MkdirTemp("", "aegiskeys-codex-*")
+	if err != nil {
+		return nil, fmt.Errorf("create codex profile dir: %w", err)
+	}
+	profilePath := filepath.Join(profileDir, "aegiskeys.config.toml")
+	config := buildCodexCatalogConfig(ctx)
+	if err := os.WriteFile(profilePath, []byte(config), 0600); err != nil {
+		return nil, fmt.Errorf("write codex profile: %w", err)
+	}
+
+	env["CODEX_HOME"] = profileDir
+
+	// Set model from profile.
+	args := []string{}
+	if ctx.Profile.ModelID() != "" {
+		args = append(args, "--model", ctx.Profile.ModelID())
+	}
+
+	return &LaunchStrategy{
+		Plan: LaunchPlan{
+			Command: "codex",
+			Args:    append(args, "-p", "aegiskeys"),
+			Env:     env,
+			Preview: []string{
+				fmt.Sprintf("Launch %s with Codex", ctx.Profile.Name),
+				fmt.Sprintf("Write Codex model_providers: %d providers", len(ctx.Providers)),
+				"Secrets remain env-only via env_key",
+			},
+		},
+		Support: CodexAdapter{}.Contract(),
+	}, nil
+}
+
+// buildCodexCatalogConfig generates a TOML config with all compatible providers
+// in the model_providers table. Each provider references its API key via env_key.
+func buildCodexCatalogConfig(ctx ProviderCatalogRenderContext) string {
+	var b strings.Builder
+
+	// Select the active provider.
+	if ctx.SelectedProvider.Slug != "" {
+		fmt.Fprintf(&b, "model_provider = %q\n", ctx.SelectedProvider.Slug)
+	}
+	if ctx.Profile.ModelID() != "" {
+		fmt.Fprintf(&b, "model = %q\n", ctx.Profile.ModelID())
+	}
+	b.WriteString("\n")
+
+	// Write each provider into the model_providers table.
+	for _, prov := range ctx.Providers {
+		envKey := prov.CanonicalEnvVar()
+		if envKey == "" {
+			envKey = "CODEX_" + strings.ToUpper(prov.Slug) + "_API_KEY"
+		}
+		baseURL := strings.TrimRight(prov.CanonicalBaseURL(), "/")
+
+		fmt.Fprintf(&b, "[model_providers.%q]\n", prov.Slug)
+		fmt.Fprintf(&b, "name = %q\n", prov.DisplayName())
+		fmt.Fprintf(&b, "base_url = %q\n", baseURL)
+		fmt.Fprintf(&b, "env_key = %q\n", envKey)
+		b.WriteString("wire_api = \"responses\"\n")
+		b.WriteString("\n")
+	}
+
+	return b.String()
 }
 
 // ---------------------------------------------------------------------------

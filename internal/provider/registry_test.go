@@ -125,3 +125,102 @@ func TestDefaultProviderCountAndRequiredSlugs(t *testing.T) {
 		}
 	}
 }
+
+func TestDefaultProvidersPassValidateStrict(t *testing.T) {
+	for _, p := range DefaultProviders() {
+		if err := p.ValidateStrict(); err != nil {
+			t.Errorf("provider %q failed strict validation: %v", p.Slug, err)
+		}
+	}
+}
+
+func TestNormalizeNewProviders(t *testing.T) {
+	cases := []struct {
+		slug         string
+		wantCompat   CompatibilityMode
+		wantProtocol Protocol
+		wantAuthType string
+		wantEnvVar   string
+	}{
+		{"zen", CompatOpenAI, ProtocolOpenAI, "bearer", "OPENCODE_ZEN_API_KEY"},
+		{"opencode-go", CompatOpenAI, ProtocolOpenAI, "bearer", "OPENCODE_GO_API_KEY"},
+		{"longcat", CompatOpenAI, ProtocolOpenAI, "bearer", "LONGCAT_API_KEY"},
+		{"anyrouter", CompatAnthropic, ProtocolAnthropic, "bearer", "ANTHROPIC_AUTH_TOKEN"},
+		{"azure-openai", CompatOpenAI, ProtocolOpenAI, "header", "AZURE_OPENAI_API_KEY"},
+		{"alibaba-cloud", CompatOpenAI, ProtocolOpenAI, "bearer", "DASHSCOPE_API_KEY"},
+		{"tencent", CompatOpenAI, ProtocolOpenAI, "bearer", "HUNYUAN_API_KEY"},
+		{"commandcode", CompatOpenAI, ProtocolOpenAI, "bearer", "COMMANDCODE_API_KEY"},
+		{"cline", CompatOpenAI, ProtocolOpenAI, "bearer", "CLINE_API_KEY"},
+	}
+	slugMap := map[string]Provider{}
+	for _, p := range DefaultProviders() {
+		slugMap[p.Slug] = p
+	}
+	for _, tc := range cases {
+		p, ok := slugMap[tc.slug]
+		if !ok {
+			t.Errorf("provider %q not found in defaults", tc.slug)
+			continue
+		}
+		p.Normalize()
+		if p.Compatibility != tc.wantCompat {
+			t.Errorf("%s: compatibility = %q, want %q", tc.slug, p.Compatibility, tc.wantCompat)
+		}
+		if p.Protocol != tc.wantProtocol {
+			t.Errorf("%s: protocol = %q, want %q", tc.slug, p.Protocol, tc.wantProtocol)
+		}
+		if p.Auth.Type != tc.wantAuthType {
+			t.Errorf("%s: auth type = %q, want %q", tc.slug, p.Auth.Type, tc.wantAuthType)
+		}
+		if p.CanonicalEnvVar() != tc.wantEnvVar {
+			t.Errorf("%s: env var = %q, want %q", tc.slug, p.CanonicalEnvVar(), tc.wantEnvVar)
+		}
+	}
+}
+
+func TestAzureOpenAIHeaderAuth(t *testing.T) {
+	var p *Provider
+	for i := range defaultProviders {
+		if defaultProviders[i].Slug == "azure-openai" {
+			p = &defaultProviders[i]
+			break
+		}
+	}
+	if p == nil {
+		t.Fatal("azure-openai provider not found")
+	}
+	p.Normalize()
+	if p.Auth.Type != "header" {
+		t.Errorf("azure auth type = %q, want header", p.Auth.Type)
+	}
+	if p.Auth.HeaderName != "api-key" {
+		t.Errorf("azure header name = %q, want api-key", p.Auth.HeaderName)
+	}
+	if p.AuthHeader != "api-key: ${KEY}" {
+		t.Errorf("azure auth header = %q, want api-key: ${KEY}", p.AuthHeader)
+	}
+	// Azure must not use a bearer prefix.
+	if p.Auth.Prefix != "" {
+		t.Errorf("azure auth prefix = %q, want empty (uses api-key header, not bearer)", p.Auth.Prefix)
+	}
+}
+
+func TestAnyRouterAnthropicCompat(t *testing.T) {
+	var p *Provider
+	for i := range defaultProviders {
+		if defaultProviders[i].Slug == "anyrouter" {
+			p = &defaultProviders[i]
+			break
+		}
+	}
+	if p == nil {
+		t.Fatal("anyrouter provider not found")
+	}
+	p.Normalize()
+	if p.Compatibility != CompatAnthropic {
+		t.Errorf("anyrouter compatibility = %q, want anthropic", p.Compatibility)
+	}
+	if p.EnvVar != "ANTHROPIC_AUTH_TOKEN" {
+		t.Errorf("anyrouter env var = %q, want ANTHROPIC_AUTH_TOKEN", p.EnvVar)
+	}
+}

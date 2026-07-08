@@ -98,6 +98,81 @@ func ApplyFileWrites(writes []FileWrite, env map[string]string) error {
 	return nil
 }
 
+type fileSnapshot struct {
+	path    string
+	exists  bool
+	content []byte
+	mode    os.FileMode
+}
+
+// ApplyFileWritesWithRestore applies file writes and returns a cleanup function
+// that restores the pre-launch file state. Files created by the write are
+// removed; files that existed before the write are restored with their prior
+// content and mode.
+func ApplyFileWritesWithRestore(writes []FileWrite, env map[string]string) (func() error, error) {
+	snapshots := make([]fileSnapshot, 0, len(writes))
+	for _, w := range writes {
+		path, err := expandPath(w.Path, env)
+		if err != nil {
+			return nil, fmt.Errorf("expand path %q: %w", w.Path, err)
+		}
+		if err := preflightWrite(path, w.Scope); err != nil {
+			return nil, fmt.Errorf("preflight %q: %w", path, err)
+		}
+
+		snap := fileSnapshot{path: path}
+		info, err := os.Stat(path)
+		switch {
+		case os.IsNotExist(err):
+			snapshots = append(snapshots, snap)
+			continue
+		case err != nil:
+			return nil, fmt.Errorf("stat %s: %w", path, err)
+		case info.IsDir():
+			return nil, fmt.Errorf("cannot snapshot directory %s", path)
+		default:
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return nil, fmt.Errorf("read %s for restore snapshot: %w", path, err)
+			}
+			snap.exists = true
+			snap.content = data
+			snap.mode = info.Mode().Perm()
+			snapshots = append(snapshots, snap)
+		}
+	}
+
+	restore := func() error {
+		var errs []string
+		for i := len(snapshots) - 1; i >= 0; i-- {
+			snap := snapshots[i]
+			if snap.exists {
+				if err := ensureDir(snap.path); err != nil {
+					errs = append(errs, fmt.Sprintf("%s: %v", snap.path, err))
+					continue
+				}
+				if err := atomicWrite(snap.path, snap.content, snap.mode); err != nil {
+					errs = append(errs, fmt.Sprintf("%s: %v", snap.path, err))
+				}
+				continue
+			}
+			if err := os.Remove(snap.path); err != nil && !os.IsNotExist(err) {
+				errs = append(errs, fmt.Sprintf("%s: %v", snap.path, err))
+			}
+		}
+		if len(errs) > 0 {
+			return fmt.Errorf("restore file writes: %s", strings.Join(errs, "; "))
+		}
+		return nil
+	}
+
+	if err := ApplyFileWrites(writes, env); err != nil {
+		_ = restore()
+		return nil, err
+	}
+	return restore, nil
+}
+
 func refuseUnsafeReplace(path string, scope ConfigScope, format string) error {
 	if scope == ScopeProfile || scope == ScopeTemp {
 		return nil

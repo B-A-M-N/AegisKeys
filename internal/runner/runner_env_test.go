@@ -1,6 +1,8 @@
 package runner
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	"aegiskeys/internal/adapter"
@@ -81,6 +83,64 @@ func TestRunConfig_AppClassField(t *testing.T) {
 	cfg := RunConfig{AppClass: "gui"}
 	if cfg.AppClass != "gui" {
 		t.Error("AppClass field should be settable")
+	}
+}
+
+// TestBuildChildEnv_StripsNonCredentialVarSecrets proves that the child env
+// only contains allowlisted vars — a parent secret whose name is not in the
+// hardcoded CredentialVar list must NOT leak into the child.
+func TestBuildChildEnv_StripsNonCredentialVarSecrets(t *testing.T) {
+	parent := []string{
+		"PATH=/usr/bin",
+		"HOME=/home/user",
+		"TERM=xterm-256color",
+		"MY_COMPANY_TOKEN=super-secret-value",  // not in CredentialVar
+		"DATABASE_URL=postgres://user:pass@db", // not in CredentialVar
+	}
+	allowlist := baseEnvForClass("cli")
+	filtered := cleanBaseEnvWithAllowlist(parent, allowlist)
+	got := BuildChildEnv(filtered, map[string]string{})
+
+	for _, kv := range got {
+		if strings.Contains(kv, "MY_COMPANY_TOKEN") {
+			t.Errorf("non-allowlisted parent secret leaked into child env: %s", kv)
+		}
+		if strings.Contains(kv, "DATABASE_URL") {
+			t.Errorf("non-allowlisted parent var leaked into child env: %s", kv)
+		}
+	}
+}
+
+// TestPrepareCommand_AppliesEnvAllowlist verifies that PrepareCommandWithCleanup
+// filters the parent env through the allowlist derived from the strategy's app
+// class, not just the CredentialVar denylist.
+func TestPrepareCommand_AppliesEnvAllowlist(t *testing.T) {
+	// Set a parent env var that is secret-shaped but NOT in CredentialVar.
+	t.Setenv("MY_CUSTOM_TOKEN", "leak-me-if-broken")
+
+	strategy := &adapter.LaunchStrategy{
+		Plan: adapter.LaunchPlan{
+			Command: "/bin/true",
+			Env:     map[string]string{"OPENAI_API_KEY": "sk-injected"},
+		},
+		Support: adapter.AppSupportContract{
+			ID:             "generic",
+			LaunchSurfaces: []string{"cli"},
+			CanLaunch:      true,
+		},
+	}
+
+	prepared, err := PrepareCommandWithCleanup(context.Background(), strategy, RunOptions{InheritStdio: false})
+	if err != nil {
+		t.Fatalf("PrepareCommandWithCleanup: %v", err)
+	}
+	for _, kv := range prepared.Cmd.Env {
+		if strings.Contains(kv, "MY_CUSTOM_TOKEN") {
+			t.Errorf("non-allowlisted parent secret reached child env via Run path: %s", kv)
+		}
+		if strings.Contains(kv, "leak-me-if-broken") {
+			t.Errorf("non-allowlisted parent secret value reached child env: %s", kv)
+		}
 	}
 }
 

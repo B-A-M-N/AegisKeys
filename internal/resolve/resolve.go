@@ -49,10 +49,9 @@ func ValidateResolution(
 		}
 	}
 
-	// 3. The target adapter must resolve.
+	// 3. The target adapter must exist.
 	appID := p.TargetApp()
-	ad, ok := adapters.Get(appID)
-	if !ok {
+	if _, ok := adapters.Get(appID); !ok {
 		return fmt.Errorf("profile %q: adapter for app %q not registered", p.Name, appID)
 	}
 
@@ -61,11 +60,10 @@ func ValidateResolution(
 	if vault != nil && p.KeyID != "" {
 		key = vault.Get(p.KeyID)
 	}
-	_, err := adapter.ResolveLaunchStrategyForMode(p, *prov, key, adapters, adapter.ResolveSave)
+	_, err := adapter.ResolveLaunchStrategyCatalog(p, *prov, key, adapters, providers, vault, adapter.ResolveSave)
 	if err != nil {
 		return fmt.Errorf("profile %q: cannot resolve launch strategy: %w", p.Name, err)
 	}
-	_ = ad
 
 	return nil
 }

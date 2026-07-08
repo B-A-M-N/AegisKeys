@@ -905,6 +905,9 @@ func (m *model) contentForeground(s *Styles) string {
 	case screenDashboard:
 		return m.dashboardView(s)
 	case screenProviders:
+		if m.modelCatalog.active {
+			return m.modelCatalogView(s)
+		}
 		return m.providersView(s)
 	case screenKeys:
 		return m.keysView(s)
@@ -918,6 +921,8 @@ func (m *model) contentForeground(s *Styles) string {
 		return m.auditView(s)
 	case screenSettings:
 		return m.settingsView(s)
+	case screenScratch:
+		return m.scratchView(s)
 	case screenHelp:
 		return m.helpView(s)
 	}

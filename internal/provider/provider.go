@@ -166,6 +166,44 @@ func (p Provider) CanonicalBaseURL() string {
 	return p.BaseURL
 }
 
+// ModelRefreshURL resolves the best endpoint for fetching this provider's model
+// catalog. It prefers explicit configuration (Catalog.RefreshURL, ModelPolicy.
+// RefreshURL, Endpoints.ModelsURL) before deriving one from the base URL.
+func (p Provider) ModelRefreshURL() string {
+	if p.Catalog.RefreshURL != "" {
+		return p.Catalog.RefreshURL
+	}
+	if p.ModelPolicy.RefreshURL != "" {
+		return p.ModelPolicy.RefreshURL
+	}
+	if p.Endpoints.ModelsURL != "" {
+		return p.Endpoints.ModelsURL
+	}
+	base := strings.TrimRight(p.CanonicalBaseURL(), "/")
+	if base == "" {
+		return ""
+	}
+	// Local loopback providers without an explicit models URL: do not guess.
+	if u, err := url.Parse(base); err == nil && isLoopbackHost(u.Hostname()) {
+		return ""
+	}
+	if p.Compatibility == CompatOpenAI || p.Compatibility == CompatLocal || p.Compatibility == "" {
+		return base + "/models"
+	}
+	return ""
+}
+
+// CanRefreshModels reports whether this provider can have its model list
+// refreshed from an external endpoint. Local providers (Ollama, LM Studio,
+// vLLM) can always discover models via their local API. Remote providers
+// need either an explicit refresh URL or a derivable base URL.
+func (p Provider) CanRefreshModels() bool {
+	if p.Catalog.Source == "local" || p.Protocol == ProtocolLocal {
+		return true
+	}
+	return p.ModelRefreshURL() != ""
+}
+
 // Normalize migrates flat legacy fields into their structured counterparts
 // and infers missing compatibility/protocol/auth metadata from the base URL.
 // It only fills in EMPTY fields — user-set values are never overwritten.
@@ -740,6 +778,173 @@ var defaultProviders = []Provider{
 		ModelPolicy: ModelCatalogPolicy{Source: ModelSourceManual},
 		ExtraEnv:    map[string]string{"OPENAI_BASE_URL": "http://localhost:8000/v1"},
 		Tags:        []string{"local", "manual"},
+	},
+	{
+		ID: "zen", Name: "OpenCode Zen", Slug: "zen",
+		BaseURL: "https://opencode.ai/zen/v1", EnvVar: "OPENCODE_ZEN_API_KEY",
+		AuthHeader:    "Authorization: Bearer ${KEY}",
+		Compatibility: CompatOpenAI, Protocol: ProtocolOpenAI,
+		Auth:      AuthSpec{Type: "bearer", HeaderName: "Authorization", Prefix: "Bearer ", EnvVar: "OPENCODE_ZEN_API_KEY"},
+		Endpoints: EndpointSpec{BaseURL: "https://opencode.ai/zen/v1"},
+		Catalog:   ModelCatalogSpec{Source: "dynamic", RefreshURL: "https://opencode.ai/zen/v1/models"},
+		Models: []ProviderModel{
+			{ID: "opencode/gpt-5.5", Name: "GPT 5.5", ContextSize: 272000},
+			{ID: "opencode/gpt-5.5-pro", Name: "GPT 5.5 Pro", ContextSize: 272000},
+			{ID: "opencode/gpt-5.4", Name: "GPT 5.4", ContextSize: 272000},
+			{ID: "opencode/gpt-5.4-mini", Name: "GPT 5.4 Mini", ContextSize: 272000},
+			{ID: "opencode/claude-opus-4-8", Name: "Claude Opus 4.8", ContextSize: 200000},
+			{ID: "opencode/claude-sonnet-4-5", Name: "Claude Sonnet 4.5", ContextSize: 200000},
+			{ID: "opencode/claude-haiku-4-5", Name: "Claude Haiku 4.5", ContextSize: 200000},
+			{ID: "opencode/deepseek-v4-pro", Name: "DeepSeek V4 Pro", ContextSize: 131072},
+			{ID: "opencode/deepseek-v4-flash", Name: "DeepSeek V4 Flash", ContextSize: 131072},
+			{ID: "opencode/qwen3.7-max", Name: "Qwen3.7 Max", ContextSize: 131072},
+			{ID: "opencode/qwen3.7-plus", Name: "Qwen3.7 Plus", ContextSize: 131072},
+			{ID: "opencode/kimi-k2.7-code", Name: "Kimi K2.7 Code", ContextSize: 131072},
+			{ID: "opencode/minimax-m3", Name: "MiniMax M3", ContextSize: 131072},
+			{ID: "opencode/glm-5.2", Name: "GLM 5.2", ContextSize: 128000},
+			{ID: "opencode/grok-build-0.1", Name: "Grok Build 0.1", ContextSize: 131072},
+		},
+		ModelPolicy:  ModelCatalogPolicy{Source: ModelSourceDynamic, RefreshURL: "https://opencode.ai/zen/v1/models"},
+		Capabilities: Capabilities{ToolUse: true, Vision: true, Streaming: true, FunctionCalling: true},
+		Tags:         []string{"gateway", "coding", "paid", "curated"},
+	},
+	{
+		ID: "opencode-go", Name: "OpenCode Go", Slug: "opencode-go",
+		BaseURL: "https://opencode.ai/zen/v1", EnvVar: "OPENCODE_GO_API_KEY",
+		AuthHeader:    "Authorization: Bearer ${KEY}",
+		Compatibility: CompatOpenAI, Protocol: ProtocolOpenAI,
+		Auth:      AuthSpec{Type: "bearer", HeaderName: "Authorization", Prefix: "Bearer ", EnvVar: "OPENCODE_GO_API_KEY"},
+		Endpoints: EndpointSpec{BaseURL: "https://opencode.ai/zen/v1"},
+		Catalog:   ModelCatalogSpec{Source: "dynamic", RefreshURL: "https://opencode.ai/zen/v1/models"},
+		Models: []ProviderModel{
+			{ID: "opencode/deepseek-v4-pro", Name: "DeepSeek V4 Pro", ContextSize: 131072},
+			{ID: "opencode/deepseek-v4-flash", Name: "DeepSeek V4 Flash", ContextSize: 131072},
+			{ID: "opencode/qwen3.7-max", Name: "Qwen3.7 Max", ContextSize: 131072},
+			{ID: "opencode/qwen3.7-plus", Name: "Qwen3.7 Plus", ContextSize: 131072},
+			{ID: "opencode/kimi-k2.7-code", Name: "Kimi K2.7 Code", ContextSize: 131072},
+			{ID: "opencode/minimax-m3", Name: "MiniMax M3", ContextSize: 131072},
+			{ID: "opencode/glm-5.2", Name: "GLM 5.2", ContextSize: 128000},
+			{ID: "opencode/mimo-v2.5-pro", Name: "MiMo V2.5 Pro", ContextSize: 131072},
+		},
+		ModelPolicy:  ModelCatalogPolicy{Source: ModelSourceDynamic, RefreshURL: "https://opencode.ai/zen/v1/models"},
+		Capabilities: Capabilities{ToolUse: true, Vision: true, Streaming: true, FunctionCalling: true},
+		Tags:         []string{"gateway", "coding", "subscription"},
+	},
+	{
+		ID: "longcat", Name: "LongCat", Slug: "longcat",
+		BaseURL: "https://api.longcat.chat/openai", EnvVar: "LONGCAT_API_KEY",
+		AuthHeader:    "Authorization: Bearer ${KEY}",
+		Compatibility: CompatOpenAI, Protocol: ProtocolOpenAI,
+		Auth:      AuthSpec{Type: "bearer", HeaderName: "Authorization", Prefix: "Bearer ", EnvVar: "LONGCAT_API_KEY"},
+		Endpoints: EndpointSpec{BaseURL: "https://api.longcat.chat/openai"},
+		Catalog:   ModelCatalogSpec{Source: "static"},
+		Models: []ProviderModel{
+			{ID: "LongCat-2.0", Name: "LongCat 2.0", ContextSize: 1000000},
+		},
+		ModelPolicy:  ModelCatalogPolicy{Source: ModelSourceStatic},
+		Capabilities: Capabilities{ToolUse: true, Vision: true, Streaming: true, FunctionCalling: true},
+		Tags:         []string{"coding", "agent", "long-context"},
+		Notes:        "OpenAI-format: https://api.longcat.chat/openai  Anthropic-format: https://api.longcat.chat/anthropic",
+	},
+	{
+		ID: "anyrouter", Name: "AnyRouter", Slug: "anyrouter",
+		BaseURL: "https://anyrouter.top", EnvVar: "ANTHROPIC_AUTH_TOKEN",
+		AuthHeader:    "Authorization: Bearer ${KEY}",
+		Compatibility: CompatAnthropic, Protocol: ProtocolAnthropic,
+		Auth:         AuthSpec{Type: "bearer", HeaderName: "Authorization", Prefix: "Bearer ", EnvVar: "ANTHROPIC_AUTH_TOKEN"},
+		Endpoints:    EndpointSpec{BaseURL: "https://anyrouter.top"},
+		Catalog:      ModelCatalogSpec{Source: "manual"},
+		ModelPolicy:  ModelCatalogPolicy{Source: ModelSourceManual},
+		Capabilities: Capabilities{ToolUse: true, Vision: true, Streaming: true, FunctionCalling: true},
+		Tags:         []string{"router", "proxy", "anthropic-compat"},
+		Notes:        "Proxy routed to Claude Code. Set ANTHROPIC_AUTH_TOKEN and ANTHROPIC_BASE_URL=https://anyrouter.top",
+	},
+	{
+		ID: "azure-openai", Name: "Azure OpenAI", Slug: "azure-openai",
+		BaseURL: "https://YOUR_RESOURCE_NAME.openai.azure.com", EnvVar: "AZURE_OPENAI_API_KEY",
+		AuthHeader:    "api-key: ${KEY}",
+		Compatibility: CompatOpenAI, Protocol: ProtocolOpenAI,
+		Auth:         AuthSpec{Type: "header", HeaderName: "api-key", EnvVar: "AZURE_OPENAI_API_KEY"},
+		Endpoints:    EndpointSpec{BaseURL: "https://YOUR_RESOURCE_NAME.openai.azure.com"},
+		Catalog:      ModelCatalogSpec{Source: "manual"},
+		ModelPolicy:  ModelCatalogPolicy{Source: ModelSourceManual},
+		Capabilities: Capabilities{ToolUse: true, Vision: true, Streaming: true, FunctionCalling: true},
+		Tags:         []string{"enterprise", "coding", "paid"},
+		Notes:        "Replace YOUR_RESOURCE_NAME with your Azure OpenAI resource name. Requires AZURE_RESOURCE_NAME env var or edit the base URL. Uses api-key header auth (not bearer).",
+	},
+	{
+		ID: "alibaba-cloud", Name: "Alibaba Cloud", Slug: "alibaba-cloud",
+		BaseURL: "https://dashscope.aliyuncs.com/api/v1", EnvVar: "DASHSCOPE_API_KEY",
+		AuthHeader:    "Authorization: Bearer ${KEY}",
+		Compatibility: CompatOpenAI, Protocol: ProtocolOpenAI,
+		Auth:      AuthSpec{Type: "bearer", HeaderName: "Authorization", Prefix: "Bearer ", EnvVar: "DASHSCOPE_API_KEY"},
+		Endpoints: EndpointSpec{BaseURL: "https://dashscope.aliyuncs.com/api/v1"},
+		Catalog:   ModelCatalogSpec{Source: "static"},
+		Models: []ProviderModel{
+			{ID: "qwen-max", Name: "Qwen Max", ContextSize: 32768},
+			{ID: "qwen-plus", Name: "Qwen Plus", ContextSize: 131072},
+			{ID: "qwen-turbo", Name: "Qwen Turbo", ContextSize: 131072},
+			{ID: "qwen3-coder", Name: "Qwen3 Coder", ContextSize: 131072},
+			{ID: "qwq-32b", Name: "QwQ 32B", ContextSize: 131072},
+			{ID: "qwen3-235b-a22b", Name: "Qwen3 235B", ContextSize: 131072},
+		},
+		ModelPolicy:  ModelCatalogPolicy{Source: ModelSourceStatic},
+		Capabilities: Capabilities{ToolUse: true, Vision: true, Streaming: true, FunctionCalling: true},
+		Tags:         []string{"coding", "paid", "free-tier", "multilingual"},
+	},
+	{
+		ID: "commandcode", Name: "Command Code", Slug: "commandcode",
+		BaseURL: "https://api.commandcode.ai/provider/v1", EnvVar: "COMMANDCODE_API_KEY",
+		AuthHeader:    "Authorization: Bearer ${KEY}",
+		Compatibility: CompatOpenAI, Protocol: ProtocolOpenAI,
+		Auth:         AuthSpec{Type: "bearer", HeaderName: "Authorization", Prefix: "Bearer ", EnvVar: "COMMANDCODE_API_KEY"},
+		Endpoints:    EndpointSpec{BaseURL: "https://api.commandcode.ai/provider/v1"},
+		Catalog:      ModelCatalogSpec{Source: "dynamic", RefreshURL: "https://api.commandcode.ai/provider/v1/models"},
+		ModelPolicy:  ModelCatalogPolicy{Source: ModelSourceDynamic, RefreshURL: "https://api.commandcode.ai/provider/v1/models"},
+		Capabilities: Capabilities{ToolUse: true, Vision: true, Streaming: true, FunctionCalling: true},
+		Tags:         []string{"gateway", "coding", "paid", "curated"},
+		Notes:        "OpenAI: /provider/v1/chat/completions  Anthropic: /provider/v1/messages  Model IDs use vendor/prefix form (e.g. deepseek/deepseek-v4-flash). Also accepts CMD_API_KEY.",
+	},
+	{
+		ID: "cline", Name: "Cline", Slug: "cline",
+		BaseURL: "https://api.cline.bot/api/v1", EnvVar: "CLINE_API_KEY",
+		AuthHeader:    "Authorization: Bearer ${KEY}",
+		Compatibility: CompatOpenAI, Protocol: ProtocolOpenAI,
+		Auth:      AuthSpec{Type: "bearer", HeaderName: "Authorization", Prefix: "Bearer ", EnvVar: "CLINE_API_KEY"},
+		Endpoints: EndpointSpec{BaseURL: "https://api.cline.bot/api/v1", APIPath: "/chat/completions"},
+		Catalog:   ModelCatalogSpec{Source: "dynamic", RefreshURL: "https://api.cline.bot/api/v1/models"},
+		Models: []ProviderModel{
+			{ID: "cline-pass/glm-5.2", Name: "GLM 5.2 (ClinePass)", ContextSize: 128000},
+			{ID: "cline-pass/kimi-k2.7-code", Name: "Kimi K2.7 Code (ClinePass)", ContextSize: 131072},
+			{ID: "cline-pass/kimi-k2.6", Name: "Kimi K2.6 (ClinePass)", ContextSize: 131072},
+			{ID: "cline-pass/deepseek-v4-pro", Name: "DeepSeek V4 Pro (ClinePass)", ContextSize: 131072},
+			{ID: "cline-pass/deepseek-v4-flash", Name: "DeepSeek V4 Flash (ClinePass)", ContextSize: 131072},
+			{ID: "cline-pass/mimo-v2.5", Name: "MiMo V2.5 (ClinePass)", ContextSize: 131072},
+			{ID: "cline-pass/mimo-v2.5-pro", Name: "MiMo V2.5 Pro (ClinePass)", ContextSize: 131072},
+			{ID: "cline-pass/minimax-m3", Name: "MiniMax M3 (ClinePass)", ContextSize: 131072},
+			{ID: "cline-pass/qwen3.7-max", Name: "Qwen3.7 Max (ClinePass)", ContextSize: 131072},
+			{ID: "cline-pass/qwen3.7-plus", Name: "Qwen3.7 Plus (ClinePass)", ContextSize: 131072},
+		},
+		ModelPolicy:  ModelCatalogPolicy{Source: ModelSourceDynamic, RefreshURL: "https://api.cline.bot/api/v1/models"},
+		Capabilities: Capabilities{ToolUse: true, Vision: true, Streaming: true, FunctionCalling: true},
+		Tags:         []string{"gateway", "coding", "paid", "cline-pass"},
+		Notes:        "Single provider for both Cline usage-billing and ClinePass. Same CLINE_API_KEY and endpoint. ClinePass models (marked) use cline-pass/ prefix and require $9.99/month sub for 2-5x rate limits. Free/credit models use bare names and dynamic catalog.",
+	},
+	{
+		ID: "tencent", Name: "Tencent Cloud", Slug: "tencent",
+		BaseURL: "https://api.hunyuan.cloud.tencent.com/v1", EnvVar: "HUNYUAN_API_KEY",
+		AuthHeader:    "Authorization: Bearer ${KEY}",
+		Compatibility: CompatOpenAI, Protocol: ProtocolOpenAI,
+		Auth:      AuthSpec{Type: "bearer", HeaderName: "Authorization", Prefix: "Bearer ", EnvVar: "HUNYUAN_API_KEY"},
+		Endpoints: EndpointSpec{BaseURL: "https://api.hunyuan.cloud.tencent.com/v1"},
+		Catalog:   ModelCatalogSpec{Source: "static"},
+		Models: []ProviderModel{
+			{ID: "hunyuan-t1", Name: "Hunyuan T1", ContextSize: 32768},
+			{ID: "hunyuan-turbos", Name: "Hunyuan TurboS", ContextSize: 32768},
+		},
+		ModelPolicy:  ModelCatalogPolicy{Source: ModelSourceStatic},
+		Capabilities: Capabilities{ToolUse: true, Vision: false, Streaming: true, FunctionCalling: true},
+		Tags:         []string{"coding", "paid"},
 	},
 }
 

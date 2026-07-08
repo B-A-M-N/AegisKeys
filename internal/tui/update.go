@@ -75,16 +75,29 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusMsg = "Launching " + msg.profile + "..."
 		return m, tea.ExecProcess(msg.cmd, func(err error) tea.Msg {
 			usageErr := error(nil)
+			cleanupErr := error(nil)
 			if msg.vault != nil && msg.vault.vault != nil && childLikelyStarted(err) {
 				msg.vault.vault.Touch(msg.keyID)
 				if saveErr := secret.SaveVaultWithKey(config.VaultPath(msg.configDir), msg.vault.key, msg.vault.vault); saveErr != nil {
 					usageErr = fmt.Errorf("save vault usage metadata: %w", saveErr)
 				}
 			}
-			return launchFinishedMsg{err: err, usageErr: usageErr}
+			if msg.cleanup != nil {
+				cleanupErr = msg.cleanup()
+			}
+			return launchFinishedMsg{err: err, usageErr: usageErr, cleanupErr: cleanupErr}
 		})
 
 	case launchFinishedMsg:
+		if msg.cleanupErr != nil {
+			// Preserve both child exit status and cleanup failure when both fail.
+			if msg.err != nil {
+				m.statusMsg = "Child exited: " + msg.err.Error() + "; config cleanup failed: " + msg.cleanupErr.Error()
+			} else {
+				m.statusMsg = "Child finished; config cleanup failed: " + msg.cleanupErr.Error()
+			}
+			return m, nil
+		}
 		if msg.usageErr != nil {
 			m.statusMsg = "Child finished; usage metadata failed: " + msg.usageErr.Error()
 			return m, nil
@@ -121,6 +134,72 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.statusMsg = fmt.Sprintf("Loaded %d models for %s", len(msg.models), msg.providerSlug)
 			}
 		}
+		return m, nil
+
+	case scratchExternalEditedMsg:
+		if m.scratchEditing && m.scratchEditingID != "" {
+			m.scratchBodyInput.SetValue(msg.body)
+			m.scratchDirty = true
+			m.statusMsg = "Loaded from external editor (ctrl+s to save)."
+		}
+		return m, nil
+
+	case statusMsgMsg:
+		m.statusMsg = msg.msg
+		return m, nil
+
+	case modelCatalogLoadedMsg:
+		m.modelCatalog.fetching = false
+		if msg.err != nil {
+			m.modelCatalog.errMsg = "Refresh failed: " + msg.err.Error()
+			return m, nil
+		}
+		if msg.providerSlug != m.modelCatalog.providerSlug {
+			return m, nil
+		}
+		// Merge fetched models with existing: prefer fetched metadata but
+		// preserve the selected flag. New models are NOT auto-selected.
+		existing := make(map[string]provider.ProviderModel, len(m.modelCatalog.models))
+		for _, mod := range m.modelCatalog.models {
+			existing[mod.ID] = mod
+		}
+		for _, fm := range msg.models {
+			preSelected := m.modelCatalog.selected[fm.ID]
+			if old, ok := existing[fm.ID]; ok {
+				// Update metadata but preserve selection and mark as no longer
+				// static-only (it is now confirmed from the live API).
+				if fm.Name != "" {
+					old.Name = fm.Name
+				}
+				if fm.ContextSize > 0 {
+					old.ContextSize = fm.ContextSize
+				}
+				existing[fm.ID] = old
+				m.modelCatalog.selected[fm.ID] = preSelected
+			} else {
+				existing[fm.ID] = fm
+				m.modelCatalog.selected[fm.ID] = false
+			}
+		}
+		merged := make([]provider.ProviderModel, 0, len(existing))
+		for _, mod := range m.modelCatalog.models {
+			if updated, ok := existing[mod.ID]; ok {
+				merged = append(merged, updated)
+				delete(existing, mod.ID)
+			}
+		}
+		for _, mod := range existing {
+			merged = append(merged, mod)
+		}
+		m.modelCatalog.models = merged
+
+		// Persist the cache.
+		cache := provider.NewModelCache(*m.providers.Find(msg.providerSlug), msg.models)
+		_ = provider.SaveModelCache(m.configDir, cache)
+
+		count := len(msg.models)
+		m.logAudit("model_catalog_refresh", msg.providerSlug, m.modelCatalog.keyID)
+		m.statusMsg = fmt.Sprintf("Loaded %d models for %s", count, msg.providerSlug)
 		return m, nil
 
 	case tea.KeyPressMsg:
@@ -285,6 +364,12 @@ func (m *model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleWizardKey(k)
 	}
 
+	// Model catalog overlay owns keys when active — intercept before global
+	// quit so 'q' closes the overlay instead of the whole app.
+	if m.modelCatalog.active {
+		return m.handleModelCatalogKey(k)
+	}
+
 	// 3. Quit only when not typing in any input.
 	if key == "q" {
 		m.lockVault()
@@ -409,6 +494,8 @@ func (m *model) handleContentKey(key string) (tea.Model, tea.Cmd) {
 		return m.handleAuditKey(key)
 	case screenSettings:
 		return m.handleSettingsKey(key)
+	case screenScratch:
+		return m.handleScratchKey(key)
 	case screenHelp:
 		return m.handleHelpKey(key)
 	}
@@ -460,6 +547,8 @@ func (m *model) runDashboardAction() (tea.Model, tea.Cmd) {
 }
 
 // handleProvidersKey processes keys on the providers screen.
+// Note: when the model catalog overlay is active, keys are already routed
+// to handleModelCatalogKey by handleKey before reaching this function.
 func (m *model) handleProvidersKey(key string) (tea.Model, tea.Cmd) {
 	switch key {
 	case "w", "up", "k":
@@ -482,6 +571,90 @@ func (m *model) handleProvidersKey(key string) (tea.Model, tea.Cmd) {
 		m.inputFocused = true
 		m.filterInput.Focus()
 		return m, nil
+	case "m":
+		return m, m.openModelCatalog()
+	}
+	return m, nil
+}
+
+// isSpaceKey reports whether the given key string represents a space press.
+// Charm's KeyPressMsg returns "\x00" via String() for space, but the routing
+// layer may also see it normalized differently depending on context.
+func isSpaceKey(s string) bool {
+	return s == " " || s == "\x00" || s == "space"
+}
+
+// handleModelCatalogKeyStr wraps the typed-string handler for callers that
+// already have a normalized string key.
+func (m *model) handleModelCatalogKeyStr(key string) (tea.Model, tea.Cmd) {
+	return m.handleModelCatalogKey(tea.KeyPressMsg{Text: key})
+}
+
+// handleModelCatalogKey routes keys when the model catalog overlay is active
+// on the providers screen. It accepts the raw KeyPressMsg so it can reliably
+// detect space (which Charm encodes variably).
+func (m *model) handleModelCatalogKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	key := normalizedKey(k)
+
+	switch {
+	case key == "esc" || key == "q":
+		m.closeModelCatalog()
+		return m, nil
+	case key == "w" || key == "up" || key == "k":
+		filtered := m.filteredCatalogModels()
+		if m.modelCatalog.cursor > 0 && len(filtered) > 0 {
+			m.modelCatalog.cursor--
+		}
+	case key == "down" || key == "j":
+		filtered := m.filteredCatalogModels()
+		if len(filtered) > 0 && m.modelCatalog.cursor < len(filtered)-1 {
+			m.modelCatalog.cursor++
+		}
+	case isSpaceKey(key):
+		filtered := m.filteredCatalogModels()
+		if len(filtered) > 0 && m.modelCatalog.cursor < len(filtered) {
+			id := filtered[m.modelCatalog.cursor].ID
+			m.modelCatalog.selected[id] = !m.modelCatalog.selected[id]
+		}
+	case key == "a":
+		// Select all currently visible (filtered) models.
+		for _, mod := range m.filteredCatalogModels() {
+			m.modelCatalog.selected[mod.ID] = true
+		}
+	case key == "c":
+		// Deselect all currently visible (filtered) models.
+		for _, mod := range m.filteredCatalogModels() {
+			m.modelCatalog.selected[mod.ID] = false
+		}
+	case key == "/":
+		// Toggle filter mode.
+		m.modelCatalog.filtering = !m.modelCatalog.filtering
+		if m.modelCatalog.filtering {
+			m.modelCatalog.filter = ""
+		}
+		return m, nil
+	case key == "r" && !m.modelCatalog.filtering:
+		return m, m.refreshModelCatalog()
+	case key == "s" && !m.modelCatalog.filtering:
+		return m, m.saveModelCatalog()
+	}
+
+	// In filter mode: single chars append, backspace trims, enter/esc exits.
+	if m.modelCatalog.filtering {
+		switch {
+		case key == "backspace":
+			if len(m.modelCatalog.filter) > 0 {
+				m.modelCatalog.filter = m.modelCatalog.filter[:len(m.modelCatalog.filter)-1]
+			}
+			return m, nil
+		case key == "enter" || key == "esc":
+			m.modelCatalog.filtering = false
+			return m, nil
+		case len(key) == 1 && !isSpaceKey(key):
+			// Single printable rune appends to the filter string.
+			m.modelCatalog.filter += key
+			return m, nil
+		}
 	}
 	return m, nil
 }
@@ -662,6 +835,170 @@ func (m *model) handleHelpKey(key string) (tea.Model, tea.Cmd) {
 		m.focus = focusSidebar
 	}
 	return m, nil
+}
+
+// handleScratchKey processes keys on the encrypted scratchpad screen.
+func (m *model) handleScratchKey(key string) (tea.Model, tea.Cmd) {
+	// When editing, the textarea owns most keys; only control combos escape.
+	if m.scratchEditing {
+		switch key {
+		case "ctrl+s":
+			return m, m.saveScratchPad()
+		case "ctrl+e":
+			return m, m.editScratchInExternalEditor()
+		case "esc":
+			if m.scratchDirty {
+				m.scratchDirty = false
+				m.statusMsg = "Edit discarded."
+			}
+			m.scratchEditing = false
+			m.scratchEditingID = ""
+			return m, nil
+		}
+		return m, nil
+	}
+
+	switch key {
+	case "w", "up", "k":
+		if m.scratchListSelected > 0 {
+			m.scratchListSelected--
+		}
+	case "s", "down", "j":
+		if m.scratchListSelected < len(m.visibleScratchPads())-1 {
+			m.scratchListSelected++
+		}
+	case "n":
+		return m, m.newScratchPad()
+	case "e", "enter":
+		return m, m.editScratchPad()
+	case "c":
+		return m, m.copyScratchBody()
+	case "x":
+		return m, m.deleteScratchPad()
+	case "/":
+		m.inputFocused = true
+		m.filterInput.Focus()
+		return m, nil
+	case "a", "left", "h":
+		m.focus = focusSidebar
+	case "esc", "q":
+		m.active = screenKeys
+		m.focus = focusSidebar
+	}
+	return m, nil
+}
+
+// newScratchPad creates a new encrypted scratchpad and opens it for editing.
+func (m *model) newScratchPad() tea.Cmd {
+	if m.vaultSession == nil || m.vaultSession.vault == nil {
+		return nil
+	}
+	sp := secret.ScratchPadRecord{
+		Kind:  secret.ScratchPadGeneral,
+		Title: "New note",
+	}
+	if err := m.vaultSession.vault.AddScratchPad(sp); err != nil {
+		return nil
+	}
+	m.scratchEditingID = sp.ID
+	m.scratchTitleInput.SetValue(sp.Title)
+	m.scratchBodyInput.SetValue("")
+	m.scratchBodyInput.SetWidth(maxInt(40, m.width-10))
+	m.scratchBodyInput.SetHeight(maxInt(8, m.height-12))
+	m.scratchEditing = true
+	m.scratchDirty = true
+	m.logAudit("scratch.create", "", "")
+	return nil
+}
+
+// editScratchPad opens the selected scratchpad for editing.
+func (m *model) editScratchPad() tea.Cmd {
+	sp := m.selectedScratchPad()
+	if sp == nil {
+		return nil
+	}
+	m.scratchEditingID = sp.ID
+	m.scratchTitleInput.SetValue(sp.Title)
+	m.scratchBodyInput.SetValue(sp.Body)
+	m.scratchBodyInput.SetWidth(maxInt(40, m.width-10))
+	m.scratchBodyInput.SetHeight(maxInt(8, m.height-12))
+	m.scratchEditing = true
+	m.scratchDirty = false
+	return nil
+}
+
+// saveScratchPad persists the edited scratchpad to the vault.
+func (m *model) saveScratchPad() tea.Cmd {
+	sp := m.selectedScratchPad()
+	if sp == nil {
+		return nil
+	}
+	sp.Title = m.scratchTitleInput.Value()
+	sp.Body = m.scratchBodyInput.Value()
+	if err := m.vaultSession.vault.UpdateScratchPad(sp.ID, *sp); err != nil {
+		return nil
+	}
+	if err := secret.SaveVaultWithKey(config.VaultPath(m.configDir), m.vaultSession.key, m.vaultSession.vault); err != nil {
+		return nil
+	}
+	m.scratchEditing = false
+	m.scratchDirty = false
+	m.scratchEditingID = ""
+	m.logAudit("scratch.update", "", "")
+	return nil
+}
+
+// copyScratchBody copies the scratchpad body to clipboard (if policy allows).
+func (m *model) copyScratchBody() tea.Cmd {
+	sp := m.selectedScratchPad()
+	if sp == nil {
+		return nil
+	}
+	m.logAudit("scratch.copy", "", "")
+	return tea.SetClipboard(sp.Body)
+}
+
+// deleteScratchPad removes the selected scratchpad from the vault.
+func (m *model) deleteScratchPad() tea.Cmd {
+	sp := m.selectedScratchPad()
+	if sp == nil {
+		return nil
+	}
+	if err := m.vaultSession.vault.RemoveScratchPad(sp.ID); err != nil {
+		return nil
+	}
+	if err := secret.SaveVaultWithKey(config.VaultPath(m.configDir), m.vaultSession.key, m.vaultSession.vault); err != nil {
+		return nil
+	}
+	if m.scratchListSelected > 0 {
+		m.scratchListSelected--
+	}
+	m.logAudit("scratch.delete", "", "")
+	return nil
+}
+
+// editScratchInExternalEditor opens the scratchpad body in $EDITOR.
+func (m *model) editScratchInExternalEditor() tea.Cmd {
+	sp := m.selectedScratchPad()
+	if sp == nil {
+		return nil
+	}
+	current := m.scratchBodyInput.Value()
+	return func() tea.Msg {
+		result, err := openInEditor(current)
+		if err != nil {
+			return statusMsgMsg{msg: "External editor failed: " + err.Error()}
+		}
+		return scratchExternalEditedMsg{body: result}
+	}
+}
+
+type scratchExternalEditedMsg struct {
+	body string
+}
+
+type statusMsgMsg struct {
+	msg string
 }
 
 // settingKeys enumerates the adjustable settings on the Settings screen.
@@ -1832,7 +2169,7 @@ func (m *model) prepareTUILaunch(commandLine string) tea.Cmd {
 	}
 
 	return func() tea.Msg {
-		strategy, err := adapter.ResolveLaunchStrategy(prof, *prov, key, registry)
+		strategy, err := adapter.ResolveLaunchStrategyCatalog(prof, *prov, key, registry, m.providers, m.vaultSession.vault, adapter.ResolveRun)
 		if err != nil {
 			return launchPreparedMsg{profile: prof.Name, err: err}
 		}
@@ -1850,7 +2187,7 @@ func (m *model) prepareTUILaunch(commandLine string) tea.Cmd {
 				return launchPreparedMsg{profile: prof.Name, err: err}
 			}
 		}
-		cmd, err := runner.PrepareCommand(context.Background(), strategy, runner.RunOptions{
+		prepared, err := runner.PrepareCommandWithCleanup(context.Background(), strategy, runner.RunOptions{
 			ProfileName:  prof.Name,
 			ConfigDir:    configDir,
 			ExtraArgs:    extraArgs,
@@ -1859,7 +2196,7 @@ func (m *model) prepareTUILaunch(commandLine string) tea.Cmd {
 		if err != nil {
 			return launchPreparedMsg{profile: prof.Name, err: err}
 		}
-		return launchPreparedMsg{profile: prof.Name, cmd: cmd, vault: vault, configDir: configDir, keyID: prof.KeyID}
+		return launchPreparedMsg{profile: prof.Name, cmd: prepared.Cmd, cleanup: prepared.Cleanup, vault: vault, configDir: configDir, keyID: prof.KeyID}
 	}
 }
 
