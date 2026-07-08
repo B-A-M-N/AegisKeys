@@ -1261,6 +1261,14 @@ func (m *model) contextualAdd() (tea.Model, tea.Cmd) {
 		m.focus = focusContent
 		return m.startAdd()
 
+	case screenScratch:
+		if m.vaultSession == nil || m.vaultSession.vault == nil {
+			m.statusMsg = "Vault locked."
+			return m, nil
+		}
+		m.focus = focusContent
+		return m, m.newScratchPad()
+
 	default:
 		m.statusMsg = "Nothing to add on this screen. Use Providers, Keys, or Profiles."
 		return m, nil
