@@ -676,8 +676,6 @@ func TestIntelliJAdapter_RejectsCredentialProviderInjection(t *testing.T) {
 func TestFileWrite_RedactCheckField_Present(t *testing.T) {
 	// Verify FileWrite has RedactCheck field (compile-time check).
 	f := FileWrite{
-		Path:        "/tmp/test.json",
-		Format:      "json",
 		RedactCheck: true,
 	}
 	if !f.RedactCheck {
@@ -774,7 +772,6 @@ func TestAdapterGoldenFixes_NoSecretLeak(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		c := c
 		t.Run(c.id, func(t *testing.T) {
 			a, ok := registry.Get(c.id)
 			if !ok {

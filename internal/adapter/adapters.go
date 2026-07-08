@@ -175,7 +175,7 @@ func (CrushAdapter) RenderCatalog(ctx ProviderCatalogRenderContext) (*LaunchStra
 	}, nil
 }
 
-func buildCrushConfig(p profile.Profile, prov provider.Provider) FileWrite {
+func buildCrushConfig(_ profile.Profile, prov provider.Provider) FileWrite {
 	providers := map[string]any{
 		prov.Slug: map[string]any{
 			"id":          prov.Slug,
@@ -976,9 +976,7 @@ func (ClaudeCodeAdapter) Render(p profile.Profile, prov provider.Provider, key *
 	// The Anthropic SDK natively appends "/v1/messages" to the base URL.
 	// If the provider's canonical URL already ends in "/v1", we must trim it
 	// to prevent requests going to "/v1/v1/messages" (which 404s on OpenRouter).
-	if strings.HasSuffix(baseURL, "/v1") {
-		baseURL = strings.TrimSuffix(baseURL, "/v1")
-	}
+	baseURL, _ = strings.CutSuffix(baseURL, "/v1")
 
 	switch prov.Compatibility {
 	case provider.CompatAnthropic:

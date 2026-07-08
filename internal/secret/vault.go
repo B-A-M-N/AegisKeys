@@ -579,7 +579,7 @@ type secretRecordStore struct {
 	RevealPolicy string       `json:"reveal_policy,omitempty"`
 	Exportable   bool         `json:"exportable,omitempty"`
 	Archived     bool         `json:"archived,omitempty"`
-	Policy       SecretPolicy `json:"policy,omitempty"`
+	Policy       SecretPolicy `json:"policy,omitzero"`
 }
 
 func toStore(v *Vault) vaultStore {

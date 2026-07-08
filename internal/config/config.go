@@ -12,7 +12,7 @@ type Config struct {
 	Version                     int       `json:"version"`
 	Initialized                 bool      `json:"initialized"`
 	CreatedAt                   time.Time `json:"created_at"`
-	UpdatedAt                   time.Time `json:"updated_at,omitempty"`
+	UpdatedAt                   time.Time `json:"updated_at,omitzero"`
 	AutoLock                    int       `json:"auto_lock_minutes"` // minutes before auto-lock; 0 = disabled
 	Theme                       string    `json:"theme"`
 	DefaultProfile              string    `json:"default_profile,omitempty"`

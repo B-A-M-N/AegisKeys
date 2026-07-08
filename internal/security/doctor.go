@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -397,12 +398,7 @@ func checkPlaintextRoot(dir, label string) CheckResult {
 
 // isUnderSegment reports whether path contains a directory component named seg.
 func isUnderSegment(path, seg string) bool {
-	for _, p := range strings.Split(path, string(os.PathSeparator)) {
-		if p == seg {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(strings.Split(path, string(os.PathSeparator)), seg)
 }
 
 // isBinaryOrCache returns true for files that should not be scanned for secrets.

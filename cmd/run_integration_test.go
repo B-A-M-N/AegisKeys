@@ -121,7 +121,7 @@ func TestRunIntegration_IntelliJNoSecretLeak(t *testing.T) {
 	}
 	// Config files should not contain the secret.
 	for _, f := range strategy.Plan.Files {
-		if len(f.Content) > 0 && len(f.Content) > 0 && containsString(f.Content, "sk-secret-leak-test") {
+		if len(f.Content) > 0 && containsString(f.Content, "sk-secret-leak-test") {
 			t.Errorf("secret leaked to config file %s", f.Path)
 		}
 	}

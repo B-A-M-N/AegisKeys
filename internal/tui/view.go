@@ -62,8 +62,8 @@ func (m *model) View() tea.View {
 		buf := NewMatrixBuffer(w, h)
 		buf.Protected = protected
 		m.matrix.Render(buf)
-		for y := 0; y < h; y++ {
-			for x := 0; x < w; x++ {
+		for y := range h {
+			for x := range w {
 				ch := buf.CellAt(x, y)
 				if ch.colorIdx > 0 {
 					if 1 > priority[y][x] && !grid[y][x].protected {
@@ -275,7 +275,7 @@ func sgrDec(s string) int {
 }
 
 // ansiColorHex maps standard SGR color codes to hex.
-func ansiColorHex(code string, bg bool) string {
+func ansiColorHex(code string, _ bool) string {
 	base := 0
 	switch code {
 	case "30", "40":
@@ -526,7 +526,7 @@ func (m *model) drawModal(grid [][]gridCell, priority [][]int, r Rect, s *Styles
 }
 
 // drawKeyAddForm renders the multi-field key add form with the active field highlighted.
-func (m *model) drawKeyAddForm(grid [][]gridCell, priority [][]int, r Rect, s *Styles, w, h int) {
+func (m *model) drawKeyAddForm(grid [][]gridCell, priority [][]int, r Rect, _ *Styles, w, h int) {
 	contentLayer := 7
 	labels := []string{"Provider:", "Label:", "Secret:", "Tags:"}
 	values := []string{
@@ -586,7 +586,7 @@ func (m *model) drawKeyAddForm(grid [][]gridCell, priority [][]int, r Rect, s *S
 // renderGridFrame converts the grid to a string, grouping runs by style.
 func renderGridFrame(grid [][]gridCell, s *Styles, w, h int, frame int) string {
 	lines := make([]string, h)
-	for y := 0; y < h; y++ {
+	for y := range h {
 		var b strings.Builder
 		runStyle := -999
 		var run strings.Builder
@@ -612,7 +612,7 @@ func renderGridFrame(grid [][]gridCell, s *Styles, w, h int, frame int) string {
 			run.Reset()
 		}
 
-		for x := 0; x < w; x++ {
+		for x := range w {
 			c := grid[y][x]
 			ch := c.ch
 			styleID := c.styleID
@@ -770,9 +770,7 @@ func animatedColor(frame int, colors ...string) string {
 		return "#9b6dff"
 	}
 	idx := (frame / 8) % len(colors)
-	if idx < 0 {
-		idx = 0
-	}
+	idx = max(idx, 0)
 	return colors[idx]
 }
 

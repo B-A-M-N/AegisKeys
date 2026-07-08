@@ -89,7 +89,6 @@ func TestVault_KeyPrivateNoteUpdate(t *testing.T) {
 
 func TestVaultScratchPadBodyClearedByIntendedZero(t *testing.T) {
 	v := &Vault{
-		Version: 1,
 		ScratchPads: []ScratchPadRecord{
 			{ID: "s1", Body: "secret-body-should-clear-on-lock"},
 		},

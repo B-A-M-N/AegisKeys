@@ -2,6 +2,7 @@ package runner
 
 import (
 	"fmt"
+	"maps"
 
 	"aegiskeys/internal/adapter"
 	"aegiskeys/internal/profile"
@@ -41,9 +42,7 @@ func ResolveEnv(p *profile.Profile, prov *provider.Provider, secretValue string)
 
 	secretName := prov.CanonicalEnvVar()
 
-	for k, v := range prov.ExtraEnv {
-		env[k] = v
-	}
+	maps.Copy(env, prov.ExtraEnv)
 	if secretName != "" {
 		env[secretName] = secretValue
 	}

@@ -56,13 +56,16 @@ func TestNoManualAdapterReceivesRawSecret(t *testing.T) {
 		// Raw secret must not appear anywhere in the plan.
 		combined := strings.Builder{}
 		for _, v := range strategy.Plan.Env {
-			combined.WriteString(v + "\n")
+			combined.WriteString(v)
+			combined.WriteByte('\n')
 		}
 		for _, v := range strategy.Plan.Args {
-			combined.WriteString(v + "\n")
+			combined.WriteString(v)
+			combined.WriteByte('\n')
 		}
 		for _, v := range strategy.Plan.Preview {
-			combined.WriteString(v + "\n")
+			combined.WriteString(v)
+			combined.WriteByte('\n')
 		}
 		for _, f := range strategy.Plan.Files {
 			combined.WriteString(f.Content)

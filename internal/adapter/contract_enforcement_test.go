@@ -53,7 +53,8 @@ func TestContractEnforcement_PerAdapter(t *testing.T) {
 		if !c.CanInjectSecrets {
 			var combined strings.Builder
 			for _, v := range strategy.Plan.Env {
-				combined.WriteString(v + "\n")
+				combined.WriteString(v)
+			combined.WriteByte('\n')
 			}
 			combined.WriteString(strings.Join(strategy.Plan.Args, "\n"))
 			combined.WriteString(strings.Join(strategy.Plan.Preview, "\n"))

@@ -104,6 +104,7 @@ func TestModelSlots_HermesAuxiliaryRoundTrips(t *testing.T) {
 		Vision:      &ModelRef{ID: "gpt-4o"},
 		WebExtract:  &ModelRef{ID: "gemini-3-flash-preview"},
 	}
+	_ = slots.Main
 	if slots.Compression == nil || slots.Compression.ID != "gemini-3-flash-preview" {
 		t.Error("compression slot not preserved")
 	}
@@ -124,6 +125,10 @@ func TestModelSlots_ZedFeatureSlots(t *testing.T) {
 		Subagent:        &ModelRef{ID: "claude-haiku-4"},
 		Alternatives:    []ModelRef{{ID: "gemini-3-flash"}},
 	}
+	_ = slots.Main
+	_ = slots.CommitMessage
+	_ = slots.ThreadSummary
+	_ = slots.Subagent
 	if slots.InlineAssistant == nil || slots.InlineAssistant.ID != "gpt-4o-mini" {
 		t.Error("inline_assistant slot not preserved")
 	}
@@ -139,6 +144,7 @@ func TestModelSlots_CustomSlotMap(t *testing.T) {
 			"my_slot": {ID: "custom-model"},
 		},
 	}
+	_ = slots.Main
 	if len(slots.Custom) != 1 || slots.Custom["my_slot"].ID != "custom-model" {
 		t.Error("custom slot not preserved")
 	}

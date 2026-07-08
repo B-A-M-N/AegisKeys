@@ -342,9 +342,5 @@ func joinStr(parts []string, sep string) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	out := parts[0]
-	for _, p := range parts[1:] {
-		out += sep + p
-	}
-	return out
+	return strings.Join(parts, sep)
 }

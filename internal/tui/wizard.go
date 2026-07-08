@@ -571,7 +571,7 @@ func (m *model) wizardVisibleApps() []string {
 // given slot name. For dynamic providers, it prefers live-fetched models over
 // the static list stored in providers.json. Falls back to static if neither
 // is available.
-func (m *model) wizardModelCandidates(slot string) []provider.ProviderModel {
+func (m *model) wizardModelCandidates(_ string) []provider.ProviderModel {
 	if m.wizardUsesProviderCatalog() {
 		var models []provider.ProviderModel
 		for _, st := range m.wizardCatalogProviderStatuses() {

@@ -182,9 +182,10 @@ func (m *Matrix) newDrop(randomY bool) MatrixDrop {
 	}
 
 	lengthMin, lengthMax := 6, maxInt(h/2, 12)
-	if layer == 0 {
+	switch layer {
+	case 0:
 		lengthMin, lengthMax = 3, maxInt(h/4, 8)
-	} else if layer == 2 {
+	case 2:
 		lengthMin, lengthMax = 9, maxInt((h*2)/3, 16)
 	}
 
@@ -198,9 +199,10 @@ func (m *Matrix) newDrop(randomY bool) MatrixDrop {
 	}
 
 	speed, base := 0.30+m.RNG.Float64()*0.62, 0.38+m.RNG.Float64()*0.45
-	if layer == 0 {
+	switch layer {
+	case 0:
 		speed, base = 0.12+m.RNG.Float64()*0.26, 0.16+m.RNG.Float64()*0.28
-	} else if layer == 2 {
+	case 2:
 		speed, base = 0.42+m.RNG.Float64()*0.78, 0.52+m.RNG.Float64()*0.42
 	}
 
@@ -380,9 +382,10 @@ func (m *Matrix) Render(buf *MatrixBuffer) {
 
 			intensity := (d.Base*0.38 + wave*0.48 + pulse*0.10 + noise*0.06) * trailFade
 
-			if d.Layer == 0 {
+			switch d.Layer {
+			case 0:
 				intensity *= 0.52
-			} else if d.Layer == 2 {
+			case 2:
 				intensity *= 1.16
 			}
 
@@ -411,10 +414,7 @@ func (m *Matrix) Render(buf *MatrixBuffer) {
 				if stableNoise(x+7, y+23, m.Frame/5) > 0.5 {
 					echoX = x + 1
 				}
-				echoColor := colorIdx - 1
-				if echoColor < 2 {
-					echoColor = 2
-				}
+				echoColor := max(colorIdx-1, 2)
 				putMatrixCell(buf, echoX, y, glyph, echoColor, false)
 			}
 		}
@@ -488,12 +488,7 @@ func (m *Matrix) renderAmbientHaze(buf *MatrixBuffer) {
 			}
 
 			glyphIdx := int(stableNoise(x+17, y+29, m.Frame/5) * float64(len(glyphSet)))
-			if glyphIdx < 0 {
-				glyphIdx = 0
-			}
-			if glyphIdx >= len(glyphSet) {
-				glyphIdx = len(glyphSet) - 1
-			}
+			glyphIdx = max(0, min(glyphIdx, len(glyphSet)-1))
 
 			putMatrixCell(buf, x, y, glyphSet[glyphIdx], colorIdx, false)
 		}

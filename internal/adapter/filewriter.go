@@ -591,12 +591,14 @@ func mergeYAMLFile(path string, newContent []byte, mode os.FileMode, managedBloc
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		// First write — wrap in managed markers.
 		var sb strings.Builder
-		sb.WriteString(markerStart + "\n")
+		sb.WriteString(markerStart)
+		sb.WriteString("\n")
 		sb.Write(newContent)
 		if !strings.HasSuffix(string(newContent), "\n") {
 			sb.WriteString("\n")
 		}
-		sb.WriteString(markerEnd + "\n")
+		sb.WriteString(markerEnd)
+		sb.WriteString("\n")
 		if err := ensureDir(path); err != nil {
 			return err
 		}
@@ -620,12 +622,15 @@ func mergeYAMLFile(path string, newContent []byte, mode os.FileMode, managedBloc
 		if !strings.HasSuffix(existing, "\n") {
 			sb.WriteString("\n")
 		}
-		sb.WriteString("\n" + markerStart + "\n")
+		sb.WriteString("\n")
+		sb.WriteString(markerStart)
+		sb.WriteString("\n")
 		sb.Write(newContent)
 		if !strings.HasSuffix(string(newContent), "\n") {
 			sb.WriteString("\n")
 		}
-		sb.WriteString(markerEnd + "\n")
+		sb.WriteString(markerEnd)
+		sb.WriteString("\n")
 		if err := ensureDir(path); err != nil {
 			return err
 		}
@@ -635,7 +640,8 @@ func mergeYAMLFile(path string, newContent []byte, mode os.FileMode, managedBloc
 	// Replace the managed block content (between start and end markers).
 	var sb strings.Builder
 	sb.WriteString(existing[:startIdx])
-	sb.WriteString(markerStart + "\n")
+	sb.WriteString(markerStart)
+	sb.WriteString("\n")
 	sb.Write(newContent)
 	if !strings.HasSuffix(string(newContent), "\n") {
 		sb.WriteString("\n")

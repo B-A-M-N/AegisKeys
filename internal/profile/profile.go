@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -94,7 +95,7 @@ type Profile struct {
 	KeyID        string `json:"key_id"`
 
 	Target TargetConfig       `json:"target"`
-	Models ModelSlots         `json:"models,omitempty"`
+	Models ModelSlots         `json:"models"`
 	Env    map[string]string  `json:"env,omitempty"`
 	Args   []string           `json:"args,omitempty"`
 	Files  []TargetConfigFile `json:"files,omitempty"`
@@ -273,10 +274,8 @@ func (s *Store) Find(name string) *Profile {
 		if s.Profiles[i].Name == name {
 			return &s.Profiles[i]
 		}
-		for _, a := range s.Profiles[i].Aliases {
-			if a == name {
-				return &s.Profiles[i]
-			}
+		if slices.Contains(s.Profiles[i].Aliases, name) {
+			return &s.Profiles[i]
 		}
 	}
 	return nil

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"sort"
@@ -270,9 +271,7 @@ func mergedEnv(base []string, overlay map[string]string) []string {
 		}
 		env[k] = v
 	}
-	for k, v := range overlay {
-		env[k] = v
-	}
+	maps.Copy(env, overlay)
 	out := make([]string, 0, len(env))
 	for k, v := range env {
 		out = append(out, k+"="+v)

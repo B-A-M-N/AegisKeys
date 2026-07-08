@@ -91,7 +91,7 @@ Examples:
 			label = vaultAddProvider
 		}
 		if label == "" {
-			label = strings.Replace(string(kind), "_", " ", -1)
+			label = strings.ReplaceAll(string(kind), "_", " ")
 		}
 		rec := secret.SecretRecord{
 			Kind:         kind,

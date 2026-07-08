@@ -157,7 +157,7 @@ type SecretRecord struct {
 	RevealPolicy RevealPolicy `json:"reveal_policy,omitempty"`
 	Exportable   bool         `json:"exportable,omitempty"`
 	Archived     bool         `json:"archived,omitempty"`
-	Policy       SecretPolicy `json:"policy,omitempty"`
+	Policy       SecretPolicy `json:"policy,omitzero"`
 }
 
 const SecretRecordVersion = 2
@@ -309,7 +309,7 @@ func (v *Vault) Serialize() ([]byte, error) {
 		RevealPolicy RevealPolicy `json:"reveal_policy,omitempty"`
 		Exportable   bool         `json:"exportable,omitempty"`
 		Archived     bool         `json:"archived,omitempty"`
-		Policy       SecretPolicy `json:"policy,omitempty"`
+		Policy       SecretPolicy `json:"policy,omitzero"`
 	}
 	type SafeScratchPad struct {
 		ID           string         `json:"id"`
