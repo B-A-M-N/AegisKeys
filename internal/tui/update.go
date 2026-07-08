@@ -893,7 +893,12 @@ func (m *model) newScratchPad() tea.Cmd {
 	if m.vaultSession == nil || m.vaultSession.vault == nil {
 		return nil
 	}
+	id, err := secret.NewID()
+	if err != nil {
+		return nil
+	}
 	sp := secret.ScratchPadRecord{
+		ID:    id,
 		Kind:  secret.ScratchPadGeneral,
 		Title: "New note",
 	}
