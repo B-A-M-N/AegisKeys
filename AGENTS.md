@@ -45,6 +45,7 @@ As of the latest build:
 | **Profiles** (binding) | `internal/profile` | `profiles.json` | No (refs key id) |
 | **Adapter** (rendering) | `internal/adapter` | — | No |
 | **Proxy** (tunneling) | `internal/proxy` | — | No |
+| **Logo masks** (TUI visuals) | `internal/logo` | `assets/logos/*.png` | No |
 | **Runner** (execution) | `internal/runner` | — | No |
 
 **Profile → Launch Plan flow:**
@@ -130,7 +131,7 @@ Three-domain model, kept deliberately separated (SPEC §3):
 | **Secrets** (API keys) | `internal/secret` | `vault.enc` (encrypted) | Yes |
 | **Profiles** (binding) | `internal/profile` | `profiles.json` | No (references key id) |
 
-Plus: `internal/config` (paths + app config), `internal/runner` (child-process env injection), `internal/audit` (append-only JSONL log), `internal/security` (doctor checks + output redaction), `internal/app` (placeholder top-level struct, not yet wired), `internal/tui` (Charm v2 UI, only `styles.go` so far).
+Plus: `internal/config` (paths + app config), `internal/runner` (child-process env injection), `internal/audit` (append-only JSONL log), `internal/security` (doctor checks + output redaction), `internal/logo` (approved logo asset → terminal mask sampling for TUI matrix-rain silhouettes), `internal/app` (placeholder top-level struct, not yet wired), `internal/tui` (Charm v2 UI).
 
 ### Config directory layout (SPEC §7)
 
@@ -201,4 +202,4 @@ These are now implemented; remaining work is polish and future features:
 - Add parser-backed TOML/XML merge/patch support for non-destructive existing config updates.
 - Add platform-specific doctor checks such as shell history scanning.
 - Add a `docs/future-work.md` (SPEC §27).
-- Add VHS demo tapes for the TUI (TUI_GUIDE §8).
+- Extend VHS demo coverage as new TUI flows stabilize.

@@ -495,11 +495,12 @@ func TestHermesAdapter_UsesHermesHomeIsolation(t *testing.T) {
 	if env["HERMES_HOME"] == "" {
 		t.Error("expected HERMES_HOME to be set")
 	}
-	if env["HERMES_INFERENCE_PROVIDER"] == "" {
-		t.Error("expected HERMES_INFERENCE_PROVIDER to be set")
+	// Model/provider routing lives in config.yaml, not env vars.
+	if env["HERMES_INFERENCE_PROVIDER"] != "" {
+		t.Error("HERMES_INFERENCE_PROVIDER should not be set (config file is authoritative)")
 	}
-	if env["HERMES_INFERENCE_MODEL"] != "claude-opus-4-5" {
-		t.Errorf("expected HERMES_INFERENCE_MODEL=claude-opus-4-5, got %s", env["HERMES_INFERENCE_MODEL"])
+	if env["HERMES_INFERENCE_MODEL"] != "" {
+		t.Error("HERMES_INFERENCE_MODEL should not be set (config file is authoritative)")
 	}
 
 	// File should be inside HERMES_HOME.

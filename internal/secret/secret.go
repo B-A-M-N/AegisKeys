@@ -95,23 +95,27 @@ func (e *AccessError) Error() string {
 // mode. Use this at every access site (reveal, clipboard copy, env export,
 // launch injection) so policy is actually enforced, not just stored.
 func (r SecretRecord) AllowAccess(mode AccessMode) error {
+	policy := r.Policy
+	if policy == (SecretPolicy{}) {
+		policy = DefaultSecretPolicy(r.Kind)
+	}
 	switch mode {
 	case AccessMaskedPreview:
 		return nil // always allowed
 	case AccessCopyClipboard:
-		if !r.Policy.AllowClipboard {
+		if !policy.AllowClipboard {
 			return &AccessError{Mode: string(mode)}
 		}
 	case AccessRevealStdout:
-		if !r.Policy.AllowReveal {
+		if !policy.AllowReveal {
 			return &AccessError{Mode: string(mode)}
 		}
 	case AccessInjectEnv:
-		if !r.Policy.AllowLaunchInject {
+		if !policy.AllowLaunchInject {
 			return &AccessError{Mode: string(mode)}
 		}
 	case AccessRefreshModels:
-		if !r.Policy.AllowModelRefresh {
+		if !policy.AllowModelRefresh {
 			return &AccessError{Mode: string(mode)}
 		}
 	}

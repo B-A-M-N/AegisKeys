@@ -21,6 +21,9 @@ knoxkeys
 dist/
 *.test
 *.out
+docs/demo/*.gif
+docs/demo/*.mp4
+docs/demo/*.webm
 
 # Editor / OS
 .DS_Store
@@ -43,3 +46,4 @@ skills/
 .agents/
 env
 printenv
+tmp/

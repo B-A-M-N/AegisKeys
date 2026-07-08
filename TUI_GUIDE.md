@@ -1283,7 +1283,7 @@ func unlockVaultCmd(password string) tea.Cmd {
 - [ ] Key bindings help (`?` screen)
 - [ ] Empty states for all screens
 - [ ] Loading spinners for async ops
-- [ ] VHS demo tapes
+- [x] VHS demo tapes
 - [ ] Freeze screenshots for README
 
 ### Phase 6: Security Verification

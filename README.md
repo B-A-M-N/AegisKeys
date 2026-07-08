@@ -201,6 +201,20 @@ launch plan (command, args, files, hazards). Press `Enter` to launch with the
 adapter default command, or `Right`/`d` to type a command override. The TUI
 releases the terminal while the child runs and resumes afterward.
 
+## Demos
+
+Reproducible terminal demos are recorded with VHS tapes in `demos/vhs/`.
+
+```bash
+make demo      # build and render all demo media
+make demo-tui  # render only the TUI/matrix-logo reveal demo
+make demo-cli  # render only the CLI overview demo
+make demo-full # render the slower full-flow launch + scratchpad demo as MP4
+```
+
+Generated media is written to `docs/demo/`. The tapes use throwaway config
+directories under `tmp/` and fake demo passwords/API keys only.
+
 ## CLI examples
 
 ```bash

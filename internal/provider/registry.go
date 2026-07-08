@@ -195,14 +195,52 @@ func (r *Registry) SetStaticModels(slug string, models []ProviderModel) error {
 		out = append(out, m)
 		seen[m.ID] = true
 	}
+	if len(out) == 0 {
+		return errors.New("static model catalog requires at least one model")
+	}
 
 	p.Models = out
 	p.ModelPolicy.Source = ModelSourceStatic
-	if p.Catalog.Source == "" {
-		p.Catalog.Source = "dynamic"
-	}
+	p.Catalog.Source = string(ModelSourceStatic)
 	if p.ModelPolicy.RefreshURL == "" {
 		p.ModelPolicy.RefreshURL = p.Catalog.RefreshURL
+	}
+	p.UpdatedAt = time.Now()
+	p.Normalize()
+
+	return p.ValidateStrict()
+}
+
+// SetDynamicModels replaces the provider's cached dynamic model catalog. Models
+// are deduped by ID and marked Static=false. It keeps the refresh URL metadata
+// so future refreshes can continue using the same endpoint.
+func (r *Registry) SetDynamicModels(slug string, models []ProviderModel) error {
+	p := r.Find(slug)
+	if p == nil {
+		return errors.New("provider not found: " + slug)
+	}
+
+	seen := map[string]bool{}
+	out := make([]ProviderModel, 0, len(models))
+	for _, m := range models {
+		m.ID = strings.TrimSpace(m.ID)
+		if m.ID == "" || seen[m.ID] {
+			continue
+		}
+		m.Static = false
+		out = append(out, m)
+		seen[m.ID] = true
+	}
+
+	p.Models = out
+	p.ModelPolicy.Source = ModelSourceDynamic
+	p.Catalog.Source = string(ModelSourceDynamic)
+	refreshURL := p.ModelRefreshURL()
+	if p.ModelPolicy.RefreshURL == "" {
+		p.ModelPolicy.RefreshURL = refreshURL
+	}
+	if p.Catalog.RefreshURL == "" {
+		p.Catalog.RefreshURL = refreshURL
 	}
 	p.UpdatedAt = time.Now()
 	p.Normalize()

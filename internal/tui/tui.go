@@ -7,8 +7,11 @@
 package tui
 
 import (
+	"os"
 	"os/exec"
 	"time"
+
+	"github.com/charmbracelet/colorprofile"
 
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
@@ -72,7 +75,19 @@ func Run(configDir, version string) error {
 	m.commandInput.Placeholder = "command (blank = adapter default)"
 	m.commandInput.SetWidth(48)
 
-	p := tea.NewProgram(m)
+	m.scratchTitleInput = textinput.New()
+	m.scratchTitleInput.Placeholder = "title"
+	m.scratchTitleInput.SetWidth(40)
+
+	m.scratchBodyInput = textarea.New()
+	m.scratchBodyInput.SetWidth(60)
+	m.scratchBodyInput.SetHeight(10)
+
+	opts := []tea.ProgramOption{}
+	if os.Getenv("FORCE_COLOR") != "" || os.Getenv("COLORTERM") == "truecolor" || os.Getenv("CLICOLOR_FORCE") != "" {
+		opts = append(opts, tea.WithColorProfile(colorprofile.TrueColor))
+	}
+	p := tea.NewProgram(m, opts...)
 	_, err = p.Run()
 	return err
 }
@@ -250,9 +265,17 @@ type model struct {
 	scratchListSelected int
 	scratchEditing      bool
 	scratchEditingID    string
+	scratchEditingTitle bool // true = title focused, false = body focused
 	scratchTitleInput   textinput.Model
 	scratchBodyInput    textarea.Model
 	scratchDirty        bool
+	scratchBodyCursor   int
+	scratchSelecting    bool
+	scratchSelectAnchor int
+
+	// Last key press message, saved so screen handlers that need to forward
+	// it to child input components (e.g. scratchpad editor) have access.
+	lastKeyPress tea.KeyPressMsg
 
 	// Background animation.
 	matrix *Matrix

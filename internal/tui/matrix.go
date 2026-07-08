@@ -44,6 +44,10 @@ type Matrix struct {
 
 	// semanticEvents holds transient event sparks that decay over frames.
 	semanticEvents []semanticEvent
+	logos          []matrixLogoReveal
+	focusLogo      string
+	focusLogoFrame int
+	shuffleDeck    []string
 
 	RNG *rand.Rand
 }
@@ -105,6 +109,7 @@ func NewMatrix(w, h int) *Matrix {
 	m := &Matrix{
 		RNG: rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
+	m.initLogoReveals()
 	m.initWaves()
 	m.Resize(w, h)
 	return m
@@ -250,6 +255,7 @@ func (m *Matrix) Update(msg tea.Msg) tea.Cmd {
 		}
 
 		m.updateWaveCache()
+		m.updateLogoReveals()
 
 		for i := range m.Drops {
 			d := &m.Drops[i]
@@ -420,6 +426,8 @@ func (m *Matrix) Render(buf *MatrixBuffer) {
 		}
 	}
 
+	m.renderLogoSilhouettes(buf)
+
 	// Render semantic event sparks.
 	for _, e := range m.semanticEvents {
 		if e.x < 0 || e.x >= m.Width || e.y < 0 || e.y >= m.Height {
@@ -499,6 +507,11 @@ func putMatrixCell(buf *MatrixBuffer, x, y int, glyph rune, colorIdx int, spark 
 	if buf == nil || y < 0 || y >= buf.Height || x < 0 || x >= buf.Width {
 		return
 	}
+	for _, r := range buf.Protected {
+		if x >= r.X && x < r.X+r.W && y >= r.Y && y < r.Y+r.H {
+			return
+		}
+	}
 	if colorIdx > buf.cells[y][x].colorIdx {
 		buf.cells[y][x] = matrixCell{ch: glyph, colorIdx: colorIdx, spark: spark}
 	}
@@ -509,31 +522,31 @@ func intensityToColorAlive(intensity float64, trailPos int, layer int, spark boo
 		return 7
 	}
 	if trailPos == 0 && layer == 2 && intensity > 0.90 && wave > 0.80 {
-		return 6
+		return 5
 	}
 
 	if trailPos == 0 {
 		switch {
 		case intensity > 0.74:
-			return 5
-		case intensity > 0.44:
 			return 4
-		case intensity > 0.25:
+		case intensity > 0.44:
 			return 3
-		default:
+		case intensity > 0.25:
 			return 2
+		default:
+			return 1
 		}
 	}
 
 	switch {
 	case intensity > 0.78:
-		return 5
-	case intensity > 0.52:
 		return 4
-	case intensity > 0.29:
+	case intensity > 0.52:
 		return 3
-	case intensity > 0.15:
+	case intensity > 0.29:
 		return 2
+	case intensity > 0.15:
+		return 1
 	default:
 		return 1
 	}

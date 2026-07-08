@@ -169,6 +169,9 @@ func TestSetStaticModels_DedupAndMarksStatic(t *testing.T) {
 	if p.ModelPolicy.Source != ModelSourceStatic {
 		t.Errorf("ModelPolicy.Source = %q, want static", p.ModelPolicy.Source)
 	}
+	if p.Catalog.Source != string(ModelSourceStatic) {
+		t.Errorf("Catalog.Source = %q, want static", p.Catalog.Source)
+	}
 }
 
 func TestSetStaticModels_ProviderNotFound(t *testing.T) {
@@ -176,6 +179,61 @@ func TestSetStaticModels_ProviderNotFound(t *testing.T) {
 	err := r.SetStaticModels("missing", []ProviderModel{{ID: "x"}})
 	if err == nil {
 		t.Error("expected error for missing provider")
+	}
+}
+
+func TestSetStaticModels_RequiresAssignedModels(t *testing.T) {
+	r := NewRegistry()
+	_ = r.Add(Provider{Slug: "test", Name: "Test", Compatibility: CompatOpenAI, BaseURL: "https://api.example.com", Auth: AuthSpec{Type: "bearer", EnvVar: "TEST_KEY"}})
+
+	err := r.SetStaticModels("test", nil)
+	if err == nil {
+		t.Fatal("expected error for empty static catalog")
+	}
+	if !strings.Contains(err.Error(), "requires at least one model") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestSetDynamicModels_DedupAndMarksDynamic(t *testing.T) {
+	r := NewRegistry()
+	_ = r.Add(Provider{
+		Slug:          "test",
+		Name:          "Test",
+		Compatibility: CompatOpenAI,
+		BaseURL:       "https://api.example.com/v1",
+		Auth:          AuthSpec{Type: "bearer", EnvVar: "TEST_KEY"},
+		ModelPolicy:   ModelCatalogPolicy{RefreshURL: "https://api.example.com/v1/models"},
+	})
+
+	models := []ProviderModel{
+		{ID: "model-a", Name: "Model A", Static: true},
+		{ID: "model-b", Name: "Model B", Static: true},
+		{ID: "model-a", Name: "Duplicate A", Static: true},
+		{ID: "  model-c  ", Name: "Whitespace", Static: true},
+	}
+
+	if err := r.SetDynamicModels("test", models); err != nil {
+		t.Fatalf("SetDynamicModels: %v", err)
+	}
+
+	p := r.Find("test")
+	if len(p.Models) != 3 {
+		t.Errorf("expected 3 models, got %d", len(p.Models))
+	}
+	for _, m := range p.Models {
+		if m.Static {
+			t.Errorf("model %q should not be marked Static", m.ID)
+		}
+		if strings.TrimSpace(m.ID) != m.ID {
+			t.Errorf("model %q not trimmed", m.ID)
+		}
+	}
+	if p.ModelPolicy.Source != ModelSourceDynamic {
+		t.Errorf("ModelPolicy.Source = %q, want dynamic", p.ModelPolicy.Source)
+	}
+	if p.Catalog.Source != string(ModelSourceDynamic) {
+		t.Errorf("Catalog.Source = %q, want dynamic", p.Catalog.Source)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"aegiskeys/internal/audit"
+	"aegiskeys/internal/logo"
 	"aegiskeys/internal/profile"
 	"aegiskeys/internal/provider"
 	"aegiskeys/internal/secret"
@@ -1030,6 +1031,223 @@ func TestMatrix_PerCellColorChanges(t *testing.T) {
 	}
 }
 
+func TestMatrixLogoSilhouette_RendersFromRainCells(t *testing.T) {
+	m := NewMatrix(120, 40)
+	setMatrixLogoMaskForTest(t, m, "gemini", testLogoMask())
+	m.SetLogo("gemini")
+	for i := 0; i < 14; i++ {
+		cmd := m.Update(matrixMsg{})
+		if cmd != nil {
+			_ = cmd()
+		}
+	}
+
+	buf := NewMatrixBuffer(120, 40)
+	m.Render(buf)
+
+	var bright int
+	for y := 0; y < buf.Height; y++ {
+		for x := 70; x < buf.Width; x++ {
+			c := buf.CellAt(x, y)
+			if c.colorIdx >= 4 {
+				bright++
+			}
+		}
+	}
+	if bright == 0 {
+		t.Fatal("expected logo silhouette to render bright rain cells")
+	}
+}
+
+func TestMatrixLogoSilhouette_UsesSampledMask(t *testing.T) {
+	m := NewMatrix(120, 40)
+	setMatrixLogoMaskForTest(t, m, "gemini", testLogoMask())
+
+	buf := NewMatrixBuffer(120, 40)
+	m.Render(buf)
+
+	var bright int
+	for y := 0; y < buf.Height; y++ {
+		for x := 0; x < buf.Width; x++ {
+			if buf.CellAt(x, y).colorIdx >= 4 {
+				bright++
+			}
+		}
+	}
+	if bright == 0 {
+		t.Fatal("expected sampled logo mask to brighten rain cells")
+	}
+}
+
+func TestMatrixLogoSilhouette_ClipsToRevealPanel(t *testing.T) {
+	m := NewMatrix(120, 40)
+	m.Drops = nil
+	for i := range m.logos {
+		m.logos[i].hasMask = false
+		m.logos[i].assetOK = false
+		m.logos[i].value = 0
+	}
+
+	baseline := NewMatrixBuffer(120, 40)
+	m.Render(baseline)
+	setMatrixLogoMaskForTest(t, m, "gemini", testLogoMask())
+	buf := NewMatrixBuffer(120, 40)
+	m.Render(buf)
+	panel := m.logoRevealPanel()
+
+	for y := 0; y < buf.Height; y++ {
+		for x := 0; x < panel.X; x++ {
+			before := baseline.CellAt(x, y)
+			after := buf.CellAt(x, y)
+			if before.ch != after.ch || before.colorIdx != after.colorIdx {
+				t.Fatalf("logo changed cell outside reveal panel at %d,%d", x, y)
+			}
+		}
+	}
+}
+
+func TestMatrixLogoSilhouette_DoesNotClearPanelBackground(t *testing.T) {
+	m := NewMatrix(120, 40)
+	setMatrixLogoMaskForTest(t, m, "gemini", testLogoMask())
+	panel := m.logoRevealPanel()
+	buf := NewMatrixBuffer(120, 40)
+	for y := panel.Y; y < panel.Y+panel.H && y < buf.Height; y++ {
+		for x := panel.X; x < panel.X+panel.W && x < buf.Width; x++ {
+			buf.cells[y][x] = matrixCell{ch: '.', colorIdx: 2}
+		}
+	}
+
+	m.renderLogoSilhouette(buf, &m.logos[logoIndexForTest(t, m, "gemini")])
+
+	var cleared int
+	for y := panel.Y; y < panel.Y+panel.H && y < buf.Height; y++ {
+		for x := panel.X; x < panel.X+panel.W && x < buf.Width; x++ {
+			if buf.cells[y][x].colorIdx == 0 {
+				cleared++
+			}
+		}
+	}
+	if cleared != 0 {
+		t.Fatalf("logo render cleared %d panel cells; background rain should remain live", cleared)
+	}
+}
+
+func TestMatrixLogoSilhouette_FallsBackWhenRequestedLogoMissing(t *testing.T) {
+	m := NewMatrix(120, 40)
+	for i := range m.logos {
+		m.logos[i].hasMask = false
+		m.logos[i].assetOK = false
+	}
+	setMatrixLogoMaskForTest(t, m, "gemini", testLogoMask())
+
+	m.SetLogo("openrouter")
+	if m.focusLogo != "gemini" {
+		t.Fatalf("focusLogo = %q, want fallback gemini", m.focusLogo)
+	}
+
+	buf := NewMatrixBuffer(120, 40)
+	m.Render(buf)
+	panel := m.logoRevealPanel()
+	if countBrightCells(buf, panel) == 0 {
+		t.Fatal("expected fallback logo to render immediately")
+	}
+}
+
+func TestMatrixLogoSilhouette_RendersRealSheetAsset(t *testing.T) {
+	m := NewMatrix(120, 40)
+	m.SetLogo("aider")
+
+	buf := NewMatrixBuffer(120, 40)
+	m.Render(buf)
+	panel := m.logoRevealPanel()
+	if countBrightCells(buf, panel) == 0 {
+		t.Fatal("expected real sheet-backed logo to render visible panel cells")
+	}
+}
+
+func TestMatrixLogoSilhouette_RendersBrailleFromSeparatedAsset(t *testing.T) {
+	m := NewMatrix(120, 40)
+	m.SetLogo("gemini")
+
+	buf := NewMatrixBuffer(120, 40)
+	m.Render(buf)
+	panel := m.logoRevealPanel()
+	var braille int
+	for y := panel.Y; y < panel.Y+panel.H && y < buf.Height; y++ {
+		for x := panel.X; x < panel.X+panel.W && x < buf.Width; x++ {
+			ch := buf.CellAt(x, y).ch
+			if ch >= '\u2800' && ch <= '\u28ff' {
+				braille++
+			}
+		}
+	}
+	if braille == 0 {
+		t.Fatal("expected separated logo asset to render with braille subcell detail")
+	}
+}
+
+func setMatrixLogoMaskForTest(t *testing.T, m *Matrix, id string, mask logo.Mask) {
+	t.Helper()
+	for i := range m.logos {
+		if m.logos[i].id == id {
+			m.logos[i].mask = mask
+			m.logos[i].hasMask = true
+			m.logos[i].assetOK = true
+			m.logos[i].value = 1
+			m.logos[i].target = 1
+			return
+		}
+	}
+	t.Fatalf("logo %q not registered", id)
+}
+
+func logoIndexForTest(t *testing.T, m *Matrix, id string) int {
+	t.Helper()
+	for i := range m.logos {
+		if m.logos[i].id == id {
+			return i
+		}
+	}
+	t.Fatalf("logo %q not registered", id)
+	return 0
+}
+
+func testLogoMask() logo.Mask {
+	cells := make([][]float64, 8)
+	for y := range cells {
+		cells[y] = make([]float64, 16)
+		for x := range cells[y] {
+			if x == y || x == 15-y || (y >= 3 && y <= 4 && x >= 3 && x <= 12) {
+				cells[y][x] = 1
+			}
+		}
+	}
+	return logo.Mask{ID: "gemini", Width: 16, Height: 8, Cells: cells}
+}
+
+func countBrightCells(buf *MatrixBuffer, r Rect) int {
+	count := 0
+	for y := r.Y; y < r.Y+r.H && y < buf.Height; y++ {
+		for x := r.X; x < r.X+r.W && x < buf.Width; x++ {
+			if buf.CellAt(x, y).colorIdx >= 4 {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+func TestActiveMatrixLogoID_UsesSelectedLaunchApp(t *testing.T) {
+	m := newTestModel(t)
+	m.active = screenLaunch
+	m.profiles.Profiles[0].Target.App = "gemini"
+	m.selected[screenLaunch] = 0
+
+	if got := m.activeMatrixLogoID(); got != "gemini" {
+		t.Fatalf("activeMatrixLogoID = %q, want gemini", got)
+	}
+}
+
 func TestLaunchView_ShowsMaskedEnvAndSafety(t *testing.T) {
 	m := newTestModel(t)
 	m.focus = focusContent
@@ -1167,6 +1385,37 @@ func TestLogAudit_RecordsKeyAdd(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("key.add audit event not recorded")
+	}
+}
+
+func TestKeyAddModal_EnterSubmitsWhenRequiredFieldsComplete(t *testing.T) {
+	m := newTestModel(t)
+	m.configDir = t.TempDir()
+	m.unlocked = true
+	m.active = screenKeys
+	m.focus = focusModal
+	m.modal = modalAddKey
+	m.vaultSession = &vaultSession{
+		vault: &secret.Vault{Version: 1},
+		key:   [32]byte{},
+	}
+	m.keyForm = keyFormState{
+		providerSlug: "openai",
+		label:        "main",
+	}
+	m.keyFormActive = 2
+	m.addInput.SetValue("sk-test-key-add-enter")
+
+	_, _ = m.Update(tea.KeyPressMsg{Text: "enter"})
+
+	if m.modal != modalNone {
+		t.Fatalf("expected key add modal to close after Enter submit, got %d", m.modal)
+	}
+	if got := len(m.vaultSession.vault.Keys); got != 1 {
+		t.Fatalf("vault key count = %d, want 1", got)
+	}
+	if !strings.Contains(m.statusMsg, "Key added") {
+		t.Fatalf("status = %q, want key added", m.statusMsg)
 	}
 }
 
@@ -1372,5 +1621,60 @@ func TestTUI_LaunchFinished_ChildExitAndCleanupFailure(t *testing.T) {
 	}
 	if !strings.Contains(result.statusMsg, "permission denied") {
 		t.Errorf("status should include cleanup error details, got: %q", result.statusMsg)
+	}
+}
+
+func TestScratchPad_LineSelectionCopiesSelectedText(t *testing.T) {
+	m := newTestModel(t)
+	m.active = screenScratch
+	m.focus = focusContent
+	m.vaultSession = &vaultSession{
+		vault: &secret.Vault{
+			Version: 1,
+			ScratchPads: []secret.ScratchPadRecord{{
+				ID:    "scratch_1",
+				Kind:  secret.ScratchPadGeneral,
+				Title: "Note",
+				Body:  "alpha\nbeta\ngamma",
+			}},
+		},
+	}
+
+	_, _ = m.Update(tea.KeyPressMsg{Text: "v"})
+	if !m.scratchSelecting {
+		t.Fatal("expected scratch selection to start")
+	}
+	_, _ = m.Update(tea.KeyPressMsg{Text: "j"})
+	if got := m.selectedScratchText(); got != "alpha\nbeta" {
+		t.Fatalf("selected text = %q, want alpha/beta", got)
+	}
+
+	_, _ = m.Update(tea.KeyPressMsg{Text: "y"})
+	if !strings.Contains(m.statusMsg, "Copied selected") {
+		t.Fatalf("expected selected copy status, got %q", m.statusMsg)
+	}
+}
+
+func TestScratchPad_ViewShowsSelectionControls(t *testing.T) {
+	m := newTestModel(t)
+	m.active = screenScratch
+	m.focus = focusContent
+	m.vaultSession = &vaultSession{
+		vault: &secret.Vault{
+			Version: 1,
+			ScratchPads: []secret.ScratchPadRecord{{
+				ID:    "scratch_1",
+				Kind:  secret.ScratchPadGeneral,
+				Title: "Note",
+				Body:  "alpha\nbeta",
+			}},
+		},
+	}
+
+	view := stripANSIForTest(m.scratchView(m.styles))
+	for _, want := range []string{"v select lines", "y/c copy"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("scratch view missing %q:\n%s", want, view)
+		}
 	}
 }

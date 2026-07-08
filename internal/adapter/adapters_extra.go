@@ -353,7 +353,7 @@ func (GeminiCLIAdapter) Contract() AppSupportContract {
 		LaunchSurfaces:    []string{"cli"},
 		CanLaunch:         true, CanInjectSecrets: true, CanPatchConfig: false,
 		CanManageModels: true, CanIsolateProfile: false, RequiresManualStep: false,
-		ValidationChecks: []string{"env_injection_only", "model_slots_validated", "args_no_raw_secret"},
+		ValidationChecks: []string{"env_injection_only", "model_slots_validated", "args_no_raw_secret", "gateway_base_url_for_non_google"},
 		ModelSlots: []ModelSlotContract{
 			{Name: "main", Description: "Primary model"},
 		},
@@ -370,18 +370,29 @@ func (GeminiCLIAdapter) Render(p profile.Profile, prov provider.Provider, key *s
 	if err != nil {
 		return nil, err
 	}
+	preview := buildPreview(p.Name, prov)
 	if prov.Compatibility == provider.CompatGoogle {
 		if p.ModelID() != "" {
 			env["GOOGLE_MODEL"] = p.ModelID()
 		}
 	} else {
 		if p.ModelID() != "" {
-			env["OPENAI_MODEL"] = p.ModelID()
+			env["GOOGLE_MODEL"] = p.ModelID()
+		}
+		if key != nil && key.Secret != "" {
+			env["GEMINI_API_KEY"] = key.Secret
+		}
+		if baseURL := prov.CanonicalBaseURL(); baseURL != "" {
+			env["GOOGLE_GEMINI_BASE_URL"] = baseURL
+			preview = append(preview, "Gemini CLI gateway: GOOGLE_GEMINI_BASE_URL="+baseURL)
 		}
 	}
 	return &LaunchStrategy{
-		Plan:    LaunchPlan{Command: "gemini", Env: env, Preview: buildPreview(p.Name, prov)},
-		Support: AppSupportContract{ID: "gemini", DisplayName: "Gemini CLI", SupportLevel: SupportFullEnv},
+		Plan: LaunchPlan{Command: "gemini", Env: env, Preview: preview},
+		Support: AppSupportContract{
+			ID: "gemini", DisplayName: "Gemini CLI", SupportLevel: SupportProxyMediated,
+			CanLaunch: true, CanInjectSecrets: true, LaunchSurfaces: []string{"cli"},
+		},
 	}, nil
 }
 

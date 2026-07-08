@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
 
 	"aegiskeys/internal/adapter"
@@ -81,11 +82,29 @@ func TestRunIntegration_HermesHomeIsolation(t *testing.T) {
 	if strategy.Plan.Env["HERMES_HOME"] == "" {
 		t.Error("HERMES_HOME not set")
 	}
-	if strategy.Plan.Env["HERMES_INFERENCE_PROVIDER"] == "" {
-		t.Error("HERMES_INFERENCE_PROVIDER not set")
+	// Model/provider routing lives in the config file, not env vars.
+	if strategy.Plan.Env["HERMES_INFERENCE_PROVIDER"] != "" {
+		t.Error("HERMES_INFERENCE_PROVIDER should not be set (config file owns model routing)")
 	}
 	if len(strategy.Plan.Files) == 0 {
 		t.Error("expected config file for Hermes")
+	}
+	// Verify the config file contains the provider and model info.
+	foundProvider := false
+	foundModel := false
+	for _, f := range strategy.Plan.Files {
+		if strings.Contains(f.Content, "openrouter") {
+			foundProvider = true
+		}
+		if strings.Contains(f.Content, "claude-opus-4-5") {
+			foundModel = true
+		}
+	}
+	if !foundProvider {
+		t.Error("config file does not contain provider routing")
+	}
+	if !foundModel {
+		t.Error("config file does not contain model routing")
 	}
 }
 

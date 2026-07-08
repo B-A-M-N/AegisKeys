@@ -28,6 +28,7 @@ var (
 	profCreateEnv         string
 	profCreateNotes       string
 	profCreateApp         string
+	profCreateCommand     string
 	profCreateModelMain   string
 	profCreateModelWeak   string
 	profCreateModelEditor string
@@ -88,7 +89,8 @@ var profileCreateCmd = &cobra.Command{
 			KeyID:        profCreateKey,
 			Notes:        profCreateNotes,
 			Target: profile.TargetConfig{
-				App: appID,
+				App:     appID,
+				Command: profCreateCommand,
 			},
 		}
 		if profCreateAlias != "" {
@@ -294,6 +296,7 @@ func init() {
 	profileCreateCmd.Flags().StringVar(&profCreateEnv, "env", "", "extra env: KEY=VAL,KEY2=VAL2")
 	profileCreateCmd.Flags().StringVar(&profCreateNotes, "notes", "", "free-form notes")
 	profileCreateCmd.Flags().StringVar(&profCreateApp, "app", "", "target app (e.g. aider, crush, zed, intellij; defaults to generic)")
+	profileCreateCmd.Flags().StringVar(&profCreateCommand, "command", "", "command override for launchable profiles")
 	profileCreateCmd.Flags().StringVar(&profCreateModelMain, "model-main", "", "model ID for main role")
 	profileCreateCmd.Flags().StringVar(&profCreateModelWeak, "model-weak", "", "model ID for weak role (Aider)")
 	profileCreateCmd.Flags().StringVar(&profCreateModelEditor, "model-editor", "", "model ID for editor role (Aider)")

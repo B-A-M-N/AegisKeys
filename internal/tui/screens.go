@@ -163,15 +163,28 @@ func (m *model) providersView(s *Styles) string {
 
 	for i, p := range m.providers.Providers {
 		marker := m.selMarker(s, i)
+		catalogBadge := ""
+		switch providerModelSource(p) {
+		case provider.ModelSourceDynamic:
+			catalogBadge = s.Muted.Render(" [dynamic]")
+		case provider.ModelSourceStatic:
+			catalogBadge = s.Muted.Render(" [static]")
+		case provider.ModelSourceLocal:
+			catalogBadge = s.Muted.Render(" [local]")
+		case provider.ModelSourceManual:
+			catalogBadge = s.Muted.Render(" [manual]")
+		}
 		if m.rowSelected(i) {
-			b.WriteString(marker + " " + s.SelectedRow.Render(fmtRow(p.Name, p.Slug, p.CanonicalEnvVar())))
+			b.WriteString(marker + " " + s.SelectedRow.Render(fmtRow(p.Name, p.Slug, p.CanonicalEnvVar())) + catalogBadge)
 		} else {
 			b.WriteString(marker + " " + s.Body.Render(truncate(p.Name, 22)) + " " +
 				s.KeyMasked.Render(padRight(p.Slug, 18)) + " " +
-				s.Muted.Render(truncate(p.CanonicalEnvVar(), 24)))
+				s.Muted.Render(truncate(p.CanonicalEnvVar(), 24)) + catalogBadge)
 		}
 		b.WriteString("\n")
 	}
+	b.WriteString("\n")
+	b.WriteString(s.Muted.Render("e edit  d inspect  m model catalog  / filter  x delete  z add"))
 	return b.String()
 }
 
@@ -731,8 +744,10 @@ func (m *model) scratchView(s *Styles) string {
 			body := sp.Body
 			if body == "" {
 				body = s.Muted.Render("(empty)")
+			} else {
+				body = m.renderScratchBodyPreview(s, body)
 			}
-			b.WriteString(s.Body.Render(body))
+			b.WriteString(body)
 		}
 	}
 
@@ -740,8 +755,39 @@ func (m *model) scratchView(s *Styles) string {
 	b.WriteString("\n\n")
 	if m.scratchEditing {
 		b.WriteString(s.Muted.Render("ctrl+s save  ctrl+e external editor  esc cancel"))
+	} else if m.scratchSelecting {
+		b.WriteString(s.Muted.Render("v clear selection  j/k extend  y copy selected  c copy selected  esc cancel"))
 	} else {
-		b.WriteString(s.Muted.Render("n new  e/enter edit  c copy body  / filter  x delete  q/Esc back · vault-encrypted"))
+		b.WriteString(s.Muted.Render("n new  e/enter edit  v select lines  y/c copy  / filter  x delete  q/Esc back · vault-encrypted"))
+	}
+	return b.String()
+}
+
+func (m *model) renderScratchBodyPreview(s *Styles, body string) string {
+	lines := scratchBodyLines(body)
+	if len(lines) == 0 {
+		return s.Muted.Render("(empty)")
+	}
+	m.scratchBodyCursor = clampInt(m.scratchBodyCursor, 0, len(lines)-1)
+	start, end, hasSelection := m.scratchSelectionRange(len(lines))
+
+	var b strings.Builder
+	for i, line := range lines {
+		marker := "  "
+		if i == m.scratchBodyCursor {
+			marker = "› "
+		}
+		text := marker + line
+		if hasSelection && i >= start && i <= end {
+			b.WriteString(s.SelectedRow.Render(text))
+		} else if i == m.scratchBodyCursor {
+			b.WriteString(s.KeyLabel.Render(text))
+		} else {
+			b.WriteString(s.Body.Render(text))
+		}
+		if i < len(lines)-1 {
+			b.WriteString("\n")
+		}
 	}
 	return b.String()
 }

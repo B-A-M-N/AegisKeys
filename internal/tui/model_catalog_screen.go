@@ -18,6 +18,17 @@ func (m *model) modelCatalogView(s *Styles) string {
 
 	b.WriteString(s.Title.Render(fmt.Sprintf("Model Catalog — %s", provName)))
 	b.WriteString("\n\n")
+	source := m.modelCatalog.source
+	if source == "" {
+		source = "manual"
+	}
+	b.WriteString(s.Body.Render(fmt.Sprintf("source: %s", source)))
+	if source == "static" {
+		b.WriteString(s.Muted.Render("  (save selected models only)"))
+	} else if source == "dynamic" {
+		b.WriteString(s.Muted.Render("  (save loaded catalog)"))
+	}
+	b.WriteString("\n")
 
 	// Status line.
 	filtered := m.filteredCatalogModels()
@@ -86,10 +97,10 @@ func (m *model) modelCatalogView(s *Styles) string {
 					}
 				}
 			}
-			idStr := truncate(mod.ID, 36)
+			idStr := truncate(mod.ID, 64)
 			nameStr := ""
 			if strings.TrimSpace(mod.Name) != "" && mod.Name != mod.ID {
-				nameStr = "  " + s.Muted.Render(truncate(mod.Name, 24))
+				nameStr = "  " + s.Muted.Render(truncate(mod.Name, 40))
 			}
 			line := fmt.Sprintf("  %s %s%s%s", marker, idStr, nameStr, staticBadge)
 			if i == m.modelCatalog.cursor {
@@ -112,7 +123,7 @@ func (m *model) modelCatalogView(s *Styles) string {
 			"type to filter · Enter/Esc to close · backspace to erase"))
 	} else {
 		b.WriteString(s.Muted.Render(
-			"r refresh  / filter  space toggle  a all  c clear  s save  q quit"))
+			"t static/dynamic  r refresh  / filter  space/Enter toggle  a all  c clear  e save  q quit"))
 	}
 
 	return b.String()

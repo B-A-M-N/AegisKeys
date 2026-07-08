@@ -253,7 +253,6 @@ func TestSaveModelCatalog_PersistsStaticModels(t *testing.T) {
 	}
 	wantID := filtered[0].ID
 
-	// Press 's' to save.
 	m.unlocked = true
 	m.vaultSession = &vaultSession{
 		vault: &secret.Vault{
@@ -269,8 +268,8 @@ func TestSaveModelCatalog_PersistsStaticModels(t *testing.T) {
 
 	slug := m.modelCatalog.providerSlug
 
-	// Press 's' to save via the UI.
-	_, cmd := m.handleProvidersKey("s")
+	// Press 'e' to save via the catalog overlay. `s` remains down movement.
+	_, cmd := m.handleModelCatalogKey(tea.KeyPressMsg{Text: "e"})
 	if cmd != nil {
 		_ = cmd()
 	}
@@ -295,6 +294,165 @@ func TestSaveModelCatalog_PersistsStaticModels(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("model %s should be in provider models after save", wantID)
+	}
+}
+
+func TestCatalogKey_SMovesDownEnterToggles(t *testing.T) {
+	m := setupCatalogTestModel(t)
+	m.openModelCatalog()
+	m.modelCatalog.cursor = 0
+
+	_, _ = m.Update(tea.KeyPressMsg{Text: "s"})
+	if m.modelCatalog.cursor != 1 {
+		t.Fatalf("expected s to move down to cursor=1, got %d", m.modelCatalog.cursor)
+	}
+
+	filtered := m.filteredCatalogModels()
+	id := filtered[m.modelCatalog.cursor].ID
+	before := m.modelCatalog.selected[id]
+	_, _ = m.Update(tea.KeyPressMsg{Text: "enter"})
+	if m.modelCatalog.selected[id] == before {
+		t.Fatalf("expected Enter to toggle selected state for %s", id)
+	}
+}
+
+func TestCatalogKey_TogglesSourceMode(t *testing.T) {
+	m := setupCatalogTestModel(t)
+	m.openModelCatalog()
+
+	m.modelCatalog.source = provider.ModelSourceStatic
+	_, _ = m.Update(tea.KeyPressMsg{Text: "t"})
+	if m.modelCatalog.source != provider.ModelSourceDynamic {
+		t.Fatalf("source = %q, want dynamic", m.modelCatalog.source)
+	}
+
+	_, _ = m.Update(tea.KeyPressMsg{Text: "t"})
+	if m.modelCatalog.source != provider.ModelSourceStatic {
+		t.Fatalf("source = %q, want static", m.modelCatalog.source)
+	}
+}
+
+func TestSaveModelCatalog_PersistsDynamicModels(t *testing.T) {
+	m := setupCatalogTestModel(t)
+	m.openModelCatalog()
+
+	slug := m.modelCatalog.providerSlug
+	m.modelCatalog.source = provider.ModelSourceDynamic
+	m.modelCatalog.models = []provider.ProviderModel{
+		{ID: "model-live-a", Name: "Live A", Static: true},
+		{ID: "model-live-b", Name: "Live B", Static: true},
+	}
+	m.modelCatalog.selected = map[string]bool{
+		"model-live-a": true,
+		"model-live-b": false,
+	}
+
+	_ = m.saveModelCatalog()
+
+	relReg, err := provider.LoadRegistry(config.ProvidersPath(m.configDir))
+	if err != nil {
+		t.Fatalf("reload registry: %v", err)
+	}
+	saved := relReg.Find(slug)
+	if saved == nil {
+		t.Fatalf("provider %s should exist after save", slug)
+	}
+	if saved.ModelPolicy.Source != provider.ModelSourceDynamic {
+		t.Fatalf("source = %q, want dynamic", saved.ModelPolicy.Source)
+	}
+	if len(saved.Models) != 1 {
+		t.Fatalf("saved %d models, want 1", len(saved.Models))
+	}
+	if saved.Models[0].ID != "model-live-a" {
+		t.Fatalf("saved model = %q, want model-live-a", saved.Models[0].ID)
+	}
+	for _, mod := range saved.Models {
+		if mod.Static {
+			t.Fatalf("dynamic model %s should not be marked static", mod.ID)
+		}
+	}
+}
+
+func TestSaveModelCatalog_StaticRequiresSelection(t *testing.T) {
+	m := setupCatalogTestModel(t)
+	m.openModelCatalog()
+
+	m.modelCatalog.source = provider.ModelSourceStatic
+	for id := range m.modelCatalog.selected {
+		m.modelCatalog.selected[id] = false
+	}
+
+	_ = m.saveModelCatalog()
+
+	if m.modelCatalog.errMsg == "" {
+		t.Fatal("expected static save to report missing selected models")
+	}
+	if !m.modelCatalog.active {
+		t.Fatal("catalog should stay open after invalid static save")
+	}
+	if !strings.Contains(m.statusMsg, "requires at least one selected model") {
+		t.Fatalf("unexpected status: %s", m.statusMsg)
+	}
+}
+
+func TestCatalogKey_ESavesSelectedDynamicModels(t *testing.T) {
+	m := setupCatalogTestModel(t)
+	m.openModelCatalog()
+	slug := m.modelCatalog.providerSlug
+	m.modelCatalog.source = provider.ModelSourceDynamic
+	m.modelCatalog.models = []provider.ProviderModel{
+		{ID: "model-live-a", Name: "Live A"},
+		{ID: "model-live-b", Name: "Live B"},
+	}
+	m.modelCatalog.selected = map[string]bool{
+		"model-live-a": false,
+		"model-live-b": true,
+	}
+
+	_, cmd := m.Update(tea.KeyPressMsg{Text: "e"})
+	if cmd != nil {
+		_ = cmd()
+	}
+	if m.modelCatalog.active {
+		t.Fatal("catalog should close after successful save")
+	}
+
+	relReg, err := provider.LoadRegistry(config.ProvidersPath(m.configDir))
+	if err != nil {
+		t.Fatalf("reload registry: %v", err)
+	}
+	saved := relReg.Find(slug)
+	if saved == nil {
+		t.Fatalf("provider %s should exist after save", slug)
+	}
+	if saved.ModelPolicy.Source != provider.ModelSourceDynamic {
+		t.Fatalf("source = %q, want dynamic", saved.ModelPolicy.Source)
+	}
+	if len(saved.Models) != 1 || saved.Models[0].ID != "model-live-b" {
+		t.Fatalf("saved models = %+v, want only model-live-b", saved.Models)
+	}
+}
+
+func TestRefreshModelCatalog_KeyPolicyIsAdvisory(t *testing.T) {
+	m := setupCatalogTestModel(t)
+	prov := &m.providers.Providers[0]
+	prov.ModelPolicy.Source = provider.ModelSourceDynamic
+	prov.ModelPolicy.RefreshURL = "https://api.example.com/v1/models"
+	prov.Catalog.RefreshURL = "https://api.example.com/v1/models"
+	m.vaultSession.vault.Keys[0].Policy = secret.SecretPolicy{
+		AllowLaunchInject: true,
+		AllowModelRefresh: false,
+	}
+
+	cmd := m.openModelCatalog()
+	if cmd == nil {
+		t.Fatal("expected refresh command even when AllowModelRefresh is false")
+	}
+	if m.modelCatalog.errMsg != "" {
+		t.Fatalf("unexpected policy block: %s", m.modelCatalog.errMsg)
+	}
+	if !m.modelCatalog.fetching {
+		t.Fatal("catalog should be marked fetching")
 	}
 }
 

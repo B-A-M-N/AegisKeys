@@ -1043,6 +1043,41 @@ func TestGeminiAdapter_GoogleProvider(t *testing.T) {
 	if s.Plan.Env["GOOGLE_MODEL"] != "gemini-3-flash" {
 		t.Errorf("GOOGLE_MODEL = %s", s.Plan.Env["GOOGLE_MODEL"])
 	}
+	if s.Plan.Env["GOOGLE_GEMINI_BASE_URL"] != "" {
+		t.Errorf("google provider should not force gateway base URL, got %s", s.Plan.Env["GOOGLE_GEMINI_BASE_URL"])
+	}
+}
+
+func TestGeminiAdapter_OpenAIProviderUsesGateway(t *testing.T) {
+	a := GeminiCLIAdapter{}
+	p := profile.Profile{Name: "t", Target: profile.TargetConfig{App: "gemini"},
+		Models: profile.ModelSlots{Main: &profile.ModelRef{ID: "openai/gpt-4o:free"}}}
+	prov := provider.Provider{
+		Name: "Gateway", Slug: "gateway", EnvVar: "GATEWAY_API_KEY",
+		BaseURL:       "http://127.0.0.1:4000",
+		Compatibility: provider.CompatOpenAI,
+		Auth:          provider.AuthSpec{Type: "bearer", EnvVar: "GATEWAY_API_KEY"},
+	}
+	key := testAPIKey("sk-gateway")
+	s, err := a.Render(p, prov, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Plan.Env["GOOGLE_GEMINI_BASE_URL"]; got != "http://127.0.0.1:4000" {
+		t.Fatalf("GOOGLE_GEMINI_BASE_URL = %q", got)
+	}
+	if got := s.Plan.Env["GOOGLE_MODEL"]; got != "openai/gpt-4o:free" {
+		t.Fatalf("GOOGLE_MODEL = %q", got)
+	}
+	if got := s.Plan.Env["GEMINI_API_KEY"]; got != "sk-gateway" {
+		t.Fatalf("GEMINI_API_KEY not set for gateway auth")
+	}
+	if _, ok := s.Plan.Env["OPENAI_MODEL"]; ok {
+		t.Fatalf("Gemini gateway should not use OPENAI_MODEL")
+	}
+	if len(s.Plan.Files) != 0 {
+		t.Fatalf("Gemini gateway should be env-only, got %d files", len(s.Plan.Files))
+	}
 }
 
 func TestCursorAdapter_Blocked(t *testing.T) {

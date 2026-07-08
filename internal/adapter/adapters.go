@@ -76,10 +76,12 @@ func (GenericOpenAIAdapter) Render(p profile.Profile, prov provider.Provider, ke
 	return &LaunchStrategy{
 		Plan: LaunchPlan{Command: cmd, Env: env, Preview: buildPreview(p.Name, prov)},
 		Support: AppSupportContract{
-			ID: "generic", DisplayName: "Generic OpenAI-compatible",
-			SupportLevel:      SupportFullEnv,
-			CredentialControl: CredentialEnvInjected,
-			SupportConfidence: ConfidenceManualProof,
+			ID:                        "generic",
+			DisplayName:               "Generic OpenAI-compatible",
+			SupportLevel:              SupportFullEnv,
+			CredentialControl:         CredentialEnvInjected,
+			SupportConfidence:         ConfidenceManualProof,
+			CanLaunchArbitraryCommand: true,
 		},
 	}, nil
 }
@@ -531,11 +533,13 @@ func (HermesAdapter) Render(p profile.Profile, prov provider.Provider, key *secr
 		env["HERMES_HOME"] = home
 	}
 
-	env["HERMES_INFERENCE_PROVIDER"] = hermesProviderID(prov)
-
-	if p.Models.Main != nil {
-		env["HERMES_INFERENCE_MODEL"] = p.Models.Main.ID
-	}
+	// Model and provider routing live exclusively in config.yaml — they are
+	// NOT mirrored to env vars. Hermes reads config.yaml as the source of
+	// truth for model/provider selection, and duplicating them as env vars
+	// would only carry the main model (losing auxiliary slots like
+	// compression/vision/web_extract) while creating a shadowing risk.
+	// The only env-side concern is the API key credential (handled by
+	// buildBaseEnv) and HERMES_HOME isolation.
 
 	files := []FileWrite{
 		buildHermesConfig(p, prov, home),

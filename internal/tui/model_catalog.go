@@ -20,6 +20,7 @@ type modelCatalogState struct {
 	active       bool
 	providerSlug string
 	keyID        string
+	source       provider.ModelSource
 
 	fetching  bool
 	filtering bool
@@ -66,6 +67,7 @@ func (m *model) openModelCatalog() tea.Cmd {
 	m.modelCatalog = modelCatalogState{
 		active:       true,
 		providerSlug: slug,
+		source:       providerModelSource(*prov),
 		models:       models,
 		selected:     selected,
 		cursor:       0,
@@ -74,8 +76,12 @@ func (m *model) openModelCatalog() tea.Cmd {
 		errMsg:       "",
 	}
 
-	// Auto-refresh if the provider supports it.
-	return m.refreshModelCatalog()
+	// Auto-refresh only for providers already configured as dynamic. Static
+	// catalogs should open without needing a network call or key-policy check.
+	if m.modelCatalog.source == provider.ModelSourceDynamic {
+		return m.refreshModelCatalog()
+	}
+	return nil
 }
 
 // closeModelCatalog deactivates the overlay and returns focus to the normal
@@ -85,6 +91,7 @@ func (m *model) closeModelCatalog() {
 	m.modelCatalog.providerSlug = ""
 	m.modelCatalog.models = nil
 	m.modelCatalog.selected = nil
+	m.modelCatalog.source = ""
 	m.modelCatalog.cursor = 0
 	m.modelCatalog.filter = ""
 	m.modelCatalog.filtering = false
@@ -113,16 +120,23 @@ func (m *model) refreshModelCatalog() tea.Cmd {
 		}
 		if keyID != "" {
 			if rec := m.vaultSession.vault.Get(keyID); rec != nil {
-				// Enforce access policy before using the secret.
-				if err := rec.AllowAccess(secret.AccessRefreshModels); err == nil {
-					apiKey = rec.Secret
-				}
+				// Model refresh is an advisory policy surface: fetching a
+				// non-secret model list is how users build static provider
+				// catalogs. Never persist the key outside the encrypted vault.
+				apiKey = rec.Secret
 			}
 		}
 	}
 
 	if apiKey == "" && prov.NeedsKey() {
-		m.modelCatalog.errMsg = "No API key configured for refresh"
+		switch {
+		case m.vaultSession == nil || m.vaultSession.vault == nil:
+			m.modelCatalog.errMsg = "Vault not unlocked"
+		case keyID == "":
+			m.modelCatalog.errMsg = "No key found for provider " + prov.Slug + " (add a key first)"
+		default:
+			m.modelCatalog.errMsg = "Key " + keyID + " is unavailable for model refresh"
+		}
 		return nil
 	}
 
@@ -167,19 +181,53 @@ func (m *model) resolveProviderKeyID(slug string) string {
 	return ""
 }
 
-// saveModelCatalog persists the user's selection as the provider's static
-// model allowlist and writes the on-disk providers file.
+// toggleModelCatalogSource switches the pending save mode between dynamic and
+// static. Selection only matters in static mode.
+func (m *model) toggleModelCatalogSource() {
+	if m.modelCatalog.source == provider.ModelSourceStatic {
+		m.modelCatalog.source = provider.ModelSourceDynamic
+	} else {
+		m.modelCatalog.source = provider.ModelSourceStatic
+	}
+	m.modelCatalog.errMsg = ""
+}
+
+// saveModelCatalog persists either the user's selected static allowlist or the
+// loaded dynamic catalog and writes the on-disk providers file.
 func (m *model) saveModelCatalog() tea.Cmd {
 	slug := m.modelCatalog.providerSlug
 	selected := make([]provider.ProviderModel, 0, len(m.modelCatalog.selected))
 	for _, mod := range m.modelCatalog.models {
 		if m.modelCatalog.selected[mod.ID] {
-			mod.Static = true
 			selected = append(selected, mod)
 		}
 	}
+	if len(selected) == 0 {
+		m.statusMsg = "Save failed: catalog requires at least one selected model"
+		m.modelCatalog.errMsg = "Select at least one model before saving"
+		return nil
+	}
 
-	if err := m.providers.SetStaticModels(slug, selected); err != nil {
+	var count int
+	var err error
+	if m.modelCatalog.source == provider.ModelSourceDynamic {
+		models := make([]provider.ProviderModel, 0, len(selected))
+		for _, mod := range selected {
+			mod.Static = false
+			models = append(models, mod)
+		}
+		count = len(models)
+		err = m.providers.SetDynamicModels(slug, models)
+	} else {
+		staticModels := make([]provider.ProviderModel, 0, len(selected))
+		for _, mod := range selected {
+			mod.Static = true
+			staticModels = append(staticModels, mod)
+		}
+		count = len(staticModels)
+		err = m.providers.SetStaticModels(slug, staticModels)
+	}
+	if err != nil {
 		m.statusMsg = "Save failed: " + err.Error()
 		return nil
 	}
@@ -189,9 +237,25 @@ func (m *model) saveModelCatalog() tea.Cmd {
 	}
 
 	m.logAudit("model_catalog_save", slug, m.modelCatalog.keyID)
-	m.statusMsg = fmt.Sprintf("Saved %d models for %s", len(selected), slug)
+	m.statusMsg = fmt.Sprintf("Saved %s catalog with %d models for %s", m.modelCatalog.source, count, slug)
 	m.closeModelCatalog()
 	return nil
+}
+
+func providerModelSource(p provider.Provider) provider.ModelSource {
+	if p.ModelPolicy.Source != "" {
+		return p.ModelPolicy.Source
+	}
+	if p.Catalog.Source != "" {
+		return provider.ModelSource(p.Catalog.Source)
+	}
+	if p.Compatibility == provider.CompatLocal || p.Protocol == provider.ProtocolLocal {
+		return provider.ModelSourceLocal
+	}
+	if len(p.Models) > 0 {
+		return provider.ModelSourceStatic
+	}
+	return provider.ModelSourceManual
 }
 
 // filteredCatalogModels returns the models that match the current filter

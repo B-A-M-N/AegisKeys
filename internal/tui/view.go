@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -59,6 +60,7 @@ func (m *model) View() tea.View {
 
 	// Layer 1: Matrix background (only in unprotected cells).
 	if m.matrix != nil {
+		m.matrix.SetLogo(m.activeMatrixLogoID())
 		buf := NewMatrixBuffer(w, h)
 		buf.Protected = protected
 		m.matrix.Render(buf)
@@ -598,17 +600,15 @@ func renderGridFrame(grid [][]gridCell, s *Styles, w, h int, frame int) string {
 			if run.Len() == 0 {
 				return
 			}
-			st := cellStyleFrame(runStyle, s, frame)
+			fg, bg, bold := cellANSIStyle(runStyle, s, frame)
 			if runFg != "" {
-				st = st.Foreground(lipgloss.Color(runFg))
+				fg = runFg
 			}
 			if runBg != "" {
-				st = st.Background(lipgloss.Color(runBg))
+				bg = runBg
 			}
-			if runBold {
-				st = st.Bold(true)
-			}
-			b.WriteString(st.Render(run.String()))
+			bold = bold || runBold
+			b.WriteString(renderANSIRun(run.String(), fg, bg, bold))
 			run.Reset()
 		}
 
@@ -663,6 +663,100 @@ func renderGridFrame(grid [][]gridCell, s *Styles, w, h int, frame int) string {
 	return strings.Join(lines, "\n")
 }
 
+// renderANSIRun emits direct truecolor SGR. VHS/ttyd can downgrade Lip Gloss
+// output depending on terminal detection, so the final compositor writes the
+// intended colors explicitly after all semantic layers have been merged.
+func renderANSIRun(text, fg, bg string, bold bool) string {
+	if text == "" {
+		return ""
+	}
+	var b strings.Builder
+	if bold {
+		b.WriteString("\x1b[1m")
+	}
+	if fg != "" {
+		b.WriteString(hexSGR("38", fg))
+	}
+	if bg != "" {
+		b.WriteString(hexSGR("48", bg))
+	}
+	if b.Len() == 0 {
+		return text
+	}
+	b.WriteString(text)
+	b.WriteString("\x1b[0m")
+	return b.String()
+}
+
+func hexSGR(prefix, hex string) string {
+	if len(hex) != 7 || hex[0] != '#' {
+		return ""
+	}
+	r, okR := parseHexByte(hex[1:3])
+	g, okG := parseHexByte(hex[3:5])
+	b, okB := parseHexByte(hex[5:7])
+	if !okR || !okG || !okB {
+		return ""
+	}
+	return fmt.Sprintf("\x1b[%s;2;%d;%d;%dm", prefix, r, g, b)
+}
+
+func parseHexByte(s string) (int, bool) {
+	n, err := strconv.ParseUint(s, 16, 8)
+	if err != nil {
+		return 0, false
+	}
+	return int(n), true
+}
+
+func cellANSIStyle(id int, s *Styles, frame int) (fg string, bg string, bold bool) {
+	p := s.raw
+	switch id {
+	case 20:
+		return p.white, p.panelBG, false
+	case 21:
+		return p.red, p.panelBG, true
+	case 22:
+		return p.accent, p.panelBG, true
+	case 23:
+		return p.white, p.panelBG, false
+	case 28:
+		return p.red, "", true
+	case 27:
+		return p.success, "", true
+	case 26:
+		return p.muted, "", false
+	case 25:
+		return animatedColor(frame, p.mMid, p.accent, "#b88cff", p.accent), "", true
+	case 24:
+		return animatedColor(frame, p.white, "#d7c5ff", "#b88cff", p.white), "", true
+	case 12:
+		return p.appBG, p.accent, true
+	case 11:
+		return p.muted, "", false
+	case 10:
+		return p.white, "", false
+	case 30:
+		return p.muted, p.sidebarBG, false
+	case 31:
+		return p.darkGray, p.appBG, false
+	case 7, 6:
+		return p.mWhite, "", true
+	case 5:
+		return animatedColor(frame, p.mBright, "#c79cff", p.mWhite, "#c79cff"), "", true
+	case 4:
+		return animatedColor(frame, p.accentSoft, p.mMid, p.accent, p.mMid), "", false
+	case 3:
+		return p.mDeep, "", false
+	case 2:
+		return p.mDim, "", false
+	case 1:
+		return p.mVoid, "", false
+	default:
+		return "", "", false
+	}
+}
+
 // cellStyleFrame returns the Lip Gloss style for a style ID with animation frame.
 func cellStyleFrame(id int, s *Styles, frame int) lipgloss.Style {
 	switch id {
@@ -695,7 +789,7 @@ func cellStyleFrame(id int, s *Styles, frame int) lipgloss.Style {
 	case 31:
 		return s.CellFooter
 	case 7:
-		return s.MatrixRed
+		return s.MatrixWhite
 	case 6:
 		return s.MatrixWhite
 	case 5:

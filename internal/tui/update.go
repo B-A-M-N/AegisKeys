@@ -264,6 +264,17 @@ func (m *model) handlePaste(content string) (tea.Model, tea.Cmd) {
 		m.passwordInput, cmd = m.passwordInput.Update(tea.PasteMsg{Content: content})
 		return m, cmd
 	}
+	// Scratchpad editor: route paste to the focused input.
+	if m.active == screenScratch && m.scratchEditing {
+		var cmd tea.Cmd
+		if m.scratchEditingTitle {
+			m.scratchTitleInput, cmd = m.scratchTitleInput.Update(tea.PasteMsg{Content: content})
+		} else {
+			m.scratchBodyInput, cmd = m.scratchBodyInput.Update(tea.PasteMsg{Content: content})
+		}
+		m.scratchDirty = true
+		return m, cmd
+	}
 	return m, nil
 }
 
@@ -368,6 +379,13 @@ func (m *model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// quit so 'q' closes the overlay instead of the whole app.
 	if m.modelCatalog.active {
 		return m.handleModelCatalogKey(k)
+	}
+
+	// Scratchpad editor owns keys when editing — intercept before global
+	// actions so typing, 'q', 'n', etc. go to the textarea, not the router.
+	if m.scratchEditing {
+		m.lastKeyPress = k
+		return m.handleScratchKey(key, k)
 	}
 
 	// 3. Quit only when not typing in any input.
@@ -477,6 +495,11 @@ func (m *model) handleSidebarKey(key string) (tea.Model, tea.Cmd) {
 
 // handleContentKey dispatches to the active screen's local handler.
 func (m *model) handleContentKey(key string) (tea.Model, tea.Cmd) {
+	// When the scratchpad editor is active, it needs the raw keypress message
+	// to forward to the textarea/textinput Update methods.
+	if m.active == screenScratch && m.scratchEditing {
+		return m.handleScratchKey(key, m.lastKeyPress)
+	}
 	switch m.active {
 	case screenDashboard:
 		return m.handleDashboardKey(key)
@@ -495,7 +518,7 @@ func (m *model) handleContentKey(key string) (tea.Model, tea.Cmd) {
 	case screenSettings:
 		return m.handleSettingsKey(key)
 	case screenScratch:
-		return m.handleScratchKey(key)
+		return m.handleScratchKey(key, tea.KeyPressMsg{})
 	case screenHelp:
 		return m.handleHelpKey(key)
 	}
@@ -605,12 +628,12 @@ func (m *model) handleModelCatalogKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.modelCatalog.cursor > 0 && len(filtered) > 0 {
 			m.modelCatalog.cursor--
 		}
-	case key == "down" || key == "j":
+	case key == "s" || key == "down" || key == "j":
 		filtered := m.filteredCatalogModels()
 		if len(filtered) > 0 && m.modelCatalog.cursor < len(filtered)-1 {
 			m.modelCatalog.cursor++
 		}
-	case isSpaceKey(key):
+	case isSpaceKey(key) || key == "enter":
 		filtered := m.filteredCatalogModels()
 		if len(filtered) > 0 && m.modelCatalog.cursor < len(filtered) {
 			id := filtered[m.modelCatalog.cursor].ID
@@ -626,6 +649,8 @@ func (m *model) handleModelCatalogKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		for _, mod := range m.filteredCatalogModels() {
 			m.modelCatalog.selected[mod.ID] = false
 		}
+	case key == "t" && !m.modelCatalog.filtering:
+		m.toggleModelCatalogSource()
 	case key == "/":
 		// Toggle filter mode.
 		m.modelCatalog.filtering = !m.modelCatalog.filtering
@@ -635,7 +660,7 @@ func (m *model) handleModelCatalogKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case key == "r" && !m.modelCatalog.filtering:
 		return m, m.refreshModelCatalog()
-	case key == "s" && !m.modelCatalog.filtering:
+	case key == "e" && !m.modelCatalog.filtering:
 		return m, m.saveModelCatalog()
 	}
 
@@ -838,14 +863,24 @@ func (m *model) handleHelpKey(key string) (tea.Model, tea.Cmd) {
 }
 
 // handleScratchKey processes keys on the encrypted scratchpad screen.
-func (m *model) handleScratchKey(key string) (tea.Model, tea.Cmd) {
-	// When editing, the textarea owns most keys; only control combos escape.
+func (m *model) handleScratchKey(key string, k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// When editing, forward keystrokes to the focused input.
 	if m.scratchEditing {
 		switch key {
 		case "ctrl+s":
 			return m, m.saveScratchPad()
 		case "ctrl+e":
 			return m, m.editScratchInExternalEditor()
+		case "tab":
+			m.scratchEditingTitle = !m.scratchEditingTitle
+			if m.scratchEditingTitle {
+				m.scratchBodyInput.Blur()
+				m.scratchTitleInput.Focus()
+			} else {
+				m.scratchTitleInput.Blur()
+				m.scratchBodyInput.Focus()
+			}
+			return m, nil
 		case "esc":
 			if m.scratchDirty {
 				m.scratchDirty = false
@@ -853,24 +888,44 @@ func (m *model) handleScratchKey(key string) (tea.Model, tea.Cmd) {
 			}
 			m.scratchEditing = false
 			m.scratchEditingID = ""
+			m.scratchTitleInput.Blur()
+			m.scratchBodyInput.Blur()
 			return m, nil
 		}
-		return m, nil
+		// Route keystroke to the focused input's Update method.
+		var cmd tea.Cmd
+		if m.scratchEditingTitle {
+			m.scratchTitleInput, cmd = m.scratchTitleInput.Update(k)
+		} else {
+			m.scratchBodyInput, cmd = m.scratchBodyInput.Update(k)
+		}
+		m.scratchDirty = true
+		return m, cmd
 	}
 
 	switch key {
 	case "w", "up", "k":
-		if m.scratchListSelected > 0 {
+		if m.scratchSelecting {
+			m.moveScratchBodyCursor(-1)
+		} else if m.scratchListSelected > 0 {
 			m.scratchListSelected--
+			m.resetScratchSelection()
 		}
 	case "s", "down", "j":
-		if m.scratchListSelected < len(m.visibleScratchPads())-1 {
+		if m.scratchSelecting {
+			m.moveScratchBodyCursor(1)
+		} else if m.scratchListSelected < len(m.visibleScratchPads())-1 {
 			m.scratchListSelected++
+			m.resetScratchSelection()
 		}
 	case "n":
 		return m, m.newScratchPad()
 	case "e", "enter":
 		return m, m.editScratchPad()
+	case "v":
+		m.toggleScratchSelection()
+	case "y":
+		return m, m.copyScratchSelection()
 	case "c":
 		return m, m.copyScratchBody()
 	case "x":
@@ -881,7 +936,14 @@ func (m *model) handleScratchKey(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "a", "left", "h":
 		m.focus = focusSidebar
-	case "esc", "q":
+	case "esc":
+		if m.scratchSelecting {
+			m.resetScratchSelection()
+			return m, nil
+		}
+		m.active = screenKeys
+		m.focus = focusSidebar
+	case "q":
 		m.active = screenKeys
 		m.focus = focusSidebar
 	}
@@ -912,6 +974,10 @@ func (m *model) newScratchPad() tea.Cmd {
 	m.scratchBodyInput.SetHeight(maxInt(8, m.height-12))
 	m.scratchEditing = true
 	m.scratchDirty = true
+	m.scratchEditingTitle = true
+	m.resetScratchSelection()
+	m.scratchTitleInput.Focus()
+	m.scratchBodyInput.Blur()
 	m.logAudit("scratch.create", "", "")
 	return nil
 }
@@ -927,6 +993,10 @@ func (m *model) editScratchPad() tea.Cmd {
 	m.scratchBodyInput.SetValue(sp.Body)
 	m.scratchBodyInput.SetWidth(maxInt(40, m.width-10))
 	m.scratchBodyInput.SetHeight(maxInt(8, m.height-12))
+	m.scratchEditingTitle = true
+	m.resetScratchSelection()
+	m.scratchTitleInput.Focus()
+	m.scratchBodyInput.Blur()
 	m.scratchEditing = true
 	m.scratchDirty = false
 	return nil
@@ -955,12 +1025,112 @@ func (m *model) saveScratchPad() tea.Cmd {
 
 // copyScratchBody copies the scratchpad body to clipboard (if policy allows).
 func (m *model) copyScratchBody() tea.Cmd {
+	if m.scratchSelecting {
+		return m.copyScratchSelection()
+	}
 	sp := m.selectedScratchPad()
 	if sp == nil {
 		return nil
 	}
 	m.logAudit("scratch.copy", "", "")
+	m.statusMsg = "Copied scratchpad body to clipboard."
 	return tea.SetClipboard(sp.Body)
+}
+
+func (m *model) copyScratchSelection() tea.Cmd {
+	text := m.selectedScratchText()
+	if text == "" {
+		m.statusMsg = "No scratchpad text selected."
+		return nil
+	}
+	m.logAudit("scratch.copy_selection", "", "")
+	m.statusMsg = "Copied selected scratchpad text to clipboard."
+	return tea.SetClipboard(text)
+}
+
+func (m *model) toggleScratchSelection() {
+	sp := m.selectedScratchPad()
+	if sp == nil || strings.TrimSpace(sp.Body) == "" {
+		m.statusMsg = "No scratchpad body text to select."
+		return
+	}
+	lines := scratchBodyLines(sp.Body)
+	m.scratchBodyCursor = clampInt(m.scratchBodyCursor, 0, len(lines)-1)
+	if m.scratchSelecting {
+		m.resetScratchSelection()
+		m.statusMsg = "Scratch selection cleared."
+		return
+	}
+	m.scratchSelecting = true
+	m.scratchSelectAnchor = m.scratchBodyCursor
+	m.statusMsg = "Scratch selection started."
+}
+
+func (m *model) moveScratchBodyCursor(delta int) {
+	sp := m.selectedScratchPad()
+	if sp == nil {
+		return
+	}
+	lines := scratchBodyLines(sp.Body)
+	if len(lines) == 0 {
+		m.resetScratchSelection()
+		return
+	}
+	m.scratchBodyCursor = clampInt(m.scratchBodyCursor+delta, 0, len(lines)-1)
+}
+
+func (m *model) resetScratchSelection() {
+	m.scratchSelecting = false
+	m.scratchSelectAnchor = 0
+	m.scratchBodyCursor = 0
+}
+
+func (m *model) selectedScratchText() string {
+	sp := m.selectedScratchPad()
+	if sp == nil {
+		return ""
+	}
+	lines := scratchBodyLines(sp.Body)
+	if len(lines) == 0 {
+		return ""
+	}
+	start, end, ok := m.scratchSelectionRange(len(lines))
+	if !ok {
+		return ""
+	}
+	return strings.Join(lines[start:end+1], "\n")
+}
+
+func (m *model) scratchSelectionRange(lineCount int) (int, int, bool) {
+	if !m.scratchSelecting || lineCount <= 0 {
+		return 0, 0, false
+	}
+	start := clampInt(m.scratchSelectAnchor, 0, lineCount-1)
+	end := clampInt(m.scratchBodyCursor, 0, lineCount-1)
+	if start > end {
+		start, end = end, start
+	}
+	return start, end, true
+}
+
+func scratchBodyLines(body string) []string {
+	if body == "" {
+		return nil
+	}
+	return strings.Split(strings.TrimRight(body, "\n"), "\n")
+}
+
+func clampInt(v, min, max int) int {
+	if max < min {
+		return min
+	}
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
 }
 
 // deleteScratchPad removes the selected scratchpad from the vault.
@@ -978,6 +1148,7 @@ func (m *model) deleteScratchPad() tea.Cmd {
 	if m.scratchListSelected > 0 {
 		m.scratchListSelected--
 	}
+	m.resetScratchSelection()
 	m.logAudit("scratch.delete", "", "")
 	return nil
 }
@@ -1471,8 +1642,9 @@ func (m *model) handleKeyAddKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "shift+tab":
 		return m.advanceKeyField(-1)
 	case "enter":
-		// On last field, save. Otherwise advance.
-		if m.keyFormActive == 3 {
+		// Save as soon as required fields are present. Tags are optional, so
+		// requiring an extra Enter through that field makes the form feel dead.
+		if m.keyFormReady() || m.keyFormActive == 3 {
 			return m.commitKeyAdd()
 		}
 		return m.advanceKeyField(1)
@@ -1482,6 +1654,13 @@ func (m *model) handleKeyAddKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.syncKeyField()
 		return m, cmd
 	}
+}
+
+func (m *model) keyFormReady() bool {
+	m.syncKeyField()
+	return strings.TrimSpace(m.keyForm.providerSlug) != "" &&
+		strings.TrimSpace(m.keyForm.label) != "" &&
+		strings.TrimSpace(m.keyForm.secret) != ""
 }
 
 // syncKeyField copies the current input value into the active key form field.

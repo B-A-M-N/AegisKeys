@@ -102,6 +102,7 @@ var themes = map[string]palette{
 type Styles struct {
 	ThemeName string
 	Light     bool
+	raw       palette
 
 	// App
 	AppBackground lipgloss.Style
@@ -190,8 +191,9 @@ type Styles struct {
 // fall back to the default ("vault").
 func NewStyles(theme string) *Styles {
 	name := normalizeTheme(theme)
-	s := &Styles{ThemeName: name, Light: themes[name].light}
-	return buildStyles(s, themes[name])
+	p := themes[name]
+	s := &Styles{ThemeName: name, Light: p.light, raw: p}
+	return buildStyles(s, p)
 }
 
 // buildStyles applies every style from the given palette.
