@@ -5,6 +5,10 @@ keys **separately**, then injects the correct credentials into coding agents and
 CLIs as **child-process-scoped** configuration on demand — env vars, CLI args,
 and config files, rendered per-app through an **adapter contract layer**.
 
+![AegisKeys TUI demo](docs/demo/tui-matrix-logo.gif)
+
+Watch the full end-to-end demo: [`docs/demo/full-flow-launch.mp4`](docs/demo/full-flow-launch.mp4)
+
 ## What it does
 
 - **Providers** — non-secret metadata (base URL, env var name, auth header
@@ -25,45 +29,72 @@ and config files, rendered per-app through an **adapter contract layer**.
 Personally, I kind of suck at keeping track of this kind of stuff. For the
 longest time my API keys and model configs lived in a graveyard of
 half-forgotten `.env` files, shell snippets, and notes scattered across
-machines — the same not-so-great places we all keep pretending are fine.
+machines.
 
-Lately I've been doing a lot of TUI work, so rather than keep storing things
-badly, I built something genuinely useful for myself: one local vault where I
-drop keys from the various providers I use — OpenRouter, OpenAI, Anthropic,
-Google, plus the local Ollama and LM Studio setups — and then just point a
-coding agent at a profile and let it pull exactly the credentials it needs. No
-more re-pasting keys, no more hunting through shell history for which base URL
-goes with which model, no more wondering whether that `.env` I just committed
-had a secret in it.
+Rather than keep storing things badly, I built one local vault where I can drop
+keys from the providers I use — OpenRouter, OpenAI, Anthropic, Google, plus
+local Ollama and LM Studio setups — and then point a coding agent at a profile
+that gives it exactly the credentials it needs. No more re-pasting keys, no
+more hunting through shell history for which base URL goes with which model,
+and no more wondering whether that `.env` I just committed had a secret in it.
 
 It's the tool I wished I had every time I spun up a new agent and groaned at
 the thought of wiring credentials in by hand again.
 
 ## Supported apps
 
-| App | Support mode | Confidence | Credential control | Model slots |
-|-----|-------------|------------|--------------------|-------------|
-| Aider | full env | verified | env injection | main, weak, editor |
-| Hermes | env + config | experimental | env injection + isolated `HERMES_HOME` | main, compression, vision, web_extract |
-| Crush | env + config | verified | env + `crush.json` merge | main, catalog |
-| Qwen Code | env + config | verified | env + `settings.json` merge | main, catalog, fallbacks |
-| Goose | env + config | verified | env + `config.yaml` merge | main, fast |
-| Cline CLI | env + config | experimental | env + `providers.json` merge | planner, actor |
-| Claude Code | full env (OAuth warning) | verified | env injection | main |
-| Mistral Vibe | env + config | experimental | env + `config.toml` merge | main |
-| Codex CLI | full env | experimental | env injection | main, gpt54, gpt54mini, gpt53codex, gpt52codex, gpt52, gpt51codexmax, gpt51codexmini |
-| MiMo | env + config | experimental | env injection + config patch | main |
-| OpenCode | env + config | experimental | env injection + config patch | main |
-| OpenHands | env + config | experimental | env injection + config patch | main |
-| Gemini CLI | env + config | experimental | env injection + config patch | main |
-| Copilot CLI | full env | experimental | env injection | main |
-| Continue | env + config | experimental | env injection + config patch | main |
-| Roo Code | manual extension setup | experimental | guided manual handoff; no raw secrets written | main |
-| Kilo Code | manual extension setup | experimental | guided manual handoff; no raw secrets written | main |
-| Cursor | blocked/manual | experimental | account-based auth; no injection | manual only |
-| Zed | config + keychain (partial) | guided | keychain handoff; no raw secrets written | main, inline_assistant, subagent, commit_message, thread_summary, alternatives |
-| IntelliJ IDEA | launcher/config isolation | guided | manual PasswordSafe handoff | main (guided) |
-| Generic | env + args | verified | env injection | main |
+Verified support means the adapter has render goldens, no-secret-leak checks,
+config merge/write checks where applicable, and fake-executable launch smoke.
+Experimental adapters are useful, but they should not be treated as equivalent
+to the verified surface until their contracts have the same proof.
+
+### Verified
+
+| App | Support mode | Credential control | Model slots |
+|-----|-------------|--------------------|-------------|
+| Aider | full env | env injection | main, weak, editor |
+| Crush | env + config | env + `crush.json` merge | main, catalog |
+| Qwen Code | env + config | env + `settings.json` merge | main, catalog, fallbacks |
+| Goose | env + config | env + `config.yaml` merge | main, fast |
+| Claude Code | full env (OAuth warning) | env injection | main |
+| Generic | env + args | env injection | main |
+
+### Experimental
+
+These adapters render launch/config plans and pass no-secret-leak checks, but
+do not yet have full verified launch proof.
+
+| App | Support mode | Credential control | Model slots |
+|-----|-------------|--------------------|-------------|
+| Hermes | env + config | env injection + isolated `HERMES_HOME` | main, compression, vision, web_extract |
+| Cline CLI | env + config | env + `providers.json` merge | planner, actor |
+| Mistral Vibe | env + config | env + `config.toml` merge | main |
+| Codex CLI | full env | env injection | main plus configurable Codex model aliases |
+| MiMo | env + config | env injection + config patch | main |
+| OpenCode | env + config | env injection + config patch | main |
+| OpenHands | env + config | env injection + config patch | main |
+| Gemini CLI | env + config | env injection + config patch | main |
+| Copilot CLI | full env | env injection | main |
+| Continue | env + config | env injection + config patch | main |
+
+### Guided / Manual
+
+These apps cannot safely receive raw secrets through AegisKeys alone. AegisKeys
+can guide config/model setup, but credential entry remains manual or keychain
+based.
+
+| App | Support mode | Credential control | Model slots |
+|-----|-------------|--------------------|-------------|
+| Roo Code | manual extension setup | guided manual handoff; no raw secrets written | main |
+| Kilo Code | manual extension setup | guided manual handoff; no raw secrets written | main |
+| Zed | config + keychain (partial) | keychain handoff; no raw secrets written | main, inline_assistant, subagent, commit_message, thread_summary, alternatives |
+| IntelliJ IDEA | launcher/config isolation | manual PasswordSafe handoff | main |
+
+### Blocked / Manual
+
+| App | Reason | Path |
+|-----|--------|------|
+| Cursor | account-based auth; no safe secret injection path | configure credentials in Cursor settings |
 
 **Confidence levels:** `experimental` = adapter renders but no real launch proof; `manual_proof` = user has launched it successfully with a real provider/model and has fake-executable launch smoke, but automated gates have not all passed; `verified` = tested end-to-end with secret-non-leak assertions AND all verification gates passed (render golden, no-secret-leak, config merge, launch smoke); `guided` = config/model setup only, credential handoff is manual/keychain.
 
@@ -82,55 +113,23 @@ and when it should refuse to pretend an app is safely supported.
 
 ## Security model
 
-AegisKeys is built around one rule: **the raw secret should never be visible,
-persisted, or handed to something that didn't earn it.** Everything below is in
-service of that.
+AegisKeys is built around one rule: **raw secrets should only be visible through
+explicit reveal, copy, or child-process injection paths.**
 
-- **Local-first** — no remote sync, no network calls. Your vault never leaves
-  the machine.
-- **Secrets encrypted at rest** — a password-derived Argon2id key seals an
-  AES-256-GCM envelope (`vault.enc`). There is no OS keyring dependency (by
-  design for the MVP); the master password *is* the key.
-- **Provider metadata separated from key material** — providers are plaintext
-  config; the secret blob never is. A leaked `providers.json` leaks nothing.
-- **Child-process-scoped injection** — secrets land only in the spawned child's
-  environment. The parent shell and every other process are untouched, and the
-  child's exit code is preserved.
-- **Masked by default** — display shows `sk-or-v1-...91ef`; secrets ≤8 chars
-  show `<hidden>`. Full reveal requires an explicit, confirmed `key reveal` /
-  `vault reveal`.
-- **Clipboard is policy-gated** — `vault copy` requires the key's policy to
-  allow clipboard access, a confirmation, and respects a per-key
-  `MaxClipboardTTLSeconds` (the global `clipboard_ttl_seconds` is a ceiling).
-  The tool warns that the OS/clipboard manager may log it.
-- **No secret argv flags** — `key add` / `vault add` read secrets only through
-  no-echo prompts. Secrets are never accepted as command-line flags, so they
-  can't leak into shell history or `ps`. The one exception is `init --password`
-  (for non-interactive automation), which accepts the master password directly
-  and is clearly marked "less secure — visible in shell history."
-- **Hard boundary enforcement** — every launch resolve (`run`, `env`,
-  `envfile`, and the TUI) flows through `ValidateLaunchStrategy`, which calls
-  `ValidateContract`. An adapter must *honestly declare* its support level,
-  credential control, and hazards before any secret is trusted or handed off.
-  Manual/guided adapters (Zed, IntelliJ) receive no raw secrets — only
-  keychain/manual handoff instructions.
-- **TUI zero-leak guarantees** — rendered views and modals hold only masked
-  data. While unlocked, the decrypted vault session and derived key are
-  resident in memory, but `q` / `Ctrl+L` / `Ctrl+C` all route through
-  `lockVault`, which zeroes the derived key and clears decrypted secrets.
-  Adversarial tests chase the raw secret across TUI views, adapter renders, and
-  modals to prove it never appears.
-- **Safe file permissions** — config dir `0700`, files `0600`, temp env dir
-  `0700`, temp files `0600`.
-- **File-write safety** — atomic writes, backup-before-overwrite, raw-secret
-  redaction checks, and scope/symlink protection (`rejectSymlinkParents` walks
-  every parent; paths only expand `HOME`/`XDG_CONFIG_HOME`/`TMPDIR`, never
-  ambient env). TOML/XML config writes **refuse to overwrite** existing
-  user/project config until a real parser-backed merge exists (fail closed).
-- **Fail closed** — decryption errors are explicit ("wrong password?");
-  tampered ciphertext fails to open.
-- **Audit metadata only** — the append-only `audit.log` records events
-  (add/rotate/launch/lock) but never key values.
+- Local-first: no hosted sync service. The vault never leaves the machine.
+- Network is explicit: AegisKeys only makes provider API calls when you ask it
+  to refresh provider metadata; launched target tools may make their own calls.
+- Secrets are encrypted at rest with Argon2id + AES-256-GCM.
+- Providers and profiles are non-secret metadata; raw key material stays in
+  `vault.enc`.
+- Injection is child-process-scoped. The parent shell is not exported into.
+- Normal output is masked and redacted; full reveal requires confirmation.
+- Adapter contracts are enforced before any secret is trusted or handed off.
+- Config writes use locked-down permissions, backups, redaction checks, and
+  fail-closed merge behavior for unsupported formats.
+
+See `docs/security.md` for the detailed security model, threat boundaries, and
+evidence map.
 
 ### Threat model
 
@@ -153,6 +152,8 @@ make release VERSION=0.1.0
 
 Requires Go 1.25.12 or newer. Dependencies resolve from `go.mod`/`go.sum`; no
 machine-local module replacement paths are required.
+
+Maintainer release steps are documented in `docs/release.md`.
 
 Shell completions are generated with:
 
@@ -365,21 +366,12 @@ OpenAI-SDK clients work unchanged.
 
 Local providers (Ollama, LM Studio) inject only `OPENAI_BASE_URL` — no key needed.
 
-## TUI feature status
+## TUI status
 
-| TUI Feature | Status |
-|---|---|
-| Provider list/inspect | working |
-| Provider add/remove | working |
-| Key list/inspect | working |
-| Key add (experimental) | working — secret masked, moved to vault on save |
-| Key edit/rename | working — TUI and CLI support rename/tags |
-| Profile wizard (app-first) | working — app/provider/key/model-slot collection with validation |
-| Launch execution | working — TUI uses the same runner preparation path and `tea.ExecProcess` |
-| Doctor | working — text and `--json` output |
-| Audit viewer | working |
-| Settings | working — all settings wired (theme, auto-lock, animations, risky export, rotation reminders, runtime policy) |
-| `Ctrl+L` vault lock | working — zeroes derived key + clears decrypted secrets |
+The TUI covers dashboard, providers, keys, profile wizard, contract-aware
+launch, doctor, audit, settings, and help. Launch uses the same runner
+preparation path as the CLI and releases the terminal while the child process
+runs. See `TUI_GUIDE.md` for the full screen architecture.
 
 ## Limitations
 
@@ -410,13 +402,6 @@ go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 go run . adapter verify
 ```
 
-Covers secret masking, encryption round-trip, wrong-password rejection, vault
-CRUD, envelope validation (KDF bounds, nonce/salt format), needs-rekey
-detection, provider validation (including env-var format, HTTPS enforcement, auth
-type), profile store logic, adapter contract declarations and completeness,
-contract enforcement (manual apps don't receive secrets), file-write safety
-(redaction, backup, merge/overwrite refusal, atomic writes, symlink/scope
-preflight), per-app adapter rendering, secret-propagation adversarial tests (raw
-secret chased across TUI views, adapter renders, modals — must not appear), CLI
-security contracts (no raw secret argv flags, profile resolution validation),
-and integration.
+See `docs/testing.md` for the coverage map and `docs/release.md` for the
+complete public release checklist, artifact build, tag, and GitHub release
+workflow.

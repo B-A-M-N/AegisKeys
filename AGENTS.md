@@ -122,6 +122,11 @@ aegiskeys completion {bash|zsh|fish|powershell}
 
 `go.mod` must remain portable: do not commit machine-local `replace` directives for the Charm v2 stack. Use `charm.land/.../v2` import paths, never `github.com/charmbracelet/...`.
 
+### Release Runbook
+
+Use `docs/release.md` as the maintainer checklist for public release gates,
+artifact builds, tag workflow, and release-boundary language.
+
 ---
 
 ## Architecture
