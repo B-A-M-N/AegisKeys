@@ -1,6 +1,6 @@
 # AGENTS.md — AegisKeys
 
-A local-first, secure terminal app (Go 1.25.11+) that stores API **provider** metadata and **secrets** separately, then injects the correct credentials into coding agents/CLIs. AegisKeys renders **app-specific launch configuration** — env vars, CLI args, and config files — so coding agents get credentials in the exact format each one expects.
+A local-first, secure terminal app (Go 1.25.12+) that stores API **provider** metadata and **secrets** separately, then injects the correct credentials into coding agents/CLIs. AegisKeys renders **app-specific launch configuration** — env vars, CLI args, and config files — so coding agents get credentials in the exact format each one expects.
 
 > Canonical specs: `SPEC.md` (full product spec, CLI surface, storage layout, threat model) and `TUI_GUIDE.md` (Charm v2 TUI architecture, screen-by-screen, pitfalls). Read those before non-trivial work.
 
@@ -13,10 +13,10 @@ As of the latest build:
 - `go test ./...` passes across all packages.
 - `go vet ./...` is clean.
 - `gofmt -l .` is empty.
-- `go run golang.org/x/vuln/cmd/govulncheck@latest ./...` reports no reachable vulnerabilities when run with Go 1.25.11+.
+- `go run golang.org/x/vuln/cmd/govulncheck@latest ./...` reports no reachable vulnerabilities when run with Go 1.25.12+.
 - Full CLI (Cobra) with all SPEC §18 commands implemented and tested end-to-end.
 - An interactive TUI (bubbletea v2) with password-unlock, 9 screens, multi-field add forms with provider/key selection, model-slot collection, and real child-process launch via `tea.ExecProcess`.
-- **Adapter system** (`internal/adapter`) — per-app renderers implementing `AppAdapter` contract interface with `AppSupportContract` metadata for 20 targets: Generic, Crush, Aider, Cline, Hermes, Qwen Code, Goose, Claude Code, Mistral Vibe, Codex, MiMo, OpenCode, OpenHands, Gemini CLI, Copilot CLI, Continue, Roo Code, Kilo Code, Cursor, Zed, IntelliJ.
+- **Adapter system** (`internal/adapter`) — per-app renderers implementing `AppAdapter` contract interface with `AppSupportContract` metadata for 21 targets: Generic, Crush, Aider, Cline, Hermes, Qwen Code, Goose, Claude Code, Mistral Vibe, Codex, MiMo, OpenCode, OpenHands, Gemini CLI, Copilot CLI, Continue, Roo Code, Kilo Code, Cursor, Zed, IntelliJ.
 - **Provider protocol/model catalog** (`internal/provider`) — rich provider metadata with auth spec, endpoints, model catalog, capabilities, app hints.
 - **Proxy support** (`internal/proxy`) — auto-start local proxies (SOCKS5/HTTP) when apps need them.
 - **Model slots** — profiles support per-app model roles including feature-specific slots (compression/vision/web_extract for Hermes, inline_assistant/commit_message/thread_summary for Zed).
@@ -105,12 +105,15 @@ Module name is **`aegiskeys`** (lowercase, single word). Intended CLI surface (S
 
 ```
 aegiskeys init | tui | version | lock | unlock | doctor | audit
-aegiskeys provider {list|add|inspect|remove|edit|search|validate|export}
-aegiskeys key {add|list|rotate|delete|reveal}
+aegiskeys provider {list|add|inspect|models|refresh-models|remove|edit|search|validate|export}
+aegiskeys key {add|list|show|rename|rotate|delete|reveal}
+aegiskeys vault {add|list|show|copy|reveal|env|rename|rotate|archive|link|unlink|delete|inspect|backup|repair-unlock|rekey}
 aegiskeys profile {create|list|inspect|delete}
 aegiskeys run --profile <name> -- <command>
 aegiskeys env --profile <name> [--export]
 aegiskeys envfile --profile <name> | shred-envfile <path>
+aegiskeys handoff --profile <name>
+aegiskeys settings {show|set|reset}
 aegiskeys adapter verify [--app <id>] [--installed]
 aegiskeys completion {bash|zsh|fish|powershell}
 ```
@@ -201,5 +204,5 @@ These are now implemented; remaining work is polish and future features:
 - Add OS keyring integration for vault-key storage (SPEC §8 optional).
 - Add parser-backed TOML/XML merge/patch support for non-destructive existing config updates.
 - Add platform-specific doctor checks such as shell history scanning.
-- Add a `docs/future-work.md` (SPEC §27).
+- Maintain `docs/future-work.md` as stable/post-stable deferred work changes.
 - Extend VHS demo coverage as new TUI flows stabilize.

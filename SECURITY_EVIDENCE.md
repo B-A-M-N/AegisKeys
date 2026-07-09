@@ -67,7 +67,7 @@ Tests are adversarial: they attempt to violate the claim and assert the system r
 
 | Claim | Test | Result |
 |-------|------|--------|
-| No reachable known vulnerabilities in code or standard library | `go run golang.org/x/vuln/cmd/govulncheck@latest ./...` with Go 1.25.11 | PASS |
+| No reachable known vulnerabilities in code or standard library | `go run golang.org/x/vuln/cmd/govulncheck@latest ./...` with Go 1.25.12+ | PASS |
 
 ### 7. Saved profiles resolve before use
 
@@ -97,6 +97,7 @@ Tests are adversarial: they attempt to violate the claim and assert the system r
 | Child exit code is preserved | `runner.TestAdapterFakeExecutableLaunchSmokeExitCodePreserved` | PASS |
 | Provider-catalog adapters have golden snapshots and config no-secret checks | `adapter.TestCatalogVerificationGoldens` | PASS |
 | Provider-catalog launch path reaches fake Crush/MiMo/OpenCode executables without config leaks | `runner.TestCatalogAdapterFakeExecutableLaunchSmoke` | PASS |
+| CLI adapter verification does not require installed third-party CLIs by default | `cmd.TestAdapterVerifyDefaultDoesNotRequireInstalledCLI`, `aegiskeys adapter verify` | PASS |
 
 ## Discovered and fixed during testing
 
@@ -111,6 +112,7 @@ Tests are adversarial: they attempt to violate the claim and assert the system r
 | TOML/XML “merge” could overwrite existing user config | Refuse existing user/project overwrite until parser-backed merge exists |
 | Provider metadata commands could display/export corrupted secret-bearing metadata | Redact provider CLI output; refuse export unless strict metadata validation passes |
 | Audit logger trusted all future metadata callers | Pattern-redact audit event fields before write and force `0600` on the audit file |
+| `adapter verify` default mode depended on locally installed target apps | Split render/files/no-leak verification from optional `--installed` smoke checks |
 
 ## Honest remaining gaps
 

@@ -965,30 +965,19 @@ Settings:
 Implement the following:
 
 ```bash
-aegiskeys init
-aegiskeys tui
-aegiskeys provider list
-aegiskeys provider add
-aegiskeys provider inspect <slug>
-aegiskeys provider remove <slug>
-aegiskeys key add
-aegiskeys key list
-aegiskeys key rotate --id <id>
-aegiskeys key delete --id <id>
-aegiskeys profile create
-aegiskeys profile list
-aegiskeys profile inspect <name>
-aegiskeys profile delete <name>
+aegiskeys init | tui | version | lock | unlock | doctor | audit
+aegiskeys provider {list|add|inspect|models|refresh-models|remove|edit|search|validate|export}
+aegiskeys key {add|list|show|rename|rotate|delete|reveal}
+aegiskeys vault {add|list|show|copy|reveal|env|rename|rotate|archive|link|unlink|delete|inspect|backup|repair-unlock|rekey}
+aegiskeys profile {create|list|inspect|delete}
 aegiskeys run --profile <name> -- <command>
-aegiskeys env --profile <name>
-aegiskeys env --profile <name> --export
+aegiskeys env --profile <name> [--export]
 aegiskeys envfile --profile <name>
 aegiskeys shred-envfile <path>
-aegiskeys doctor
-aegiskeys lock
-aegiskeys unlock
-aegiskeys audit
-aegiskeys version
+aegiskeys handoff --profile <name>
+aegiskeys settings {show|set|reset}
+aegiskeys adapter verify [--app <id>] [--installed]
+aegiskeys completion {bash|zsh|fish|powershell}
 ```
 
 Command behavior must be useful even before TUI is perfect.
@@ -1566,24 +1555,23 @@ The MVP is acceptable only if:
 
 # 27. Future Work
 
-Add a `docs/future-work.md` file with:
+Deferred work is maintained in `docs/future-work.md`. It includes:
 
 * OS keyring integration improvements
 * hardware-backed secret support
 * YubiKey/passkey unlock
 * per-profile policy rules
 * provider health checks
-* model catalog refresh
 * secure import/export
-* encrypted backup
 * team mode with public-key sharing
 * shell plugin integration
 * agent-specific launch presets
-* secret age/rotation reminders
 * automatic stale temporary env cleanup
 * richer TUI themes
 * audit viewer filters
 * policy engine for dangerous export behavior
+* parser-backed TOML/XML merge/patch support
+* signed release provenance and package-manager distribution
 
 ---
 
@@ -1638,4 +1626,3 @@ Make reasonable decisions.
 Prioritize a working secure MVP over theoretical perfection.
 
 The final result must be modular, functional, secure by default, visually polished, and useful for real developer workflows.
-

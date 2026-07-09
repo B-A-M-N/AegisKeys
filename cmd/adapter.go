@@ -94,21 +94,22 @@ func verifyOneAdapter(id string, reg *adapter.Registry, cfg config.Config) adapt
 	strategy.Plan.Env["XDG_CONFIG_HOME"] = xdg
 	strategy.Plan.Env["TMPDIR"] = tmp
 
-	if err := runner.Run(context.Background(), strategy, runner.RunOptions{
-		ProfileName: prof.Name,
-		ConfigDir:   tmp,
-		DryRun:      true,
-	}); err != nil {
-		if strings.Contains(err.Error(), "launch command is empty") || strings.Contains(err.Error(), "cannot launch directly") {
-			return adapterVerifyResult{"SKIP", err.Error()}
+	cleanup := func() error { return nil }
+	if len(strategy.Plan.Files) > 0 {
+		restore, err := adapter.ApplyFileWritesWithRestore(strategy.Plan.Files, strategy.Plan.Env)
+		if err != nil {
+			return adapterVerifyResult{"FAIL", "file writes: " + err.Error()}
 		}
-		return adapterVerifyResult{"FAIL", "dry-run: " + err.Error()}
+		cleanup = restore
 	}
 	if leak, err := findSyntheticSecret(tmp, key.Secret); err != nil {
+		_ = cleanup()
 		return adapterVerifyResult{"FAIL", err.Error()}
 	} else if leak != "" {
+		_ = cleanup()
 		return adapterVerifyResult{"FAIL", "secret leaked to " + leak}
 	}
+	defer cleanup()
 
 	if adapterVerifyInstalled && strategy.Plan.Command != "" && a.Contract().CanLaunch {
 		if _, err := exec.LookPath(strategy.Plan.Command); err != nil {

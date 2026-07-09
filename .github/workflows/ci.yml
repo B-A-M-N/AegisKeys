@@ -29,5 +29,21 @@ jobs:
       - name: Test
         run: go test ./...
 
+      - name: Race test
+        run: go test -race ./...
+
       - name: Vet
         run: go vet ./...
+
+      - name: Vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+      - name: Adapter render/no-leak verification
+        run: go run . adapter verify
+
+      - name: Release cross-compile smoke
+        run: |
+          GOOS=linux GOARCH=amd64 go build -buildvcs=false -ldflags "-s -w -X aegiskeys/cmd.version=ci" -o /tmp/aegiskeys_linux_amd64 .
+          GOOS=linux GOARCH=arm64 go build -buildvcs=false -ldflags "-s -w -X aegiskeys/cmd.version=ci" -o /tmp/aegiskeys_linux_arm64 .
+          GOOS=darwin GOARCH=amd64 go build -buildvcs=false -ldflags "-s -w -X aegiskeys/cmd.version=ci" -o /tmp/aegiskeys_darwin_amd64 .
+          GOOS=darwin GOARCH=arm64 go build -buildvcs=false -ldflags "-s -w -X aegiskeys/cmd.version=ci" -o /tmp/aegiskeys_darwin_arm64 .

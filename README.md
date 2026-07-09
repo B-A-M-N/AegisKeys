@@ -58,6 +58,9 @@ the thought of wiring credentials in by hand again.
 | Gemini CLI | env + config | experimental | env injection + config patch | main |
 | Copilot CLI | full env | experimental | env injection | main |
 | Continue | env + config | experimental | env injection + config patch | main |
+| Roo Code | manual extension setup | experimental | guided manual handoff; no raw secrets written | main |
+| Kilo Code | manual extension setup | experimental | guided manual handoff; no raw secrets written | main |
+| Cursor | blocked/manual | experimental | account-based auth; no injection | manual only |
 | Zed | config + keychain (partial) | guided | keychain handoff; no raw secrets written | main, inline_assistant, subagent, commit_message, thread_summary, alternatives |
 | IntelliJ IDEA | launcher/config isolation | guided | manual PasswordSafe handoff | main (guided) |
 | Generic | env + args | verified | env injection | main |
@@ -148,7 +151,7 @@ make install PREFIX="$HOME/.local"
 make release VERSION=0.1.0
 ```
 
-Requires Go 1.25.11 or newer. Dependencies resolve from `go.mod`/`go.sum`; no
+Requires Go 1.25.12 or newer. Dependencies resolve from `go.mod`/`go.sum`; no
 machine-local module replacement paths are required.
 
 Shell completions are generated with:
@@ -221,6 +224,8 @@ directories under `tmp/` and fake demo passwords/API keys only.
 # Providers
 aegiskeys provider list
 aegiskeys provider inspect openrouter
+aegiskeys provider models openrouter
+aegiskeys provider refresh-models openrouter --key <key-id>
 aegiskeys provider add --slug myllm --name "My LLM" --base-url https://my.api/v1 \
     --env-var MY_API_KEY
 
@@ -246,6 +251,13 @@ aegiskeys env --profile or-main --export      # full exports (confirmation)
 aegiskeys envfile --profile or-main           # write a 0600 temp env file
 aegiskeys shred-envfile <path>                # overwrite + delete
 
+# Vault items and manual handoff
+aegiskeys vault list
+aegiskeys vault copy --id <id>                # confirmation + clipboard policy
+aegiskeys vault backup                        # encrypted backup, no decryption
+aegiskeys vault rekey                         # reseal with current KDF params
+aegiskeys handoff --profile zed-prof          # guided manual/keychain flow
+
 # Settings (also editable in the TUI Settings screen)
 aegiskeys settings show
 aegiskeys settings set auto_lock_minutes 30
@@ -256,6 +268,8 @@ aegiskeys settings reset
 # Diagnostics
 aegiskeys doctor
 aegiskeys audit -n 20
+aegiskeys adapter verify                      # render/files/no-leak, no target app install required
+aegiskeys adapter verify --installed          # optional local installed-CLI smoke
 ```
 
 > **Runtime policy & risky export.** The `runtime_policy` setting governs
@@ -377,20 +391,23 @@ Local providers (Ollama, LM Studio) inject only `OPENAI_BASE_URL` — no key nee
 
 ## Future work
 
-OS keyring support, YubiKey/passkey unlock, per-profile policy rules, provider
-health checks, secure import/export, encrypted backup, team mode, shell-plugin
-integration, more coding-agent adapters (OpenCode, OpenHands, Gemini CLI,
-Continue, Roo Code), full IDE adapter coverage, automatic temp-env cleanup,
-richer TUI themes, audit viewer filters, parser-backed existing user-scope
-TOML/XML merge.
+See `docs/future-work.md` for deferred stable/post-stable work. Highlights:
+OS keyring support, hardware-backed unlock, per-profile policy rules, provider
+health checks, secure import/export, team mode, shell-plugin integration, full
+IDE adapter coverage, automatic temp-env cleanup, richer TUI themes, audit
+viewer filters, parser-backed existing user-scope TOML/XML merge, and signed
+release provenance.
 
 ## Tests
 
 ```bash
 go test ./...
+go test -race ./...
 go build -buildvcs=false ./...
 go vet ./...
 test -z "$(gofmt -l .)"
+go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+go run . adapter verify
 ```
 
 Covers secret masking, encryption round-trip, wrong-password rejection, vault
