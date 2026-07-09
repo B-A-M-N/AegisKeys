@@ -82,6 +82,19 @@ func TestActiveModelSlots_ZedExpanded(t *testing.T) {
 	}
 }
 
+func TestActiveModelSlots_CodexExpanded(t *testing.T) {
+	slots := ActiveModelSlots("codex")
+	expected := []string{"main", "gpt54", "gpt54mini", "gpt53codex", "gpt52codex", "gpt52", "gpt51codexmax", "gpt51codexmini"}
+	if len(slots) != len(expected) {
+		t.Fatalf("codex slots: got %v, want %v", slots, expected)
+	}
+	for i, s := range slots {
+		if s != expected[i] {
+			t.Errorf("codex slot %d: got %s, want %s", i, s, expected[i])
+		}
+	}
+}
+
 func TestActiveModelSlots_AiderUnchanged(t *testing.T) {
 	slots := ActiveModelSlots("aider")
 	expected := []string{"main", "weak", "editor"}

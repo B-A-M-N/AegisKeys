@@ -191,7 +191,7 @@ func ActiveModelSlots(app string) []string {
 	case "generic":
 		return []string{"main"}
 	case "codex":
-		return []string{"main", "gpt54mini", "gpt53codex", "gpt52codex", "gpt52", "gpt51codexmax", "gpt51codexmini"}
+		return []string{"main", "gpt54", "gpt54mini", "gpt53codex", "gpt52codex", "gpt52", "gpt51codexmax", "gpt51codexmini"}
 	default:
 		return []string{"main"}
 	}

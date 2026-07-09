@@ -420,6 +420,20 @@ func validRenderMode(v string) bool {
 	}
 }
 
+// RenderModeForContract returns the user-visible profile render mode. Secret
+// injection through the child env is an implementation detail for
+// config-patched apps; they should still present and persist as config-driven.
+func RenderModeForContract(c AppSupportContract) profile.RenderMode {
+	switch {
+	case c.CanPatchConfig:
+		return profile.RenderConfigFile
+	case c.CanInjectSecrets:
+		return profile.RenderEnv
+	default:
+		return profile.RenderEnv
+	}
+}
+
 // ValidateAllContracts checks every registered adapter's contract.
 // Returns a list of validation errors (one per broken contract).
 func (r *Registry) ValidateAllContracts() []error {

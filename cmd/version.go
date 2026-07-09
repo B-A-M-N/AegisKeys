@@ -10,7 +10,7 @@ var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Print the aegiskeys version",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("aegiskeys", version)
+		fmt.Println(binaryName(), version)
 	},
 }
 

@@ -301,6 +301,12 @@ type keyFormState struct {
 	secret       string
 	tags         string
 	providerIdx  int // index into providers list for selection
+	// setup holds non-secret provider setup param values keyed by SetupParam.Key
+	// (e.g. Azure resource/deployment/api-version, Bedrock region).
+	setup map[string]string
+	// secretSetup holds secondary-secret setup param values keyed by Key
+	// (e.g. an AWS secret access key).
+	secretSetup map[string]string
 }
 
 // Zero overwrites the derived key bytes and clears decrypted secrets.

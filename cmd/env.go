@@ -1,7 +1,10 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"sort"
 
 	"github.com/spf13/cobra"
@@ -14,16 +17,27 @@ import (
 	"aegiskeys/internal/secret"
 )
 
+// outputFormat controls how `env` renders its output.
+// "shell" prints export lines; "json" emits a JSON object.
+type outputFormat string
+
+const (
+	formatShell outputFormat = "shell"
+	formatJSON  outputFormat = "json"
+)
+
 var envProfile string
 var envExport bool
+var envFormat string
 
 var envCmd = &cobra.Command{
-	Use:   "env --profile <name> [--export]",
-	Short: "Show the environment variables a profile would inject",
+	Use:     "env <profile> [--export] [--format shell|json]",
+	Aliases: []string{"e"},
+	Short:   "Show the environment variables a profile would inject",
 	Long: "By default prints a masked preview only. With --export (after " +
 		"confirmation) prints full `export KEY='value'` lines.",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		profileName, err := effectiveProfileName(envProfile)
+		profileName, err := effectiveProfileName(envProfile, args...)
 		if err != nil {
 			return err
 		}
@@ -78,7 +92,20 @@ var envCmd = &cobra.Command{
 
 		fmt.Printf("Profile: %s\n", prof.Name)
 		fmt.Printf("Provider: %s\n", prov.Name)
+
+		format := outputFormat(envFormat)
+		if format == "" {
+			format = formatShell
+		}
+		if format != formatShell && format != formatJSON {
+			return fmt.Errorf("invalid --format %q (want shell or json)", envFormat)
+		}
+
 		if !envExport {
+			if format == formatJSON {
+				// Masked JSON output: no confirmation needed.
+				return writeEnvJSON(os.Stdout, envVars, prov.CanonicalEnvVar(), prov.Name, prof.Name, false)
+			}
 			fmt.Println("Injected variables (masked):")
 			printSorted(maskEnv(envVars, prov.CanonicalEnvVar(), prof))
 			fmt.Println("\nNo full secrets printed.")
@@ -90,13 +117,25 @@ var envCmd = &cobra.Command{
 		if err := rec.AllowAccess(secret.AccessRevealStdout); err != nil {
 			return fmt.Errorf("key %q cannot be revealed: %w", rec.Label, err)
 		}
-		fmt.Println("This will print full secrets to your terminal.")
-		fmt.Println("Only continue if you understand the risk.")
-		if !confirm("Type EXPORT to continue.", "EXPORT") {
-			fmt.Println("Aborted.")
-			return nil
+
+		if format == formatJSON {
+			if !confirm("Type EXPORT to output full secrets as JSON.", "EXPORT") {
+				fmt.Println("Aborted.")
+				return nil
+			}
+			if err := writeEnvJSON(os.Stdout, envVars, prov.CanonicalEnvVar(), prov.Name, prof.Name, true); err != nil {
+				return err
+			}
+		} else {
+			fmt.Println("This will print full secrets to your terminal.")
+			fmt.Println("Only continue if you understand the risk.")
+			if !confirm("Type EXPORT to continue.", "EXPORT") {
+				fmt.Println("Aborted.")
+				return nil
+			}
+			fmt.Print(runner.BuildShellExport(envVars))
 		}
-		fmt.Print(runner.BuildShellExport(envVars))
+
 		audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{
 			Event:    "env_export_requested",
 			Profile:  prof.Name,
@@ -104,6 +143,41 @@ var envCmd = &cobra.Command{
 		})
 		return nil
 	},
+}
+
+// writeEnvJSON writes env vars as a JSON object to w.
+// If full is false, values are masked. Keys are sorted for stable output.
+func writeEnvJSON(w io.Writer, env map[string]string, canonicalSecretVar, provider, profile string, full bool) error {
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	out := struct {
+		Profile  string            `json:"profile"`
+		Provider string            `json:"provider"`
+		Env      map[string]string `json:"env"`
+		Full     bool              `json:"full"`
+	}{
+		Profile:  profile,
+		Provider: provider,
+		Env:      make(map[string]string, len(env)),
+		Full:     full,
+	}
+	for _, k := range keys {
+		v := env[k]
+		if !full {
+			if k == canonicalSecretVar {
+				v = secret.MaskSecret(v)
+			}
+		}
+		out.Env[k] = v
+	}
+
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(out)
 }
 
 // maskEnv returns a copy of env with credential-like values masked for display.
@@ -137,5 +211,6 @@ func printSorted(m map[string]string) {
 func init() {
 	envCmd.Flags().StringVarP(&envProfile, "profile", "p", "", "profile name or alias (defaults to settings.default_profile)")
 	envCmd.Flags().BoolVar(&envExport, "export", false, "print full export commands (requires confirmation)")
+	envCmd.Flags().StringVar(&envFormat, "format", "shell", "output format: shell (default) or json")
 	rootCmd.AddCommand(envCmd)
 }

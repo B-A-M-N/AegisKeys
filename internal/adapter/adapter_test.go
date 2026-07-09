@@ -205,6 +205,68 @@ func TestValidateContract_Complete(t *testing.T) {
 	}
 }
 
+func TestCodexContract_ConfigFileClassification(t *testing.T) {
+	c := CodexAdapter{}.Contract()
+
+	if c.SupportLevel != SupportEnvConfig {
+		t.Fatalf("SupportLevel = %s, want %s", c.SupportLevel, SupportEnvConfig)
+	}
+	if c.CredentialControl != CredentialConfigPatched {
+		t.Fatalf("CredentialControl = %s, want %s", c.CredentialControl, CredentialConfigPatched)
+	}
+	if !c.CanPatchConfig {
+		t.Fatal("Codex should declare config patching")
+	}
+	if len(c.ConfigFiles) != 1 {
+		t.Fatalf("ConfigFiles = %v, want one isolated config file", c.ConfigFiles)
+	}
+	if c.ConfigFiles[0].Path != "$CODEX_HOME/aegiskeys.config.toml" {
+		t.Fatalf("ConfigFiles[0].Path = %q", c.ConfigFiles[0].Path)
+	}
+	hasConfigFileMode := false
+	for _, mode := range c.RenderModes {
+		if mode == "config_file" {
+			hasConfigFileMode = true
+			break
+		}
+	}
+	if !hasConfigFileMode {
+		t.Fatalf("RenderModes = %v, want config_file", c.RenderModes)
+	}
+}
+
+func TestRenderModeForContract_ConfigPatchedIsConfigFile(t *testing.T) {
+	cases := []struct {
+		name string
+		c    AppSupportContract
+		want profile.RenderMode
+	}{
+		{
+			name: "config app with secret injection",
+			c: AppSupportContract{
+				CanPatchConfig:   true,
+				CanInjectSecrets: true,
+			},
+			want: profile.RenderConfigFile,
+		},
+		{
+			name: "env-only app",
+			c: AppSupportContract{
+				CanInjectSecrets: true,
+			},
+			want: profile.RenderEnv,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RenderModeForContract(tc.c); got != tc.want {
+				t.Fatalf("RenderModeForContract() = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestValidateContract_MissingFields(t *testing.T) {
 	cases := []struct {
 		name string
@@ -857,5 +919,154 @@ func TestClaudeCodeAdapter(t *testing.T) {
 		if arg == "--model" {
 			t.Errorf("expected no --model arg, but got one")
 		}
+	}
+}
+
+// TestAzureOpenAIInjection verifies that the Azure OpenAI provider's declared
+// setup params (resource -> endpoint, api-version) are injected at launch from
+// the key's non-secret Fields, and that the model is left as the deployment
+// name rather than a bogus OPENAI_MODEL env.
+func TestAzureOpenAIInjection(t *testing.T) {
+	registry := NewRegistry()
+	prov := provider.Provider{
+		Name:          "Azure OpenAI",
+		Slug:          "azure-openai",
+		EnvVar:        "AZURE_OPENAI_API_KEY",
+		BaseURL:       "https://example.openai.azure.com",
+		Compatibility: provider.CompatOpenAI,
+		Auth:          provider.AuthSpec{Type: "header", HeaderName: "api-key", EnvVar: "AZURE_OPENAI_API_KEY"},
+		Endpoints:     provider.EndpointSpec{BaseURL: "https://example.openai.azure.com", URLTemplate: "https://{resource}.openai.azure.com"},
+		Setup: []provider.SetupParam{
+			{Key: "resource", Label: "Resource name", EnvVar: "AZURE_OPENAI_ENDPOINT", Endpoint: true, Required: true},
+			{Key: "deployment", Label: "Deployment name", Required: true},
+			{Key: "api_version", Label: "API version", EnvVar: "AZURE_OPENAI_API_VERSION", Default: "2024-06-01", Required: true},
+		},
+	}
+	key := &secret.SecretRecord{
+		ID:     "k",
+		Secret: "my-api-key",
+		Fields: map[string]string{"resource": "my-resource", "deployment": "gpt-4o-deploy", "api_version": "2024-06-01"},
+		Policy: secret.DefaultSecretPolicy(secret.SecretAPIKey),
+	}
+	p := profile.Profile{
+		Name:         "azure",
+		ProviderSlug: "azure-openai",
+		Target:       profile.TargetConfig{App: "generic", Command: "my-app"},
+		Models:       profile.ModelSlots{Main: &profile.ModelRef{ID: "gpt-4o-deploy"}},
+	}
+	plan, err := ResolveLaunchPlan(p, prov, key, registry)
+	if err != nil {
+		t.Fatalf("ResolveLaunchPlan: %v", err)
+	}
+	if plan.Env["AZURE_OPENAI_API_KEY"] != "my-api-key" {
+		t.Errorf("AZURE_OPENAI_API_KEY = %q", plan.Env["AZURE_OPENAI_API_KEY"])
+	}
+	if plan.Env["AZURE_OPENAI_ENDPOINT"] != "https://my-resource.openai.azure.com" {
+		t.Errorf("AZURE_OPENAI_ENDPOINT = %q", plan.Env["AZURE_OPENAI_ENDPOINT"])
+	}
+	if plan.Env["AZURE_OPENAI_API_VERSION"] != "2024-06-01" {
+		t.Errorf("AZURE_OPENAI_API_VERSION = %q", plan.Env["AZURE_OPENAI_API_VERSION"])
+	}
+	// For Azure the model identity is the deployment name; OPENAI_MODEL should
+	// carry it (not a bogus base URL).
+	if plan.Env["OPENAI_MODEL"] != "gpt-4o-deploy" {
+		t.Errorf("OPENAI_MODEL = %q, want gpt-4o-deploy (deployment name)", plan.Env["OPENAI_MODEL"])
+	}
+	if plan.Env["OPENAI_BASE_URL"] != "" {
+		t.Errorf("azure should not inject OPENAI_BASE_URL, got %q", plan.Env["OPENAI_BASE_URL"])
+	}
+}
+
+// TestBedrockInjection verifies that Bedrock injects both AWS credentials
+// (access key id as primary secret, secret access key as a secondary secret)
+// and the region, and that no OpenAI-specific model env is emitted.
+func TestBedrockInjection(t *testing.T) {
+	registry := NewRegistry()
+	prov := provider.Provider{
+		Name:          "AWS Bedrock",
+		Slug:          "bedrock",
+		EnvVar:        "AWS_ACCESS_KEY_ID",
+		BaseURL:       "https://bedrock-runtime.us-east-1.amazonaws.com",
+		Compatibility: provider.CompatOpenAI,
+		Auth:          provider.AuthSpec{Type: "aws", EnvVar: "AWS_ACCESS_KEY_ID"},
+		Endpoints:     provider.EndpointSpec{BaseURL: "https://bedrock-runtime.us-east-1.amazonaws.com", URLTemplate: "https://bedrock-runtime.{region}.amazonaws.com"},
+		Setup: []provider.SetupParam{
+			{Key: "secret_access_key", Label: "AWS Secret Access Key", EnvVar: "AWS_SECRET_ACCESS_KEY", Secret: true, Required: true},
+			{Key: "region", Label: "AWS Region", EnvVar: "AWS_REGION", Default: "us-east-1", Required: true},
+		},
+	}
+	key := &secret.SecretRecord{
+		ID:           "k",
+		Secret:       "AKIAEXAMPLE",
+		Fields:       map[string]string{"region": "eu-west-1"},
+		ExtraSecrets: []secret.NamedSecret{{Key: "secret_access_key", Label: "AWS Secret Access Key", EnvVar: "AWS_SECRET_ACCESS_KEY", Secret: "wJalrXUtnFEMI"}},
+		Policy:       secret.DefaultSecretPolicy(secret.SecretAPIKey),
+	}
+	p := profile.Profile{
+		Name:         "bedrock",
+		ProviderSlug: "bedrock",
+		Target:       profile.TargetConfig{App: "generic", Command: "my-app"},
+		Models:       profile.ModelSlots{Main: &profile.ModelRef{ID: "anthropic.claude-v2"}},
+	}
+	plan, err := ResolveLaunchPlan(p, prov, key, registry)
+	if err != nil {
+		t.Fatalf("ResolveLaunchPlan: %v", err)
+	}
+	if plan.Env["AWS_ACCESS_KEY_ID"] != "AKIAEXAMPLE" {
+		t.Errorf("AWS_ACCESS_KEY_ID = %q", plan.Env["AWS_ACCESS_KEY_ID"])
+	}
+	if plan.Env["AWS_SECRET_ACCESS_KEY"] != "wJalrXUtnFEMI" {
+		t.Errorf("AWS_SECRET_ACCESS_KEY = %q", plan.Env["AWS_SECRET_ACCESS_KEY"])
+	}
+	if plan.Env["AWS_REGION"] != "eu-west-1" {
+		t.Errorf("AWS_REGION = %q", plan.Env["AWS_REGION"])
+	}
+	if plan.Env["OPENAI_MODEL"] != "" {
+		t.Errorf("bedrock should not inject OPENAI_MODEL, got %q", plan.Env["OPENAI_MODEL"])
+	}
+}
+
+// TestBedrockViaClaudeCode verifies that Bedrock routed through the Claude Code
+// adapter keeps the AWS_* env vars intact instead of overwriting them with
+// Anthropic-specific variables.
+func TestBedrockViaClaudeCode(t *testing.T) {
+	registry := NewRegistry()
+	prov := provider.Provider{
+		Name:          "AWS Bedrock",
+		Slug:          "bedrock",
+		EnvVar:        "AWS_ACCESS_KEY_ID",
+		BaseURL:       "https://bedrock-runtime.us-east-1.amazonaws.com",
+		Compatibility: provider.CompatOpenAI,
+		Auth:          provider.AuthSpec{Type: "aws", EnvVar: "AWS_ACCESS_KEY_ID"},
+		Setup: []provider.SetupParam{
+			{Key: "secret_access_key", Label: "AWS Secret Access Key", EnvVar: "AWS_SECRET_ACCESS_KEY", Secret: true, Required: true},
+			{Key: "region", Label: "AWS Region", EnvVar: "AWS_REGION", Default: "us-east-1", Required: true},
+		},
+	}
+	key := &secret.SecretRecord{
+		ID:           "k",
+		Secret:       "AKIAEXAMPLE",
+		Fields:       map[string]string{"region": "us-east-1"},
+		ExtraSecrets: []secret.NamedSecret{{Key: "secret_access_key", EnvVar: "AWS_SECRET_ACCESS_KEY", Secret: "wJalrXUtnFEMI"}},
+		Policy:       secret.DefaultSecretPolicy(secret.SecretAPIKey),
+	}
+	p := profile.Profile{
+		Name:         "bedrock-claude",
+		ProviderSlug: "bedrock",
+		Target:       profile.TargetConfig{App: "claude", RenderMode: profile.RenderEnv},
+		Models:       profile.ModelSlots{Main: &profile.ModelRef{ID: "anthropic.claude-v2"}},
+	}
+	plan, err := ResolveLaunchPlan(p, prov, key, registry)
+	if err != nil {
+		t.Fatalf("ResolveLaunchPlan: %v", err)
+	}
+	if plan.Env["AWS_ACCESS_KEY_ID"] != "AKIAEXAMPLE" {
+		t.Errorf("AWS_ACCESS_KEY_ID overwritten: %q", plan.Env["AWS_ACCESS_KEY_ID"])
+	}
+	if plan.Env["AWS_SECRET_ACCESS_KEY"] != "wJalrXUtnFEMI" {
+		t.Errorf("AWS_SECRET_ACCESS_KEY = %q", plan.Env["AWS_SECRET_ACCESS_KEY"])
+	}
+	if plan.Env["ANTHROPIC_API_KEY"] != "" {
+		t.Errorf("bedrock must not set ANTHROPIC_API_KEY, got %q", plan.Env["ANTHROPIC_API_KEY"])
 	}
 }

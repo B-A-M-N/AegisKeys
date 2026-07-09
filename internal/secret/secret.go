@@ -122,6 +122,17 @@ func (r SecretRecord) AllowAccess(mode AccessMode) error {
 	return nil
 }
 
+// NamedSecret is a secondary secret component for a credential, distinct from
+// the primary Secret. Examples: an AWS secret access key paired with an access
+// key id. Its raw value is NEVER serialized outside the encrypted vault
+// envelope (it carries json:"-"); only the on-disk store shape includes it.
+type NamedSecret struct {
+	Key    string `json:"key"` // matches a Provider.Setup param Key
+	Label  string `json:"label,omitempty"`
+	EnvVar string `json:"env_var"` // env var injected at launch
+	Secret string `json:"-"`       // raw secret; never serialized
+}
+
 // SecretRecord is a single encrypted vault item. It can represent any kind of
 // credential — API key, token, webhook secret, service account — with optional
 // provider linkage, usage hints, rotation metadata, and access policies.
@@ -145,6 +156,16 @@ type SecretRecord struct {
 	HeaderHint  string `json:"header_hint,omitempty"`
 	BaseURLHint string `json:"base_url_hint,omitempty"`
 	DocsURL     string `json:"docs_url,omitempty"`
+
+	// Setup holds non-secret provider parameters collected at key creation
+	// (e.g. Azure resource/deployment/api-version, Bedrock region). Never
+	// secret; persisted inside the encrypted vault and exported by Serialize.
+	Fields map[string]string `json:"fields,omitempty"`
+
+	// ExtraSecrets holds additional secret components (e.g. an AWS secret
+	// access key). Each carries its own raw value that is NEVER serialized
+	// outside the encrypted vault envelope (json:"-").
+	ExtraSecrets []NamedSecret `json:"-"`
 
 	// Private note — encrypted with vault payload, excluded from Serialize.
 	PrivateNote string `json:"-"`
@@ -227,7 +248,10 @@ type MaskedKeyItem struct {
 	ExpiresAt    string   `json:"expires_at,omitempty"`
 	CreatedAt    string   `json:"created_at,omitempty"`
 	LastRotated  string   `json:"last_rotated,omitempty"`
-	Archived     bool     `json:"archived"`
+	// SetupFields are the non-secret provider params collected for this key
+	// (e.g. resource, deployment, region). Useful for display only.
+	SetupFields map[string]string `json:"setup_fields,omitempty"`
+	Archived    bool              `json:"archived"`
 }
 
 func NewID() (string, error) {
@@ -278,6 +302,7 @@ func ToMasked(record SecretRecord) MaskedKeyItem {
 		ExpiresAt:    expiresAt,
 		CreatedAt:    createdAt,
 		LastRotated:  lastRotated,
+		SetupFields:  record.Fields,
 		Archived:     record.Archived,
 	}
 }
@@ -293,27 +318,28 @@ func ToMaskedList(records []SecretRecord) []MaskedKeyItem {
 // Serialize returns JSON-safe representation (secrets removed, private notes removed).
 func (v *Vault) Serialize() ([]byte, error) {
 	type SafeRecord struct {
-		ID           string       `json:"id"`
-		Kind         SecretKind   `json:"kind"`
-		ProviderSlug string       `json:"provider_slug,omitempty"`
-		Label        string       `json:"label"`
-		Description  string       `json:"description,omitempty"`
-		Account      string       `json:"account,omitempty"`
-		Project      string       `json:"project,omitempty"`
-		Tags         []string     `json:"tags,omitempty"`
-		EnvVarHint   string       `json:"env_var_hint,omitempty"`
-		HeaderHint   string       `json:"header_hint,omitempty"`
-		BaseURLHint  string       `json:"base_url_hint,omitempty"`
-		DocsURL      string       `json:"docs_url,omitempty"`
-		CreatedAt    time.Time    `json:"created_at"`
-		UpdatedAt    time.Time    `json:"updated_at"`
-		LastUsedAt   *time.Time   `json:"last_used_at,omitempty"`
-		ExpiresAt    *time.Time   `json:"expires_at,omitempty"`
-		RotatesAt    *time.Time   `json:"rotates_at,omitempty"`
-		RevealPolicy RevealPolicy `json:"reveal_policy,omitempty"`
-		Exportable   bool         `json:"exportable,omitempty"`
-		Archived     bool         `json:"archived,omitempty"`
-		Policy       SecretPolicy `json:"policy,omitzero"`
+		ID           string            `json:"id"`
+		Kind         SecretKind        `json:"kind"`
+		ProviderSlug string            `json:"provider_slug,omitempty"`
+		Label        string            `json:"label"`
+		Description  string            `json:"description,omitempty"`
+		Account      string            `json:"account,omitempty"`
+		Project      string            `json:"project,omitempty"`
+		Tags         []string          `json:"tags,omitempty"`
+		EnvVarHint   string            `json:"env_var_hint,omitempty"`
+		HeaderHint   string            `json:"header_hint,omitempty"`
+		BaseURLHint  string            `json:"base_url_hint,omitempty"`
+		DocsURL      string            `json:"docs_url,omitempty"`
+		Fields       map[string]string `json:"fields,omitempty"`
+		CreatedAt    time.Time         `json:"created_at"`
+		UpdatedAt    time.Time         `json:"updated_at"`
+		LastUsedAt   *time.Time        `json:"last_used_at,omitempty"`
+		ExpiresAt    *time.Time        `json:"expires_at,omitempty"`
+		RotatesAt    *time.Time        `json:"rotates_at,omitempty"`
+		RevealPolicy RevealPolicy      `json:"reveal_policy,omitempty"`
+		Exportable   bool              `json:"exportable,omitempty"`
+		Archived     bool              `json:"archived,omitempty"`
+		Policy       SecretPolicy      `json:"policy,omitzero"`
 	}
 	type SafeScratchPad struct {
 		ID           string         `json:"id"`
@@ -336,7 +362,7 @@ func (v *Vault) Serialize() ([]byte, error) {
 		sv.Keys = append(sv.Keys, SafeRecord{
 			ID: k.ID, Kind: k.Kind, ProviderSlug: k.ProviderSlug,
 			Label: k.Label, Description: k.Description, Account: k.Account, Project: k.Project,
-			Tags: k.Tags, EnvVarHint: k.EnvVarHint, HeaderHint: k.HeaderHint, BaseURLHint: k.BaseURLHint, DocsURL: k.DocsURL,
+			Tags: k.Tags, EnvVarHint: k.EnvVarHint, HeaderHint: k.HeaderHint, BaseURLHint: k.BaseURLHint, DocsURL: k.DocsURL, Fields: k.Fields,
 			CreatedAt: k.CreatedAt, UpdatedAt: k.UpdatedAt, LastUsedAt: k.LastUsedAt,
 			ExpiresAt: k.ExpiresAt, RotatesAt: k.RotatesAt,
 			RevealPolicy: k.RevealPolicy, Exportable: k.Exportable, Archived: k.Archived, Policy: k.Policy,

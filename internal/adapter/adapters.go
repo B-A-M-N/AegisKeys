@@ -66,7 +66,7 @@ func (GenericOpenAIAdapter) Render(p profile.Profile, prov provider.Provider, ke
 	if err != nil {
 		return nil, err
 	}
-	if p.ModelID() != "" {
+	if p.ModelID() != "" && prov.Auth.Type != "aws" {
 		env[modelEnvVar(prov)] = p.ModelID()
 	}
 	cmd := p.Command()
@@ -989,6 +989,12 @@ func (ClaudeCodeAdapter) Render(p profile.Profile, prov provider.Provider, key *
 		}
 		env["ANTHROPIC_BASE_URL"] = baseURL
 	case provider.CompatOpenAI:
+		if prov.Auth.Type == "aws" {
+			// Bedrock: the AWS SDK reads AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY
+			// / AWS_REGION injected by buildBaseEnv. Do not overwrite them with
+			// Anthropic-specific variables.
+			break
+		}
 		// Claude Code has strict validation for ANTHROPIC_API_KEY (must be sk-ant-*).
 		// For non-Anthropic providers, using ANTHROPIC_AUTH_TOKEN bypasses this format check.
 		delete(env, prov.CanonicalEnvVar())
@@ -1572,6 +1578,36 @@ func buildBaseEnv(_ profile.Profile, prov provider.Provider, key *secret.SecretR
 			return nil, fmt.Errorf("provider %q ExtraEnv %q looks secret; store it as a key", prov.Slug, k)
 		}
 		env[k] = v
+	}
+
+	// 3. provider setup params: non-secret fields and secondary secrets.
+	// These carry the values a provider needs beyond the primary secret
+	// (e.g. Azure resource/deployment/api-version, Bedrock secret access key
+	// + region). Secondary secrets come from key.ExtraSecrets; non-secret
+	// fields come from key.Fields.
+	if key != nil {
+		for _, sp := range prov.Setup {
+			if sp.EnvVar == "" {
+				continue
+			}
+			if sp.Secret {
+				for _, ns := range key.ExtraSecrets {
+					if ns.Key == sp.Key && ns.Secret != "" {
+						env[sp.EnvVar] = ns.Secret
+						break
+					}
+				}
+				continue
+			}
+			if sp.Endpoint {
+				// Inject the resolved endpoint URL rather than the raw field.
+				env[sp.EnvVar] = prov.ResolveEndpoint(key.Fields)
+				continue
+			}
+			if v, ok := key.Fields[sp.Key]; ok && v != "" {
+				env[sp.EnvVar] = v
+			}
+		}
 	}
 
 	return env, nil

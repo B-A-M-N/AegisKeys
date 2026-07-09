@@ -14,7 +14,7 @@ var runProfile string
 
 var runCmd = &cobra.Command{
 	Use:   "run --profile <name> -- <command> [args...]",
-	Short: "Run a command with the profile's secrets injected into its environment",
+	Short: "Run a command with the profile's secrets injected (legacy: use 'launch' or 'l')",
 	Long: "The command after `--` receives the resolved environment variables " +
 		"in its child process only. The parent shell is never modified.\n\n" +
 		"Note: The command is executed directly, not via a shell. Shell built-ins\n" +

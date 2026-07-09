@@ -530,36 +530,45 @@ func (m *model) drawModal(grid [][]gridCell, priority [][]int, r Rect, s *Styles
 // drawKeyAddForm renders the multi-field key add form with the active field highlighted.
 func (m *model) drawKeyAddForm(grid [][]gridCell, priority [][]int, r Rect, _ *Styles, w, h int) {
 	contentLayer := 7
-	labels := []string{"Provider:", "Label:", "Secret:", "Tags:"}
-	values := []string{
-		m.keyForm.providerSlug,
-		m.keyForm.label,
-		"",
-		m.keyForm.tags,
-	}
-	// Secret is always masked.
-	if m.keyForm.secret != "" {
-		values[2] = "••••••••"
-	}
-
-	for i, label := range labels {
-		y := r.Y + 2 + i*3
-		if y >= r.Y+r.H-1 {
+	fields := m.keyFormFields()
+	rowH := 2
+	for i, f := range fields {
+		y := r.Y + 2 + i*rowH
+		if y >= r.Y+r.H-2 {
 			break
 		}
 		rowStyle := 23
 		if i == m.keyFormActive {
 			rowStyle = 12 // highlight active row
 		}
-		labelStr := fmt.Sprintf("%-10s", label)
+		var val string
+		switch f.kind {
+		case "provider":
+			val = m.keyForm.providerSlug
+		case "label":
+			val = m.keyForm.label
+		case "secret":
+			if m.keyForm.secret != "" {
+				val = "••••••••"
+			}
+		case "setup":
+			val = m.keyForm.setup[f.key]
+		case "secretSetup":
+			if m.keyForm.secretSetup[f.key] != "" {
+				val = "••••••••"
+			}
+		case "tags":
+			val = m.keyForm.tags
+		}
+		labelStr := fmt.Sprintf("%-18s", f.label+":")
 		writeLine(grid, priority, r.X+2, y, labelStr, 22, contentLayer, w, h, false)
-		writeLine(grid, priority, r.X+13, y, values[i], rowStyle, contentLayer+1, w, h, false)
+		writeLine(grid, priority, r.X+21, y, val, rowStyle, contentLayer+1, w, h, false)
 	}
 
 	// Show provider selection list when provider field is active.
-	if m.keyFormActive == 0 && len(m.providers.Providers) > 0 {
-		listY := r.Y + 2 + 4*3
-		if listY < r.Y+r.H-1 {
+	if m.keyFormActive < len(fields) && fields[m.keyFormActive].kind == "provider" && len(m.providers.Providers) > 0 {
+		listY := r.Y + 2 + len(fields)*rowH
+		if listY < r.Y+r.H-2 {
 			writeLine(grid, priority, r.X+2, listY, "Available providers:", 22, contentLayer, w, h, false)
 			for i, p := range m.providers.Providers {
 				marker := " "
@@ -569,7 +578,7 @@ func (m *model) drawKeyAddForm(grid [][]gridCell, priority [][]int, r Rect, _ *S
 					style = 12
 				}
 				lineY := listY + 1 + i
-				if lineY >= r.Y+r.H-1 {
+				if lineY >= r.Y+r.H-2 {
 					break
 				}
 				display := fmt.Sprintf("%-15s %s", p.Name, p.Compatibility)

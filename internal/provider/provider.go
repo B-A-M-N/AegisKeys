@@ -37,6 +37,11 @@ type EndpointSpec struct {
 	APIPath   string `json:"api_path,omitempty"`
 	Version   string `json:"version,omitempty"`
 	ModelsURL string `json:"models_url,omitempty"`
+	// URLTemplate is an optional endpoint template supporting {field}
+	// substitution from a key's Setup values. Used when the endpoint embeds
+	// a provider-specific parameter (e.g. Azure resource name, Bedrock
+	// region). When empty, CanonicalBaseURL is authoritative.
+	URLTemplate string `json:"url_template,omitempty"`
 }
 
 // ModelCatalogSpec describes how to discover and refresh models.
@@ -58,6 +63,43 @@ type Capabilities struct {
 	Streaming       bool `json:"streaming"`
 	FunctionCalling bool `json:"function_calling"`
 	MaxContext      int  `json:"max_context,omitempty"`
+}
+
+// SetupParam declares a value a provider needs beyond the primary secret.
+// Secret=false  -> a non-secret configuration value (e.g. Azure resource name,
+//
+//	deployment name, api-version; Bedrock region). Injected as EnvVar at
+//	launch when present on the key.
+//
+// Secret=true   -> an additional secret component (e.g. an AWS secret access
+//
+//	key). Injected as EnvVar at launch from the key's ExtraSecrets.
+type SetupParam struct {
+	// Key is the stable identifier used as the key in SecretRecord.Fields
+	// (for non-secret params) or to match a NamedSecret.Key (for secrets).
+	Key string `json:"key"`
+	// Label is the human-readable prompt shown when collecting the value.
+	Label string `json:"label"`
+	// EnvVar is the environment variable name injected at launch. Empty means
+	// the value is collected/stored but not injected as a standalone env var
+	// (e.g. an Azure deployment name, which is supplied as the profile model).
+	EnvVar string `json:"env_var,omitempty"`
+	// Default is an optional default value offered at collection time.
+	Default string `json:"default,omitempty"`
+	// Example is an optional example shown to the user.
+	Example string `json:"example,omitempty"`
+	// Required marks the param as mandatory for a usable credential.
+	Required bool `json:"required"`
+	// Secret marks the param as an additional secret component.
+	Secret bool `json:"secret"`
+	// Endpoint, when true, makes injection resolve the provider's endpoint
+	// URL (Endpoints.URLTemplate with this param's value) and assign it to
+	// EnvVar, rather than injecting the raw field value. Used for the Azure
+	// resource name, whose env var (AZURE_OPENAI_ENDPOINT) expects the full
+	// https URL, not just the resource string.
+	Endpoint bool `json:"endpoint,omitempty"`
+	// Help is an optional explanatory note shown during collection.
+	Help string `json:"help,omitempty"`
 }
 
 // AppHint provides per-application configuration hints for a provider.
@@ -109,6 +151,13 @@ type Provider struct {
 
 	// AppHints provides per-application configuration hints.
 	AppHints []AppHint `json:"app_hints,omitempty"`
+
+	// Setup declares additional values (non-secret config and/or secondary
+	// secrets) the provider needs beyond the primary secret. Collected at key
+	// creation and injected at launch. Used by providers such as Azure OpenAI
+	// (resource, deployment, api-version) and AWS Bedrock (secret access key,
+	// region) whose requirements exceed a single API key.
+	Setup []SetupParam `json:"setup,omitempty"`
 
 	Tags      []string  `json:"tags,omitempty"`
 	Notes     string    `json:"notes,omitempty"`
@@ -164,6 +213,35 @@ func (p Provider) CanonicalBaseURL() string {
 		return p.Endpoints.BaseURL
 	}
 	return p.BaseURL
+}
+
+// ResolveEndpoint returns the launch-time endpoint URL, substituting {field}
+// placeholders in Endpoints.URLTemplate with the provided setup values. When
+// no template is declared, it returns CanonicalBaseURL unchanged. Unmatched
+// placeholders are left as-is so the result is always a usable string.
+func (p Provider) ResolveEndpoint(fields map[string]string) string {
+	tpl := p.Endpoints.URLTemplate
+	if tpl == "" {
+		return p.CanonicalBaseURL()
+	}
+	var sb strings.Builder
+	for i := 0; i < len(tpl); i++ {
+		if tpl[i] == '{' {
+			end := strings.IndexByte(tpl[i:], '}')
+			if end > 0 {
+				key := tpl[i+1 : i+end]
+				if v, ok := fields[key]; ok && v != "" {
+					sb.WriteString(v)
+				} else {
+					sb.WriteString(tpl[i : i+end+1])
+				}
+				i += end
+				continue
+			}
+		}
+		sb.WriteByte(tpl[i])
+	}
+	return sb.String()
 }
 
 // ModelRefreshURL resolves the best endpoint for fetching this provider's model
@@ -680,10 +758,20 @@ var defaultProviders = []Provider{
 		AuthHeader:    "AWS Signature v4",
 		Compatibility: CompatOpenAI, Protocol: ProtocolOpenAI,
 		Auth:        AuthSpec{Type: "aws", EnvVar: "AWS_ACCESS_KEY_ID"},
-		Endpoints:   EndpointSpec{BaseURL: "https://bedrock-runtime.us-east-1.amazonaws.com"},
-		Catalog:     ModelCatalogSpec{Source: "static"},
-		ModelPolicy: ModelCatalogPolicy{Source: ModelSourceStatic},
+		Endpoints:   EndpointSpec{BaseURL: "https://bedrock-runtime.us-east-1.amazonaws.com", URLTemplate: "https://bedrock-runtime.{region}.amazonaws.com"},
+		Catalog:     ModelCatalogSpec{Source: "manual"},
+		ModelPolicy: ModelCatalogPolicy{Source: ModelSourceManual},
 		Tags:        []string{"enterprise", "coding", "paid"},
+		// Bedrock needs TWO credentials (access key id + secret access key)
+		// plus a region. The primary secret is the access key id; the secret
+		// access key is collected as a secondary secret and the region as a
+		// non-secret field. Bedrock does not speak the OpenAI wire format —
+		// agents call it through their own AWS SDK using these AWS_* env vars.
+		Setup: []SetupParam{
+			{Key: "secret_access_key", Label: "AWS Secret Access Key", EnvVar: "AWS_SECRET_ACCESS_KEY", Secret: true, Required: true, Help: "The secret access key paired with the access key id above."},
+			{Key: "region", Label: "AWS Region", EnvVar: "AWS_REGION", Default: "us-east-1", Required: true, Help: "Bedrock region, e.g. us-east-1."},
+		},
+		Notes: "Bedrock authenticates via AWS SigV4 (the agent's AWS SDK), not an OpenAI key. AegisKeys injects AWS_ACCESS_KEY_ID (primary secret), AWS_SECRET_ACCESS_KEY (secondary secret), and AWS_REGION. Set the profile model to the Bedrock model ID (e.g. anthropic.claude-v2 or amazon.titan-text-express-v1).",
 	},
 	{
 		ID: "fireworks", Name: "Fireworks", Slug: "fireworks",
@@ -861,16 +949,24 @@ var defaultProviders = []Provider{
 	},
 	{
 		ID: "azure-openai", Name: "Azure OpenAI", Slug: "azure-openai",
-		BaseURL: "https://YOUR_RESOURCE_NAME.openai.azure.com", EnvVar: "AZURE_OPENAI_API_KEY",
+		BaseURL: "https://example.openai.azure.com", EnvVar: "AZURE_OPENAI_API_KEY",
 		AuthHeader:    "api-key: ${KEY}",
 		Compatibility: CompatOpenAI, Protocol: ProtocolOpenAI,
 		Auth:         AuthSpec{Type: "header", HeaderName: "api-key", EnvVar: "AZURE_OPENAI_API_KEY"},
-		Endpoints:    EndpointSpec{BaseURL: "https://YOUR_RESOURCE_NAME.openai.azure.com"},
+		Endpoints:    EndpointSpec{BaseURL: "https://example.openai.azure.com", URLTemplate: "https://{resource}.openai.azure.com"},
 		Catalog:      ModelCatalogSpec{Source: "manual"},
 		ModelPolicy:  ModelCatalogPolicy{Source: ModelSourceManual},
 		Capabilities: Capabilities{ToolUse: true, Vision: true, Streaming: true, FunctionCalling: true},
 		Tags:         []string{"enterprise", "coding", "paid"},
-		Notes:        "Replace YOUR_RESOURCE_NAME with your Azure OpenAI resource name. Requires AZURE_RESOURCE_NAME env var or edit the base URL. Uses api-key header auth (not bearer).",
+		// Azure OpenAI needs the resource name (endpoint), the deployment name
+		// (the model identity, supplied as the profile model), and the API
+		// version. The primary secret is the api-key.
+		Setup: []SetupParam{
+			{Key: "resource", Label: "Resource name", EnvVar: "AZURE_OPENAI_ENDPOINT", Endpoint: true, Required: true, Example: "my-resource", Help: "Your Azure OpenAI resource name — the {resource} in https://{resource}.openai.azure.com."},
+			{Key: "deployment", Label: "Deployment name", Required: true, Help: "Azure deployments are created per-model and are NOT the model ID. Set the profile model to this deployment name for OpenAI-SDK agents."},
+			{Key: "api_version", Label: "API version", EnvVar: "AZURE_OPENAI_API_VERSION", Default: "2024-06-01", Required: true, Help: "Azure API version, e.g. 2024-06-01."},
+		},
+		Notes: "Azure OpenAI authenticates with an api-key header. The model identity is the deployment name (set it as the profile model). Provide resource, deployment, and api-version at key setup; AegisKeys injects AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_VERSION and uses the deployment as the model.",
 	},
 	{
 		ID: "alibaba-cloud", Name: "Alibaba Cloud", Slug: "alibaba-cloud",

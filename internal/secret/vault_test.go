@@ -106,6 +106,73 @@ func TestVaultRoundTrip(t *testing.T) {
 	}
 }
 
+// TestVaultRoundTripSetupFields verifies that non-secret setup Fields and
+// secondary-secret ExtraSecrets survive an encrypted save/load round trip,
+// while never leaking into the metadata-only Serialize output.
+func TestVaultRoundTripSetupFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "vault.enc")
+	pw := "correct-horse-battery-staple"
+
+	if err := InitVault(path, pw); err != nil {
+		t.Fatalf("InitVault: %v", err)
+	}
+	v, err := LoadVault(path, pw)
+	if err != nil {
+		t.Fatalf("LoadVault: %v", err)
+	}
+	rec := SecretRecord{
+		ProviderSlug: "bedrock",
+		Label:        "prod",
+		Secret:       "AKIAEXAMPLE",
+		Fields:       map[string]string{"region": "eu-west-1"},
+		ExtraSecrets: []NamedSecret{
+			{Key: "secret_access_key", Label: "AWS Secret Access Key", EnvVar: "AWS_SECRET_ACCESS_KEY", Secret: "wJalrXUtnFEMI"},
+		},
+	}
+	if err := v.Add(rec); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := SaveVault(path, pw, v); err != nil {
+		t.Fatalf("SaveVault: %v", err)
+	}
+
+	v2, err := LoadVault(path, pw)
+	if err != nil {
+		t.Fatalf("LoadVault after save: %v", err)
+	}
+	k := v2.Keys[0]
+	if k.Fields["region"] != "eu-west-1" {
+		t.Errorf("Fields[region] = %q, want eu-west-1", k.Fields["region"])
+	}
+	if len(k.ExtraSecrets) != 1 {
+		t.Fatalf("ExtraSecrets len = %d, want 1", len(k.ExtraSecrets))
+	}
+	if k.ExtraSecrets[0].Secret != "wJalrXUtnFEMI" {
+		t.Errorf("ExtraSecrets[0].Secret = %q, want wJalrXUtnFEMI", k.ExtraSecrets[0].Secret)
+	}
+	if k.ExtraSecrets[0].EnvVar != "AWS_SECRET_ACCESS_KEY" {
+		t.Errorf("ExtraSecrets[0].EnvVar = %q", k.ExtraSecrets[0].EnvVar)
+	}
+
+	// Serialize (metadata-only export) must NOT contain the secret access key
+	// value or the primary secret, but MAY contain the non-secret Fields.
+	raw, err := v2.Serialize()
+	if err != nil {
+		t.Fatalf("Serialize: %v", err)
+	}
+	s := string(raw)
+	if strings.Contains(s, "wJalrXUtnFEMI") {
+		t.Error("Serialize leaked secondary secret")
+	}
+	if strings.Contains(s, "AKIAEXAMPLE") {
+		t.Error("Serialize leaked primary secret")
+	}
+	if !strings.Contains(s, "eu-west-1") {
+		t.Error("Serialize dropped non-secret Fields")
+	}
+}
+
 func TestVaultCRUD(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "vault.enc")

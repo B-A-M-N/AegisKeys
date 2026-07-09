@@ -517,13 +517,16 @@ func (CodexAdapter) CanConfigureProvider(p provider.Provider) bool { return true
 func (CodexAdapter) Contract() AppSupportContract {
 	return AppSupportContract{
 		ID: "codex", DisplayName: "Codex CLI", DefaultCommand: "codex",
-		SupportLevel: SupportFullEnv, RenderModes: []string{"env"},
-		CredentialControl: CredentialEnvInjected,
+		SupportLevel: SupportEnvConfig, RenderModes: []string{"env", "config_file"},
+		CredentialControl: CredentialConfigPatched,
 		SupportConfidence: ConfidenceExperimental,
 		LaunchSurfaces:    []string{"cli"},
-		CanLaunch:         true, CanInjectSecrets: true, CanPatchConfig: false,
+		CanLaunch:         true, CanInjectSecrets: true, CanPatchConfig: true,
+		ConfigFiles: []ConfigFileContract{
+			{Path: "$CODEX_HOME/aegiskeys.config.toml", Format: "toml", Description: "Isolated Codex model_providers config"},
+		},
 		CanManageModels: true, CanIsolateProfile: false, RequiresManualStep: false,
-		ValidationChecks: []string{"env_injection_only", "model_slots_validated"},
+		ValidationChecks: []string{"config_no_raw_secret", "model_slots_validated", "env_no_raw_secret"},
 		ModelSlots: []ModelSlotContract{
 			{Name: "main", Description: "Primary model"},
 			{Name: "gpt54", Description: "GPT-5.4", Optional: true},

@@ -77,26 +77,51 @@ func wizardAppView(s *Styles, m *model) string {
 	var b strings.Builder
 	b.WriteString(s.SectionHeader.Render("Choose target app"))
 	b.WriteString("\n\n")
-	idx := 0
+
+	type appRow struct {
+		id         string
+		groupTitle string
+		firstGroup bool
+	}
+	rows := []appRow{}
 	for _, group := range appGroups {
-		b.WriteString(s.SectionHeader.Render(group.title))
-		b.WriteString("\n")
-		b.WriteString(s.Muted.Render(group.description))
-		b.WriteString("\n")
+		first := true
 		for _, id := range group.adapterIDs {
 			if a, ok := m.adapterRegistry.Get(id); ok {
-				marker := " "
-				style := s.Body
-				if idx == m.wizard.selected {
-					marker = "›"
-					style = s.SelectedRow
-				}
-				badge := m.supportBadge(id)
-				b.WriteString(fmt.Sprintf("%s %s  %s  %s\n", marker, style.Render(a.DisplayName()), s.Muted.Render(fmt.Sprintf("[%s]", badge)), s.Muted.Render(strings.Join(slotsPreview(a.Contract()), "/"))))
-				idx++
+				_ = a
+				rows = append(rows, appRow{id: id, groupTitle: group.title, firstGroup: first})
+				first = false
 			}
 		}
+	}
+	start, end := visibleWindow(len(rows), m.wizard.selected, m.wizardListRows())
+	lastGroup := ""
+	for i := start; i < end; i++ {
+		row := rows[i]
+		a, ok := m.adapterRegistry.Get(row.id)
+		if !ok {
+			continue
+		}
+		if row.firstGroup || row.groupTitle != lastGroup {
+			if i != start {
+				b.WriteString("\n")
+			}
+			b.WriteString(s.SectionHeader.Render(row.groupTitle))
+			b.WriteString("\n")
+			lastGroup = row.groupTitle
+		}
+		marker := " "
+		style := s.Body
+		if i == m.wizard.selected {
+			marker = "›"
+			style = s.SelectedRow
+		}
+		badge := m.supportBadge(row.id)
+		b.WriteString(fmt.Sprintf("%s %s  %s  %s\n", marker, style.Render(a.DisplayName()), s.Muted.Render(fmt.Sprintf("[%s]", badge)), s.Muted.Render(strings.Join(slotsPreview(a.Contract()), "/"))))
+	}
+	if status := scrollStatus(start, end, len(rows)); status != "" {
 		b.WriteString("\n")
+		b.WriteString(s.Muted.Render(status + " · ↑/↓ scroll · PgUp/PgDn jump"))
 	}
 	return b.String()
 }
@@ -146,31 +171,45 @@ func wizardProviderView(s *Styles, m *model) string {
 		}
 	}
 
+	start, end := visibleWindow(len(views), m.wizard.selected, m.wizardListRows())
+
 	// Compatible providers section.
 	if compatCount > 0 {
-		b.WriteString(s.SectionHeader.Render("Compatible providers"))
-		b.WriteString("\n")
+		headerWritten := false
 		for i, v := range views {
-			if !v.Compatible {
+			if i < start || i >= end || !v.Compatible {
 				continue
+			}
+			if !headerWritten {
+				b.WriteString(s.SectionHeader.Render("Compatible providers"))
+				b.WriteString("\n")
+				headerWritten = true
 			}
 			writeProviderRow(&b, s, i, v, m.wizard.selected)
 		}
-		b.WriteString("\n")
+		if headerWritten {
+			b.WriteString("\n")
+		}
 	}
 
 	// Incompatible providers section — shown with reasons, not hidden.
 	if compatCount < len(views) {
-		b.WriteString(s.SectionHeader.Render("Other providers"))
-		b.WriteString("\n")
+		headerWritten := false
 		for i, v := range views {
-			if v.Compatible {
+			if i < start || i >= end || v.Compatible {
 				continue
+			}
+			if !headerWritten {
+				b.WriteString(s.SectionHeader.Render("Other providers"))
+				b.WriteString("\n")
+				headerWritten = true
 			}
 			writeProviderRow(&b, s, i, v, m.wizard.selected)
 			b.WriteString(fmt.Sprintf("      %s\n", s.Muted.Render(v.Reason)))
 		}
-		b.WriteString("\n")
+		if headerWritten {
+			b.WriteString("\n")
+		}
 	}
 
 	// Hints.
@@ -183,6 +222,10 @@ func wizardProviderView(s *Styles, m *model) string {
 		b.WriteString(s.Muted.Render(" · u: repair as OpenAI-compatible"))
 	}
 	b.WriteString(s.Muted.Render(" · r: restore defaults · Esc: back"))
+	if status := scrollStatus(start, end, len(views)); status != "" {
+		b.WriteString("\n")
+		b.WriteString(s.Muted.Render(status + " · PgUp/PgDn jump"))
+	}
 	return b.String()
 }
 
@@ -221,7 +264,9 @@ func wizardCredentialView(s *Styles, m *model) string {
 		b.WriteString(s.Muted.Render("No matching keys. Add one first with `z` → Add API key."))
 		return b.String()
 	}
-	for i, k := range keys {
+	start, end := visibleWindow(len(keys), m.wizard.selected, m.wizardListRows())
+	for i := start; i < end; i++ {
+		k := keys[i]
 		marker := " "
 		style := s.Body
 		if i == m.wizard.selected {
@@ -229,6 +274,10 @@ func wizardCredentialView(s *Styles, m *model) string {
 			style = s.SelectedRow
 		}
 		b.WriteString(fmt.Sprintf("%s %s  %s  %s\n", marker, style.Render(k.Label), s.KeyMasked.Render(k.MaskedSecret), s.Muted.Render(k.ProviderSlug)))
+	}
+	if status := scrollStatus(start, end, len(keys)); status != "" {
+		b.WriteString("\n")
+		b.WriteString(s.Muted.Render(status + " · ↑/↓ scroll · PgUp/PgDn jump"))
 	}
 	return b.String()
 }

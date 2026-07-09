@@ -288,7 +288,7 @@ var vaultRevealCmd = &cobra.Command{
 }
 
 var vaultEnvCmd = &cobra.Command{
-	Use:   "env --id <id> [--name KEY]",
+	Use:   "env --id <id> [--name KEY] [--format shell|json]",
 	Short: "Print KEY=<secret> to stdout (explicit confirmation required)",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		v, err := loadVault()
@@ -309,6 +309,15 @@ var vaultEnvCmd = &cobra.Command{
 		if keyName == "" {
 			keyName = "SECRET"
 		}
+
+		format := vaultEnvFormat
+		if format == "" {
+			format = "shell"
+		}
+		if format != "shell" && format != "json" {
+			return fmt.Errorf("invalid --format %q (want shell or json)", format)
+		}
+
 		fmt.Println("WARNING: This will print KEY=secret to stdout.")
 		fmt.Println("Risks: shell history, scrollback, logs, tmux capture, copy buffers.")
 		confirmed, err := confirmPrompt("Type the item label to confirm: ", rec.Label)
@@ -318,7 +327,30 @@ var vaultEnvCmd = &cobra.Command{
 		if !confirmed {
 			return fmt.Errorf("aborted")
 		}
-		fmt.Printf("%s=%s\n", keyName, rec.Secret)
+
+		if format == "json" {
+			out := struct {
+				ID     string `json:"id"`
+				Name   string `json:"name"`
+				Secret string `json:"secret"`
+				Kind   string `json:"kind"`
+				Label  string `json:"label"`
+			}{
+				ID:     rec.ID,
+				Name:   keyName,
+				Secret: rec.Secret,
+				Kind:   string(rec.Kind),
+				Label:  rec.Label,
+			}
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(out); err != nil {
+				return err
+			}
+		} else {
+			fmt.Printf("%s=%s\n", keyName, rec.Secret)
+		}
+
 		audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{
 			Event: "secret_env_exported",
 		})
@@ -515,6 +547,7 @@ var vaultDeleteCmd = &cobra.Command{
 
 // vaultEnvKeyName is the env var name for `vault env` output.
 var vaultEnvKeyName string
+var vaultEnvFormat string
 var keyLinkProvider string
 var vaultRepairMode string
 
@@ -694,6 +727,7 @@ func init() {
 	vaultAddCmd.Flags().IntVar(&vaultAddRotationDays, "rotation-days", 0, "Days until rotation reminder")
 
 	vaultEnvCmd.Flags().StringVar(&vaultEnvKeyName, "name", "", "Env var name (defaults to EnvVarHint or SECRET)")
+	vaultEnvCmd.Flags().StringVar(&vaultEnvFormat, "format", "shell", "output format: shell (default) or json")
 
 	vaultCmd.AddCommand(vaultAddCmd, vaultListCmd, vaultShowCmd, vaultCopyCmd, vaultRevealCmd, vaultEnvCmd, vaultRotateCmd, vaultRenameCmd, vaultArchiveCmd, vaultLinkCmd, vaultUnlinkCmd, vaultDeleteCmd)
 

@@ -73,6 +73,16 @@ func TestLoadLogoMask_DecodesPNGAsset(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultMask_HermesAgentAsset(t *testing.T) {
+	mask, ok := LoadDefaultMask("hermes")
+	if !ok {
+		t.Fatal("expected hermes logo asset to be available")
+	}
+	if mask.Width != 176 || mask.Height != 96 {
+		t.Fatalf("hermes mask size = %dx%d, want 176x96", mask.Width, mask.Height)
+	}
+}
+
 func TestEnhanceMaskDetail_DropsLowHazeKeepsStrokes(t *testing.T) {
 	cells := make([][]float64, 12)
 	for y := range cells {

@@ -477,6 +477,108 @@ func TestWizard_CatalogAppsShowDefaultProviderWorkflow(t *testing.T) {
 	}
 }
 
+func TestWizardProviderView_ScrollsSelectedProviderIntoView(t *testing.T) {
+	m := newTestModel(t)
+	m.height = 20
+	m.providers = provider.NewRegistry()
+	for i := 0; i < 24; i++ {
+		_ = m.providers.Add(provider.Provider{
+			Name:          fmt.Sprintf("Provider %02d", i),
+			Slug:          fmt.Sprintf("provider-%02d", i),
+			EnvVar:        fmt.Sprintf("PROVIDER_%02d_KEY", i),
+			BaseURL:       fmt.Sprintf("https://provider-%02d.example.com/v1", i),
+			Compatibility: provider.CompatOpenAI,
+			Protocol:      provider.ProtocolOpenAI,
+			Auth:          provider.AuthSpec{Type: "bearer", EnvVar: fmt.Sprintf("PROVIDER_%02d_KEY", i)},
+		})
+	}
+	m.wizard = wizardState{
+		active:   true,
+		step:     StepProvider,
+		selected: 18,
+		draft:    ProfileDraft{AppID: "aider"},
+		reg:      m.adapterRegistry,
+	}
+
+	v := stripANSIForTest(wizardProviderView(m.styles, m))
+	if !strings.Contains(v, "Provider 18") {
+		t.Fatalf("expected selected provider to be visible:\n%s", v)
+	}
+	if strings.Contains(v, "Provider 00") {
+		t.Fatalf("expected first provider to scroll out of view:\n%s", v)
+	}
+	if !strings.Contains(v, "Showing") {
+		t.Fatalf("expected scroll status in provider view:\n%s", v)
+	}
+}
+
+func TestProfilesView_ScrollsSelectedProfileIntoView(t *testing.T) {
+	m := newTestModel(t)
+	m.height = 20
+	m.profiles = profile.NewStore()
+	for i := 0; i < 24; i++ {
+		_ = m.profiles.Add(profile.Profile{
+			Name:         fmt.Sprintf("profile-%02d", i),
+			ProviderSlug: "openai",
+			KeyID:        fmt.Sprintf("key_%02d", i),
+		})
+	}
+	m.active = screenProfiles
+	m.selected[screenProfiles] = 18
+
+	v := stripANSIForTest(m.profilesView(m.styles))
+	if !strings.Contains(v, "profile-18") {
+		t.Fatalf("expected selected profile to be visible:\n%s", v)
+	}
+	if strings.Contains(v, "profile-00") {
+		t.Fatalf("expected first profile to scroll out of view:\n%s", v)
+	}
+	if !strings.Contains(v, "Showing") {
+		t.Fatalf("expected scroll status in profiles view:\n%s", v)
+	}
+}
+
+func TestLaunchView_ScrollsSelectedProfileIntoView(t *testing.T) {
+	m := newTestModel(t)
+	m.height = 24
+	m.unlocked = true
+	vault := &secret.Vault{Version: 1}
+	_ = vault.Add(secret.SecretRecord{
+		ID:           "key_1",
+		ProviderSlug: "openai",
+		Label:        "openai",
+		Secret:       "sk-test",
+		Policy:       secret.DefaultSecretPolicy(secret.SecretAPIKey),
+	})
+	m.vaultSession = &vaultSession{
+		vault: vault,
+		key:   [32]byte{},
+	}
+	m.profiles = profile.NewStore()
+	for i := 0; i < 18; i++ {
+		_ = m.profiles.Add(profile.Profile{
+			Name:         fmt.Sprintf("launch-%02d", i),
+			ProviderSlug: "openai",
+			KeyID:        "key_1",
+			Target:       profile.TargetConfig{App: "aider"},
+			Models:       profile.ModelSlots{Main: &profile.ModelRef{ID: "gpt-4o"}},
+		})
+	}
+	m.active = screenLaunch
+	m.selected[screenLaunch] = 14
+
+	v := stripANSIForTest(m.launchView(m.styles))
+	if !strings.Contains(v, "launch-14") {
+		t.Fatalf("expected selected launch profile to be visible:\n%s", v)
+	}
+	if strings.Contains(v, "launch-00") {
+		t.Fatalf("expected first launch profile to scroll out of view:\n%s", v)
+	}
+	if !strings.Contains(v, "Showing") {
+		t.Fatalf("expected scroll status in launch view:\n%s", v)
+	}
+}
+
 func TestWizard_CatalogAppSkipsProviderCredentialAndModelSteps(t *testing.T) {
 	m := newTestModel(t)
 	m.startWizard()
@@ -1162,6 +1264,22 @@ func TestMatrixLogoSilhouette_RendersRealSheetAsset(t *testing.T) {
 	panel := m.logoRevealPanel()
 	if countBrightCells(buf, panel) == 0 {
 		t.Fatal("expected real sheet-backed logo to render visible panel cells")
+	}
+}
+
+func TestMatrixLogoSilhouette_RendersHermesAgentAsset(t *testing.T) {
+	m := NewMatrix(120, 40)
+	m.SetLogo("hermes")
+
+	if m.focusLogo != "hermes" {
+		t.Fatalf("focusLogo = %q, want hermes", m.focusLogo)
+	}
+
+	buf := NewMatrixBuffer(120, 40)
+	m.Render(buf)
+	panel := m.logoRevealPanel()
+	if countBrightCells(buf, panel) == 0 {
+		t.Fatal("expected hermes-agent asset to render visible panel cells")
 	}
 }
 

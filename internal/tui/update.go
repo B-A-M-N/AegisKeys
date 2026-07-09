@@ -580,6 +580,13 @@ func (m *model) handleProvidersKey(key string) (tea.Model, tea.Cmd) {
 		}
 	case "s", "down", "j":
 		m.selected[screenProviders] = m.clampSelected(m.selected[screenProviders] + 1)
+	case "pgdown", "pagedown":
+		m.selected[screenProviders] = m.clampSelected(m.selected[screenProviders] + m.screenListRows(1))
+	case "pgup", "pageup":
+		m.selected[screenProviders] -= m.screenListRows(1)
+		if m.selected[screenProviders] < 0 {
+			m.selected[screenProviders] = 0
+		}
 	case "d", "right", "l", "enter":
 		return m.openDetail()
 	case "a", "left", "h":
@@ -693,6 +700,13 @@ func (m *model) handleKeysKey(key string) (tea.Model, tea.Cmd) {
 		}
 	case "s", "down", "j":
 		m.selected[screenKeys] = m.clampSelected(m.selected[screenKeys] + 1)
+	case "pgdown", "pagedown":
+		m.selected[screenKeys] = m.clampSelected(m.selected[screenKeys] + m.screenListRows(1))
+	case "pgup", "pageup":
+		m.selected[screenKeys] -= m.screenListRows(1)
+		if m.selected[screenKeys] < 0 {
+			m.selected[screenKeys] = 0
+		}
 	case "d", "right", "l", "enter":
 		return m.openDetail()
 	case "a", "left", "h":
@@ -722,6 +736,13 @@ func (m *model) handleProfilesKey(key string) (tea.Model, tea.Cmd) {
 		}
 	case "s", "down", "j":
 		m.selected[screenProfiles] = m.clampSelected(m.selected[screenProfiles] + 1)
+	case "pgdown", "pagedown":
+		m.selected[screenProfiles] = m.clampSelected(m.selected[screenProfiles] + m.screenListRows(2))
+	case "pgup", "pageup":
+		m.selected[screenProfiles] -= m.screenListRows(2)
+		if m.selected[screenProfiles] < 0 {
+			m.selected[screenProfiles] = 0
+		}
 	case "d", "right", "l", "enter":
 		return m.openDetail()
 	case "a", "left", "h":
@@ -1606,14 +1627,60 @@ func (m *model) handleModalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// keyFormField is a single field in the dynamic key-add form. Beyond the base
+// provider/label/secret/tags fields, providers may declare setup params
+// (e.g. Azure resource/deployment/api-version, Bedrock secret access key +
+// region) that are collected here too.
+type keyFormField struct {
+	kind   string // "provider" | "label" | "secret" | "setup" | "secretSetup" | "tags"
+	key    string // SetupParam.Key for setup/secretSetup
+	label  string
+	secret bool
+	def    string
+	ph     string
+}
+
+// keyFormFields builds the ordered field list for the current provider,
+// including any provider-declared setup params.
+func (m *model) keyFormFields() []keyFormField {
+	fields := []keyFormField{
+		{kind: "provider", label: "Provider"},
+		{kind: "label", label: "Label", ph: "e.g. main, backup"},
+		{kind: "secret", label: "Secret", secret: true, ph: "API key (hidden)"},
+	}
+	if p := m.providers.Find(m.keyForm.providerSlug); p != nil {
+		for _, sp := range p.Setup {
+			f := keyFormField{
+				kind:   "setup",
+				key:    sp.Key,
+				label:  sp.Label,
+				secret: sp.Secret,
+				def:    sp.Default,
+				ph:     sp.Label,
+			}
+			if sp.Secret {
+				f.kind = "secretSetup"
+			}
+			fields = append(fields, f)
+		}
+	}
+	fields = append(fields, keyFormField{kind: "tags", label: "Tags", ph: "comma-separated (optional)"})
+	return fields
+}
+
 // handleKeyAddKey processes keys while the key add modal is open.
-// Tab/Shift+Tab move between fields, Enter advances or saves on last field.
+// Tab/Shift+Tab move between fields, Enter advances or saves when ready.
 // When the provider field is active, up/down arrows select from existing providers.
 func (m *model) handleKeyAddKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := normalizedKey(k)
+	fields := m.keyFormFields()
+	if m.keyFormActive >= len(fields) {
+		m.keyFormActive = 0
+	}
+	cur := fields[m.keyFormActive]
 
 	// Provider selection mode: up/down to browse providers.
-	if m.keyFormActive == 0 && len(m.providers.Providers) > 0 {
+	if cur.kind == "provider" && len(m.providers.Providers) > 0 {
 		switch key {
 		case "up", "k":
 			if m.keyForm.providerIdx > 0 {
@@ -1642,9 +1709,9 @@ func (m *model) handleKeyAddKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "shift+tab":
 		return m.advanceKeyField(-1)
 	case "enter":
-		// Save as soon as required fields are present. Tags are optional, so
-		// requiring an extra Enter through that field makes the form feel dead.
-		if m.keyFormReady() || m.keyFormActive == 3 {
+		// Save once all required fields (including provider setup params) are
+		// present; otherwise advance to the next field.
+		if m.keyFormReady() {
 			return m.commitKeyAdd()
 		}
 		return m.advanceKeyField(1)
@@ -1658,21 +1725,59 @@ func (m *model) handleKeyAddKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 func (m *model) keyFormReady() bool {
 	m.syncKeyField()
-	return strings.TrimSpace(m.keyForm.providerSlug) != "" &&
-		strings.TrimSpace(m.keyForm.label) != "" &&
-		strings.TrimSpace(m.keyForm.secret) != ""
+	if strings.TrimSpace(m.keyForm.label) == "" ||
+		strings.TrimSpace(m.keyForm.secret) == "" {
+		return false
+	}
+	p := m.providers.Find(m.keyForm.providerSlug)
+	if p != nil {
+		for _, sp := range p.Setup {
+			if !sp.Required {
+				continue
+			}
+			if sp.Secret {
+				if m.keyForm.secretSetup == nil ||
+					strings.TrimSpace(m.keyForm.secretSetup[sp.Key]) == "" {
+					return false
+				}
+			} else {
+				v := ""
+				if m.keyForm.setup != nil {
+					v = m.keyForm.setup[sp.Key]
+				}
+				if strings.TrimSpace(v) == "" {
+					return false
+				}
+			}
+		}
+	}
+	return true
 }
 
 // syncKeyField copies the current input value into the active key form field.
 func (m *model) syncKeyField() {
 	val := m.addInput.Value()
-	switch m.keyFormActive {
-	case 1:
+	fields := m.keyFormFields()
+	if m.keyFormActive >= len(fields) {
+		return
+	}
+	switch fields[m.keyFormActive].kind {
+	case "label":
 		m.keyForm.label = val
-	case 2:
+	case "secret":
 		m.keyForm.secret = val
-	case 3:
+	case "tags":
 		m.keyForm.tags = val
+	case "setup":
+		if m.keyForm.setup == nil {
+			m.keyForm.setup = map[string]string{}
+		}
+		m.keyForm.setup[fields[m.keyFormActive].key] = val
+	case "secretSetup":
+		if m.keyForm.secretSetup == nil {
+			m.keyForm.secretSetup = map[string]string{}
+		}
+		m.keyForm.secretSetup[fields[m.keyFormActive].key] = val
 	}
 }
 
@@ -1680,17 +1785,21 @@ func (m *model) syncKeyField() {
 // updates the input to show that field's current value.
 func (m *model) advanceKeyField(dir int) (tea.Model, tea.Cmd) {
 	m.syncKeyField()
+	fields := m.keyFormFields()
 	m.keyFormActive += dir
 	if m.keyFormActive < 0 {
-		m.keyFormActive = 3
+		m.keyFormActive = len(fields) - 1
 	}
-	if m.keyFormActive > 3 {
+	if m.keyFormActive >= len(fields) {
 		m.keyFormActive = 0
 	}
-	// Load the new active field into the input.
+	if m.keyFormActive >= len(fields) {
+		m.keyFormActive = 0
+	}
+	cur := fields[m.keyFormActive]
 	var val string
-	switch m.keyFormActive {
-	case 0:
+	switch cur.kind {
+	case "provider":
 		// Provider selector: sync index to current slug.
 		m.addInput.Blur()
 		m.modalPrompt = "Provider (↑/↓ to select)"
@@ -1701,29 +1810,37 @@ func (m *model) advanceKeyField(dir int) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
-	case 1:
+	case "label":
 		val = m.keyForm.label
 		m.modalPrompt = "Label"
 		m.addInput.Placeholder = "e.g. main, backup"
-	case 2:
+	case "secret":
 		val = ""
 		m.modalPrompt = "Secret"
 		m.addInput.Placeholder = "API key (hidden)"
-	case 3:
+	case "setup":
+		val = m.keyForm.setup[cur.key]
+		m.modalPrompt = cur.label
+		m.addInput.Placeholder = cur.ph
+	case "secretSetup":
+		val = ""
+		m.modalPrompt = cur.label
+		m.addInput.Placeholder = "hidden"
+	case "tags":
 		val = m.keyForm.tags
 		m.modalPrompt = "Tags"
 		m.addInput.Placeholder = "comma-separated (optional)"
 	}
 	m.addInput.SetValue(val)
-	// Secret field uses password echo; every other field uses normal echo so a
+	// Secret fields use password echo; every other field uses normal echo so a
 	// buffered secret isn't inadvertently displayed.
-	if m.keyFormActive == 2 {
+	if cur.secret {
 		m.addInput.EchoMode = textinput.EchoPassword
 		m.addInput.EchoCharacter = '•'
 	} else {
 		m.addInput.EchoMode = textinput.EchoNormal
 	}
-	if m.keyFormActive != 0 {
+	if cur.kind != "provider" {
 		return m, m.addInput.Focus()
 	}
 	return m, nil
@@ -2105,6 +2222,36 @@ func (m *model) commitKeyAdd() (tea.Model, tea.Cmd) {
 		RevealPolicy: secret.RevealConfirm,
 		Policy:       secret.DefaultSecretPolicy(secret.SecretAPIKey),
 	}
+
+	// Persist non-secret provider setup values.
+	if len(f.setup) > 0 {
+		rec.Fields = map[string]string{}
+		for k, v := range f.setup {
+			if strings.TrimSpace(v) != "" {
+				rec.Fields[k] = v
+			}
+		}
+	}
+	// Persist secondary secret setup values (e.g. AWS secret access key).
+	if len(f.secretSetup) > 0 {
+		prov := m.providers.Find(rec.ProviderSlug)
+		if prov != nil {
+			for _, sp := range prov.Setup {
+				if !sp.Secret {
+					continue
+				}
+				v := f.secretSetup[sp.Key]
+				if v != "" {
+					rec.ExtraSecrets = append(rec.ExtraSecrets, secret.NamedSecret{
+						Key:    sp.Key,
+						Label:  sp.Label,
+						EnvVar: sp.EnvVar,
+						Secret: v,
+					})
+				}
+			}
+		}
+	}
 	if err := m.vaultSession.vault.Add(rec); err != nil {
 		m.statusMsg = "Key add failed: " + err.Error()
 		return m, nil
@@ -2199,15 +2346,7 @@ func (m *model) commitEdit() (tea.Model, tea.Cmd) {
 			p.KeyID = vals[2]
 			// If we resolved the adapter, update the target RenderMode.
 			if a, ok := m.adapterRegistry.Get(p.TargetApp()); ok {
-				c := a.Contract()
-				switch {
-				case c.CanPatchConfig && c.CanInjectSecrets:
-					p.Target.RenderMode = profile.RenderEnvConfig
-				case c.CanPatchConfig:
-					p.Target.RenderMode = profile.RenderConfigFile
-				case c.CanInjectSecrets:
-					p.Target.RenderMode = profile.RenderEnv
-				}
+				p.Target.RenderMode = adapter.RenderModeForContract(a.Contract())
 			}
 			_ = key
 			err = profile.SaveStore(config.ProfilesPath(m.configDir), m.profiles)
@@ -2260,6 +2399,24 @@ func (m *model) handleLaunchKey(key string) (tea.Model, tea.Cmd) {
 		case "s", "down", "j":
 			if m.selected[screenLaunch] < len(m.profiles.Profiles)-1 {
 				m.selected[screenLaunch]++
+			}
+		case "pgdown", "pagedown":
+			rows := m.screenListRows(1)
+			if rows > 8 {
+				rows = 8
+			}
+			m.selected[screenLaunch] += rows
+			if m.selected[screenLaunch] >= len(m.profiles.Profiles) {
+				m.selected[screenLaunch] = len(m.profiles.Profiles) - 1
+			}
+		case "pgup", "pageup":
+			rows := m.screenListRows(1)
+			if rows > 8 {
+				rows = 8
+			}
+			m.selected[screenLaunch] -= rows
+			if m.selected[screenLaunch] < 0 {
+				m.selected[screenLaunch] = 0
 			}
 		case "enter":
 			if len(m.profiles.Profiles) > 0 {

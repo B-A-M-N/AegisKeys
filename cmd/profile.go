@@ -125,7 +125,7 @@ var profileCreateCmd = &cobra.Command{
 		if !ok {
 			return fmt.Errorf("unknown target app %q (available: %s)", appID, strings.Join(adapterReg.AllIDs(), ", "))
 		}
-		p.Target.RenderMode = renderModeForContract(a.Contract())
+		p.Target.RenderMode = adapter.RenderModeForContract(a.Contract())
 		warnings, err := a.Validate(p, *prov)
 		if err != nil {
 			return fmt.Errorf("validation: %w", err)
@@ -303,19 +303,6 @@ func init() {
 
 	profileCmd.AddCommand(profileCreateCmd, profileListCmd, profileInspectCmd, profileDeleteCmd)
 	rootCmd.AddCommand(profileCmd)
-}
-
-func renderModeForContract(c adapter.AppSupportContract) profile.RenderMode {
-	switch {
-	case c.CanPatchConfig && c.CanInjectSecrets:
-		return profile.RenderEnvConfig
-	case c.CanPatchConfig:
-		return profile.RenderConfigFile
-	case c.CanInjectSecrets:
-		return profile.RenderEnv
-	default:
-		return profile.RenderEnv
-	}
 }
 
 // parseEnvFlag parses a "K=V,K2=V2" string into a map.

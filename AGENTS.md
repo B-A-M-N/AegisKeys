@@ -19,7 +19,7 @@ As of the latest build:
 - **Adapter system** (`internal/adapter`) — per-app renderers implementing `AppAdapter` contract interface with `AppSupportContract` metadata for 21 targets: Generic, Crush, Aider, Cline, Hermes, Qwen Code, Goose, Claude Code, Mistral Vibe, Codex, MiMo, OpenCode, OpenHands, Gemini CLI, Copilot CLI, Continue, Roo Code, Kilo Code, Cursor, Zed, IntelliJ.
 - **Provider protocol/model catalog** (`internal/provider`) — rich provider metadata with auth spec, endpoints, model catalog, capabilities, app hints.
 - **Proxy support** (`internal/proxy`) — auto-start local proxies (SOCKS5/HTTP) when apps need them.
-- **Model slots** — profiles support per-app model roles including feature-specific slots (compression/vision/web_extract for Hermes, inline_assistant/commit_message/thread_summary for Zed).
+- **Model slots** — profiles support per-app model roles including feature-specific slots (compression/vision/web_extract for Hermes; inline_assistant/subagent/commit_message/thread_summary/alternatives for Zed; catalog/fallback slots for catalog-driven CLIs).
 - **Config file rendering** with merge/backup/redaction semantics (`internal/adapter/filewriter.go`); TOML/XML policies refuse to overwrite existing user/project config until parser-backed merge/patch support exists.
 - **Hard boundary enforcement**: `ValidateLaunchStrategyForMode` is the mandatory gate. It calls `ValidateContract` to ensure adapter contracts are fully and honestly declared before any contract field is trusted, then checks raw-secret-leak, profile-env-override, and blocked-strategy invariants. `ResolveLaunchStrategy` calls it for `ResolveRun`; `ResolveLaunchStrategyCatalog` calls it for preview/run/save modes; `ResolveRunConfig` calls `ValidateLaunchStrategy` separately as a second gate; profile save validation and TUI launch both revalidate.
 - **Adapter contracts strengthened**: `ValidateContract` requires `ConfigFiles` when `CanPatchConfig=true`, `ValidationChecks` when `verified`, `DisplayName`, `DefaultCommand` when `CanLaunch=true`, `Fix` on high/critical hazards, and known enum values for support/confidence/surface/render-mode fields.
@@ -73,14 +73,27 @@ Profile (provider + key + models + target app)
 **Per-app model slots:**
 | App | Slots |
 |-----|-------|
+| Generic OpenAI-compatible | main |
 | Aider | main, weak, editor |
 | Cline | planner, actor |
 | Goose | main, fast |
-| Hermes | main, auxiliary |
-| Claude Code | main |
-| Qwen Code | main |
-| Crush | main |
+| Hermes | main, compression, vision, web_extract |
+| Claude Code | main, fast, planner, subagent |
+| Qwen Code | main, catalog, fallbacks |
+| Crush | main, catalog |
 | Mistral Vibe | main |
+| Codex | main, gpt54, gpt54mini, gpt53codex, gpt52codex, gpt52, gpt51codexmax, gpt51codexmini |
+| MiMo | main |
+| OpenCode | main |
+| OpenHands | main |
+| Gemini CLI | main |
+| Copilot CLI | main |
+| Continue | main |
+| Roo Code | main |
+| Kilo Code | main |
+| Cursor | none |
+| Zed | main, inline_assistant, subagent, commit_message, thread_summary, alternatives |
+| IntelliJ | main |
 
 **Per-app config files:**
 - Qwen Code → `~/.qwen/settings.json` (modelProviders)

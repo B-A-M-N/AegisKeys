@@ -564,6 +564,13 @@ type secretRecordStore struct {
 	BaseURLHint string `json:"base_url_hint,omitempty"`
 	DocsURL     string `json:"docs_url,omitempty"`
 
+	// Non-secret provider setup values (resource, deployment, region, ...).
+	Fields map[string]string `json:"fields,omitempty"`
+
+	// Additional secret components (e.g. AWS secret access key). Deliberately
+	// included in the encrypted store shape; never in the metadata export.
+	ExtraSecrets []namedSecretStore `json:"extra_secrets,omitempty"`
+
 	// Private note — encrypted with vault payload.
 	PrivateNote string `json:"private_note,omitempty"`
 
@@ -580,6 +587,16 @@ type secretRecordStore struct {
 	Exportable   bool         `json:"exportable,omitempty"`
 	Archived     bool         `json:"archived,omitempty"`
 	Policy       SecretPolicy `json:"policy,omitzero"`
+}
+
+// namedSecretStore is the on-disk shape for a secondary secret component. Like
+// secretRecordStore, it deliberately includes the raw secret inside the
+// encrypted envelope.
+type namedSecretStore struct {
+	Key    string `json:"key"`
+	Label  string `json:"label,omitempty"`
+	EnvVar string `json:"env_var"`
+	Secret string `json:"secret"`
 }
 
 func toStore(v *Vault) vaultStore {
@@ -599,7 +616,9 @@ func toStore(v *Vault) vaultStore {
 			HeaderHint:    k.HeaderHint,
 			BaseURLHint:   k.BaseURLHint,
 			DocsURL:       k.DocsURL,
+			Fields:        k.Fields,
 			PrivateNote:   k.PrivateNote,
+			ExtraSecrets:  namedSecretsToStore(k.ExtraSecrets),
 			CreatedAt:     k.CreatedAt,
 			UpdatedAt:     k.UpdatedAt,
 			LastUsedAt:    k.LastUsedAt,
@@ -629,6 +648,38 @@ func toStore(v *Vault) vaultStore {
 	return store
 }
 
+func namedSecretsToStore(in []NamedSecret) []namedSecretStore {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]namedSecretStore, 0, len(in))
+	for _, s := range in {
+		out = append(out, namedSecretStore{
+			Key:    s.Key,
+			Label:  s.Label,
+			EnvVar: s.EnvVar,
+			Secret: s.Secret,
+		})
+	}
+	return out
+}
+
+func namedSecretsFromStore(in []namedSecretStore) []NamedSecret {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]NamedSecret, 0, len(in))
+	for _, s := range in {
+		out = append(out, NamedSecret{
+			Key:    s.Key,
+			Label:  s.Label,
+			EnvVar: s.EnvVar,
+			Secret: s.Secret,
+		})
+	}
+	return out
+}
+
 func fromStore(store *vaultStore) *Vault {
 	v := &Vault{Version: store.Version}
 	for _, k := range store.Keys {
@@ -646,7 +697,9 @@ func fromStore(store *vaultStore) *Vault {
 			HeaderHint:    k.HeaderHint,
 			BaseURLHint:   k.BaseURLHint,
 			DocsURL:       k.DocsURL,
+			Fields:        k.Fields,
 			PrivateNote:   k.PrivateNote,
+			ExtraSecrets:  namedSecretsFromStore(k.ExtraSecrets),
 			CreatedAt:     k.CreatedAt,
 			UpdatedAt:     k.UpdatedAt,
 			LastUsedAt:    k.LastUsedAt,

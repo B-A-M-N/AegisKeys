@@ -161,7 +161,9 @@ func (m *model) providersView(s *Styles) string {
 	b.WriteString(s.Muted.Render(fmtRow("NAME", "SLUG", "ENV VAR")))
 	b.WriteString("\n")
 
-	for i, p := range m.providers.Providers {
+	start, end := visibleWindow(len(m.providers.Providers), m.selected[screenProviders], m.screenListRows(1))
+	for i := start; i < end; i++ {
+		p := m.providers.Providers[i]
 		marker := m.selMarker(s, i)
 		catalogBadge := ""
 		switch providerModelSource(p) {
@@ -183,6 +185,10 @@ func (m *model) providersView(s *Styles) string {
 		}
 		b.WriteString("\n")
 	}
+	if status := scrollStatus(start, end, len(m.providers.Providers)); status != "" {
+		b.WriteString(s.Muted.Render(status + " · ↑/↓ scroll · PgUp/PgDn jump"))
+		b.WriteString("\n")
+	}
 	b.WriteString("\n")
 	b.WriteString(s.Muted.Render("e edit  d inspect  m model catalog  / filter  x delete  z add"))
 	return b.String()
@@ -201,7 +207,9 @@ func (m *model) keysView(s *Styles) string {
 		b.WriteString(s.Muted.Render("No keys. Press `z` to add one."))
 		return b.String()
 	}
-	for i, k := range m.keys {
+	start, end := visibleWindow(len(m.keys), m.selected[screenKeys], m.screenListRows(1))
+	for i := start; i < end; i++ {
+		k := m.keys[i]
 		marker := m.selMarker(s, i)
 		rotBadge := ""
 		if m.keyNeedsRotation(k) {
@@ -216,6 +224,10 @@ func (m *model) keysView(s *Styles) string {
 				s.KeyMasked.Render(k.MaskedSecret),
 				s.Muted.Render(truncate(k.ProviderSlug, 16)), rotBadge))
 		}
+	}
+	if status := scrollStatus(start, end, len(m.keys)); status != "" {
+		b.WriteString("\n")
+		b.WriteString(s.Muted.Render(status + " · ↑/↓ scroll · PgUp/PgDn jump"))
 	}
 	return b.String()
 }
@@ -253,7 +265,9 @@ func (m *model) profilesView(s *Styles) string {
 		b.WriteString(s.Muted.Render("No profiles. Press `z` to create one."))
 		return b.String()
 	}
-	for i, p := range m.profiles.Profiles {
+	start, end := visibleWindow(len(m.profiles.Profiles), m.selected[screenProfiles], m.screenListRows(2))
+	for i := start; i < end; i++ {
+		p := m.profiles.Profiles[i]
 		marker := m.selMarker(s, i)
 		provName := p.ProviderSlug
 		if pr := m.providers.Find(p.ProviderSlug); pr != nil {
@@ -266,6 +280,10 @@ func (m *model) profilesView(s *Styles) string {
 			b.WriteString(fmt.Sprintf("%s %s\n", marker, s.KeyLabel.Render(truncate(p.Name, 24))))
 			b.WriteString(fmt.Sprintf("     %s  key: %s\n", s.Muted.Render(truncate(provName, 18)), s.KeyMasked.Render(p.KeyID)))
 		}
+	}
+	if status := scrollStatus(start, end, len(m.profiles.Profiles)); status != "" {
+		b.WriteString("\n")
+		b.WriteString(s.Muted.Render(status + " · ↑/↓ scroll · PgUp/PgDn jump"))
 	}
 	return b.String()
 }
@@ -288,7 +306,13 @@ func (m *model) launchView(s *Styles) string {
 	// Profile selection.
 	b.WriteString(s.SectionHeader.Render("Profile"))
 	b.WriteString("\n")
-	for i, p := range m.profiles.Profiles {
+	maxLaunchRows := m.screenListRows(1)
+	if maxLaunchRows > 8 {
+		maxLaunchRows = 8
+	}
+	start, end := visibleWindow(len(m.profiles.Profiles), m.selected[screenLaunch], maxLaunchRows)
+	for i := start; i < end; i++ {
+		p := m.profiles.Profiles[i]
 		marker := " "
 		style := s.KeyLabel
 		if i == m.selected[screenLaunch] && m.launchMode == launchSelectProfile {
@@ -305,6 +329,10 @@ func (m *model) launchView(s *Styles) string {
 			appInfo = " [" + p.TargetApp() + "]"
 		}
 		b.WriteString(fmt.Sprintf("%s %s%s%s\n", marker, style.Render(truncate(p.Name, 18)), s.Muted.Render(modelInfo), s.Muted.Render(appInfo)))
+	}
+	if status := scrollStatus(start, end, len(m.profiles.Profiles)); status != "" {
+		b.WriteString(s.Muted.Render(status + " · ↑/↓ scroll · PgUp/PgDn jump"))
+		b.WriteString("\n")
 	}
 
 	// Clamp the selected index: a profile delete can leave selected pointing

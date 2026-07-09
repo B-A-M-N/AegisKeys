@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -60,6 +61,55 @@ var keyAddCmd = &cobra.Command{
 			Label:        firstNonEmpty(keyAddLabel, keyAddProvider),
 			Secret:       sec,
 			Kind:         secret.SecretAPIKey,
+		}
+
+		// Collect provider-specific setup params beyond the primary secret
+		// (e.g. Azure resource/deployment/api-version, Bedrock secret access
+		// key + region). These are declared by the provider catalog.
+		prov := reg.Find(keyAddProvider)
+		if len(prov.Setup) > 0 {
+			rec.Fields = map[string]string{}
+			for _, sp := range prov.Setup {
+				if sp.Secret {
+					val, rerr := readPassword(sp.Label + ": ")
+					if rerr != nil {
+						return rerr
+					}
+					if val == "" && sp.Required {
+						return fmt.Errorf("setup value %q is required", sp.Label)
+					}
+					rec.ExtraSecrets = append(rec.ExtraSecrets, secret.NamedSecret{
+						Key:    sp.Key,
+						Label:  sp.Label,
+						EnvVar: sp.EnvVar,
+						Secret: val,
+					})
+					continue
+				}
+				prompt := sp.Label
+				if sp.Example != "" {
+					prompt += " (e.g. " + sp.Example + ")"
+				}
+				if sp.Default != "" {
+					prompt += " [" + sp.Default + "]"
+				}
+				prompt += ": "
+				fmt.Fprint(os.Stderr, prompt)
+				line, lerr := readLine(os.Stdin)
+				if lerr != nil {
+					return lerr
+				}
+				line = strings.TrimSpace(line)
+				if line == "" {
+					line = sp.Default
+				}
+				if line == "" && sp.Required {
+					return fmt.Errorf("setup value %q is required", sp.Label)
+				}
+				if line != "" {
+					rec.Fields[sp.Key] = line
+				}
+			}
 		}
 		id, err := secret.NewID()
 		if err != nil {

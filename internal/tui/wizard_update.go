@@ -291,6 +291,18 @@ func (m *model) handleWizardKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case "pgdown", "pagedown":
+		m.wizard.selected += m.wizardListRows()
+		m.wizardClampSelection()
+		return m, nil
+
+	case "pgup", "pageup":
+		m.wizard.selected -= m.wizardListRows()
+		if m.wizard.selected < 0 {
+			m.wizard.selected = 0
+		}
+		return m, nil
+
 	case "left":
 		if m.wizard.step == StepModels {
 			m.cycleWizardModel(-1)
@@ -641,15 +653,7 @@ func (m *model) wizardSave() (tea.Model, tea.Cmd) {
 
 	renderMode := profile.RenderEnv
 	if a, ok := m.adapterRegistry.Get(d.AppID); ok {
-		c := a.Contract()
-		switch {
-		case c.CanPatchConfig && c.CanInjectSecrets:
-			renderMode = profile.RenderEnvConfig
-		case c.CanPatchConfig:
-			renderMode = profile.RenderConfigFile
-		case c.CanInjectSecrets:
-			renderMode = profile.RenderEnv
-		}
+		renderMode = adapter.RenderModeForContract(a.Contract())
 	}
 
 	p := profile.Profile{

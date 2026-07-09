@@ -4,6 +4,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -13,14 +14,28 @@ import (
 	"aegiskeys/internal/provider"
 )
 
+// binaryName returns the name the user invoked this binary as, defaulting to
+// "aegiskeys" when invoked via `go run .` or an unrecognized path. This makes
+// `ak` and `aegiskeys` both show the correct name in help, completion, and
+// version output.
+func binaryName() string {
+	if len(os.Args) > 0 {
+		if base := filepath.Base(os.Args[0]); base != "" && base != "." {
+			return base
+		}
+	}
+	return "aegiskeys"
+}
+
 // version is the aegiskeys release version. Overridden at build time via
 // -ldflags "-X aegiskeys/cmd.version=...".
 var version = "dev"
 
-// rootCmd is the entry point. Running aegiskeys with no subcommand launches
-// the TUI (SPEC §17). All subcommands are attached below via init().
+// rootCmd is the entry point. Running aegiskeys (or its `ak` alias) with
+// no subcommand launches the TUI (SPEC §17). All subcommands are attached
+// below via init(). The Use field is set in Execute() from the binary name
+// so help/completion show the invoked name.
 var rootCmd = &cobra.Command{
-	Use:   "aegiskeys",
 	Short: "Secure local vault for API providers and secrets",
 	Long: "AegisKeys stores API provider metadata and encrypted secrets " +
 		"separately, then injects the correct credentials into coding " +
@@ -45,6 +60,7 @@ func init() {
 
 // Execute runs the root command. It is the sole entry point from main.
 func Execute() {
+	rootCmd.Use = binaryName()
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}

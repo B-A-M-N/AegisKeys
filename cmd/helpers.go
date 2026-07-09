@@ -23,9 +23,15 @@ func loadAppConfig() config.Config {
 	return cfg
 }
 
-func effectiveProfileName(flagValue string) (string, error) {
+func effectiveProfileName(flagValue string, args ...string) (string, error) {
 	if flagValue != "" {
 		return flagValue, nil
+	}
+	// Positional fallback: first arg is the profile name.
+	for _, a := range args {
+		if a != "" {
+			return a, nil
+		}
 	}
 	cfg := loadAppConfig()
 	if cfg.DefaultProfile != "" {
