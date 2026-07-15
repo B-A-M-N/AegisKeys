@@ -12,6 +12,7 @@ import (
 	"golang.org/x/term"
 
 	"aegiskeys/internal/config"
+	"aegiskeys/internal/keychain"
 	"aegiskeys/internal/secret"
 )
 
@@ -88,6 +89,9 @@ func readLine(r io.Reader) (string, error) {
 // It returns the unlocked Vault. The returned Vault contains raw secrets;
 // callers are responsible for masking before display.
 func loadVault() (*secret.Vault, error) {
+	if v, ok := loadVaultFromKeyring(); ok {
+		return v, nil
+	}
 	pw, err := promptPassword()
 	if err != nil {
 		return nil, err
@@ -97,6 +101,13 @@ func loadVault() (*secret.Vault, error) {
 
 // promptPassword reads the master password from the user (no echo).
 func promptPassword() (string, error) {
+	// A successful OS-keyring unlock replaces the password prompt for every
+	// existing CLI command. Commands still call openVault/saveVault, which use
+	// the same keyring key, so this does not create a password-less plaintext
+	// path or leave a key in an environment variable.
+	if _, ok := loadVaultFromKeyring(); ok {
+		return "", nil
+	}
 	return readPassword("Master password: ")
 }
 
@@ -105,19 +116,41 @@ func openVault(password string) (*secret.Vault, error) {
 	if err := requireInitialized(); err != nil {
 		return nil, err
 	}
-	if password == "" {
-		return nil, fmt.Errorf("master password is required")
-	}
 	vaultPath := config.VaultPath(resolvedConfigDir())
 	if !secret.VaultExists(vaultPath) {
 		return nil, fmt.Errorf("no vault found at %s\nRun `aegiskeys init` first", vaultPath)
+	}
+	if password == "" {
+		if v, ok := loadVaultFromKeyring(); ok {
+			return v, nil
+		}
+		return nil, fmt.Errorf("master password is required (OS keyring unlock is unavailable)")
 	}
 	return secret.LoadVault(vaultPath, password)
 }
 
 // saveVault encrypts and persists the vault with the given password.
 func saveVault(password string, v *secret.Vault) error {
+	if cfg := loadAppConfig(); cfg.KeyringEnabled {
+		if key, err := keychain.Load(resolvedConfigDir()); err == nil {
+			return secret.SaveVaultWithKey(config.VaultPath(resolvedConfigDir()), key, v)
+		}
+	}
 	return secret.SaveVault(config.VaultPath(resolvedConfigDir()), password, v)
+}
+
+// loadVaultFromKeyring is intentionally fail-closed and silent. Callers can
+// fall back to the password prompt for convenience-mode vaults, while a
+// keyring-required vault itself rejects password unlock with a clear error.
+func loadVaultFromKeyring() (*secret.Vault, bool) {
+	if cfg := loadAppConfig(); cfg.KeyringEnabled {
+		if key, err := keychain.Load(resolvedConfigDir()); err == nil {
+			if v, err := secret.LoadVaultByKey(config.VaultPath(resolvedConfigDir()), key); err == nil {
+				return v, true
+			}
+		}
+	}
+	return nil, false
 }
 
 // confirm prompts the user to type an exact token (case-insensitive) before

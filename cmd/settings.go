@@ -39,6 +39,7 @@ var settingsShowCmd = &cobra.Command{
 		printSetting("unsafe_allow_real_home_verify", strconv.FormatBool(cfg.UnsafeAllowRealHomeVerify))
 		printSetting("rotation_reminder_days", strconv.Itoa(cfg.RotationReminderDays))
 		printSetting("runtime_policy", cfg.RuntimePolicy)
+		printSetting("inherit_env", strings.Join(cfg.InheritEnv, ","))
 		return nil
 	},
 }
@@ -128,6 +129,23 @@ func applySetting(cfg *config.Config, key, value string) error {
 			return fmt.Errorf("%s must be one of: %s, %s, %s",
 				key, config.RuntimePolicyStrict, config.RuntimePolicyStandard, config.RuntimePolicyPermissive)
 		}
+	case "inherit_env":
+		// Comma-separated list of parent env var names to pass through to
+		// launched apps. An empty value clears the list.
+		if value == "" {
+			cfg.InheritEnv = nil
+			break
+		}
+		parts := strings.Split(value, ",")
+		clean := make([]string, 0, len(parts))
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				continue
+			}
+			clean = append(clean, p)
+		}
+		cfg.InheritEnv = clean
 	default:
 		return fmt.Errorf("unknown setting %q", key)
 	}

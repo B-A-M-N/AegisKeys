@@ -68,6 +68,7 @@ do not yet have full verified launch proof.
 |-----|-------------|--------------------|-------------|
 | Hermes | env + config | env injection + isolated `HERMES_HOME` | main, compression, vision, web_extract |
 | Cline CLI | env + config | env + `providers.json` merge | planner, actor |
+| Free Claude (`free-code`) | env | Anthropic Messages gateway | main, fast, planner, subagent |
 | Mistral Vibe | env + config | env + `config.toml` merge | main |
 | Codex CLI | full env | env injection | main plus configurable Codex model aliases |
 | MiMo | env + config | env injection + config patch | main |
@@ -100,6 +101,13 @@ based.
 
 Each app's contract declares its hazards (e.g. "Aider loads `.env` files that
 can shadow injected secrets"; "Zed macOS app bundle may not inherit env vars").
+
+`free-code` supports its own OpenAI Codex mode, but that is not a generic
+OpenAI-compatible gateway setting. For OpenCode Zen/Go profiles, AegisKeys
+uses the provider's Anthropic Messages endpoint when available and starts an
+ephemeral loopback Anthropic-to-OpenAI bridge for chat-completions-only models.
+The provider API key remains in the launcher process; Free Code receives only
+a local bridge credential.
 
 ## Design philosophy
 
@@ -313,9 +321,9 @@ Each adapter publishes an `AppSupportContract` declaring its support level,
 credential control, model slots, and hazards. The CLI and TUI both consume
 these contracts for validation, preview, and safe execution.
 
-File writes use atomic writes with backup-before-overwrite, JSON/YAML/JSONC
-merge support, and raw-secret redaction checks. TOML/XML writes refuse to
-overwrite existing user/project config until a real parser-backed merge exists.
+File writes use atomic writes with backup-before-overwrite, parser-backed
+JSON/YAML/JSONC/TOML merges, identity-aware XML patching, and raw-secret
+redaction checks.
 
 ## Configuration
 
@@ -373,9 +381,17 @@ launch, doctor, audit, settings, and help. Launch uses the same runner
 preparation path as the CLI and releases the terminal while the child process
 runs. See `TUI_GUIDE.md` for the full screen architecture.
 
+## OS keyring unlock
+
+Password-derived vaults can opt into OS-keyring convenience unlock with
+`aegiskeys keyring-enable`; the password remains a recovery method. For an
+explicit keyring-only vault, use `aegiskeys keyring-required --recovery-file
+<new-path>` and safeguard the new 0600 recovery file. `keyring-recover` can
+restore a lost OS-keyring entry from that recovery file without printing its
+contents. Use `keyring-status` to inspect the current mode.
+
 ## Limitations
 
-- No OS keyring integration (password-derived encryption only).
 - No per-profile policy rules yet (global runtime policy and secret-rotation reminders are now available in Settings).
 - GUI/IDE adapters (Zed, IntelliJ) are partial: they configure model slots and isolate config but rely on keychain/manual credential handoff.
 - `run` executes binaries directly, not via shell. Pipes (`|`) and built-ins (`export`) require explicit wrapping: `run --profile <x> -- sh -c "..."`.
@@ -384,10 +400,10 @@ runs. See `TUI_GUIDE.md` for the full screen architecture.
 ## Future work
 
 See `docs/future-work.md` for deferred stable/post-stable work. Highlights:
-OS keyring support, hardware-backed unlock, per-profile policy rules, provider
+hardware-backed unlock, per-profile policy rules, provider
 health checks, secure import/export, team mode, shell-plugin integration, full
 IDE adapter coverage, automatic temp-env cleanup, richer TUI themes, audit
-viewer filters, parser-backed existing user-scope TOML/XML merge, and signed
+viewer filters and signed
 release provenance.
 
 ## Tests

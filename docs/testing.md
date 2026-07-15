@@ -27,7 +27,7 @@ The test suite covers:
 - profile store behavior
 - adapter contract declarations and completeness
 - contract enforcement for manual/guided apps that must not receive secrets
-- file-write safety, including redaction, backup, merge/overwrite refusal,
+- file-write safety, including redaction, backup, parser-backed merges, and overwrite refusal where no safe policy exists,
   atomic writes, and symlink/scope preflight
 - per-app adapter rendering
 - secret-propagation adversarial checks across TUI views, adapter renders, and
@@ -35,6 +35,8 @@ The test suite covers:
 - CLI security contracts, including no raw secret argv flags and profile
   resolution validation
 - integration paths for runtime injection and child-process execution
+- hermetic TUI config-write tests; tests must use a temporary `HOME` and never
+  read, back up, or modify a developer's live application configuration
 
 ## Adapter Verification
 

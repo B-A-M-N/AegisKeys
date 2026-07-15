@@ -44,7 +44,7 @@ func ValidateResolution(
 		if key == nil {
 			return fmt.Errorf("profile %q: key %q not found in vault", p.Name, p.KeyID)
 		}
-		if key.ProviderSlug != "" && key.ProviderSlug != prov.Slug {
+		if !provider.CredentialCompatible(prov.Slug, key.ProviderSlug) {
 			return fmt.Errorf("profile %q: key %q belongs to provider %q, profile uses %q", p.Name, p.KeyID, key.ProviderSlug, prov.Slug)
 		}
 	}

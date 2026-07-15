@@ -147,7 +147,7 @@ var providerRefreshModelsCmd = &cobra.Command{
 			rec := v.Get(providerRefreshKeyID)
 			if rec == nil && providerRefreshKeyID == "" {
 				for i := range v.Keys {
-					if v.Keys[i].ProviderSlug == p.Slug {
+					if provider.CredentialCompatible(p.Slug, v.Keys[i].ProviderSlug) {
 						rec = &v.Keys[i]
 						break
 					}
@@ -156,7 +156,7 @@ var providerRefreshModelsCmd = &cobra.Command{
 			if rec == nil {
 				return fmt.Errorf("no key found for provider %s; pass --key <id>", p.Slug)
 			}
-			if rec.ProviderSlug != "" && rec.ProviderSlug != p.Slug {
+			if !provider.CredentialCompatible(p.Slug, rec.ProviderSlug) {
 				return fmt.Errorf("key %s belongs to %s, not %s", rec.ID, rec.ProviderSlug, p.Slug)
 			}
 			apiKey = rec.Secret

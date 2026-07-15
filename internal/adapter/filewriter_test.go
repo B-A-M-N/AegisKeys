@@ -138,7 +138,7 @@ func TestFileWriter_UnsupportedMergePolicy(t *testing.T) {
 	}
 }
 
-func TestApplyFileWrites_TOMLRefusesExistingUserConfig(t *testing.T) {
+func TestApplyFileWrites_TOMLMergesExistingUserConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(path, []byte("keep = true\n"), 0600); err != nil {
@@ -153,36 +153,36 @@ func TestApplyFileWrites_TOMLRefusesExistingUserConfig(t *testing.T) {
 		MergePolicy: MergeTOML,
 	}}, map[string]string{})
 
-	if err == nil || !strings.Contains(err.Error(), "refusing to overwrite") {
-		t.Fatalf("expected TOML overwrite refusal, got: %v", err)
+	if err != nil {
+		t.Fatalf("expected TOML merge, got: %v", err)
 	}
 	data, _ := os.ReadFile(path)
-	if strings.Contains(string(data), "replace") {
-		t.Fatalf("existing TOML config was overwritten: %s", data)
+	if !strings.Contains(string(data), "replace = true") || !strings.Contains(string(data), "keep = true") {
+		t.Fatalf("existing TOML config was not merged: %s", data)
 	}
 }
 
-func TestApplyFileWrites_XMLRefusesExistingUserConfig(t *testing.T) {
+func TestApplyFileWrites_XMLPatchesExistingUserConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.xml")
-	if err := os.WriteFile(path, []byte("<keep/>\n"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte("<config><setting name=\"keep\">yes</setting></config>\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 
 	err := ApplyFileWrites([]FileWrite{{
 		Path:        path,
 		Format:      "xml",
-		Content:     "<replace/>\n",
+		Content:     "<config><setting name=\"replace\">yes</setting></config>\n",
 		Scope:       ScopeUser,
 		MergePolicy: PatchXML,
 	}}, map[string]string{})
 
-	if err == nil || !strings.Contains(err.Error(), "refusing to overwrite") {
-		t.Fatalf("expected XML overwrite refusal, got: %v", err)
+	if err != nil {
+		t.Fatalf("expected XML patch, got: %v", err)
 	}
 	data, _ := os.ReadFile(path)
-	if strings.Contains(string(data), "replace") {
-		t.Fatalf("existing XML config was overwritten: %s", data)
+	if !strings.Contains(string(data), "name=\"keep\"") || !strings.Contains(string(data), "name=\"replace\"") {
+		t.Fatalf("existing XML config was not merged: %s", data)
 	}
 }
 
@@ -1026,6 +1026,34 @@ func TestOpenCodeAdapter_SetsOpenCodeEnv(t *testing.T) {
 	}
 	if strings.Contains(fw.Content, "sk-test") {
 		t.Errorf("raw secret leaked into opencode.json config")
+	}
+}
+
+func TestOpenCodeAdapter_UsesNativeZenProviderID(t *testing.T) {
+	a := OpenCodeAdapter{}
+	p := profile.Profile{Name: "zen", Target: profile.TargetConfig{App: "opencode"},
+		Models: profile.ModelSlots{Main: &profile.ModelRef{ID: "opencode/gpt-5.5"}}}
+	prov := provider.Provider{Slug: "zen", EnvVar: "OPENCODE_ZEN_API_KEY", BaseURL: "https://opencode.ai/zen/v1", Compatibility: provider.CompatOpenAI}
+	s, err := a.Render(p, prov, testAPIKey("sk-test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Plan.Files[0].Content; !strings.Contains(got, `"opencode": {`) || strings.Contains(got, `"zen": {`) {
+		t.Fatalf("Zen config must use OpenCode's native provider ID, got: %s", got)
+	}
+}
+
+func TestOpenCodeAdapter_RepairsLegacyGoModelPrefix(t *testing.T) {
+	a := OpenCodeAdapter{}
+	p := profile.Profile{Name: "go", Target: profile.TargetConfig{App: "opencode"},
+		Models: profile.ModelSlots{Main: &profile.ModelRef{ID: "opencode/kimi-k2.7-code"}}}
+	prov := provider.Provider{Slug: "opencode-go", EnvVar: "OPENCODE_GO_API_KEY", BaseURL: "https://opencode.ai/zen/go/v1", Compatibility: provider.CompatOpenAI}
+	s, err := a.Render(p, prov, testAPIKey("sk-test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Plan.Files[0].Content; !strings.Contains(got, `"model": "opencode-go/kimi-k2.7-code"`) {
+		t.Fatalf("Go config must use the Go model prefix, got: %s", got)
 	}
 }
 

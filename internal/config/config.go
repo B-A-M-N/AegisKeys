@@ -23,6 +23,15 @@ type Config struct {
 	EnableRiskyExport           bool      `json:"enable_risky_export"`
 	RotationReminderDays        int       `json:"rotation_reminder_days"` // days before flagging a key for rotation; 0 = disabled
 	RuntimePolicy               string    `json:"runtime_policy"`         // strict (default), standard, permissive
+	KeyringEnabled              bool      `json:"keyring_enabled,omitempty"`
+
+	// InheritEnv lists parent environment variable names that are passed
+	// through to launched profile apps on top of the strict allowlist. This
+	// is the sanctioned escape hatch for session/clipboard variables (e.g.
+	// TMUX, DISPLAY, WAYLAND_DISPLAY, XDG_SESSION_TYPE) that the sanitizing
+	// allowlist otherwise drops and that a launched app may need. Empty by
+	// default, which preserves the strict (minimal-env) launch behavior.
+	InheritEnv []string `json:"inherit_env,omitempty"`
 }
 
 // Runtime policy levels govern dangerous runtime operations (e.g. writing

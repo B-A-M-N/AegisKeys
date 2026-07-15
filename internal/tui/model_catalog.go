@@ -165,7 +165,7 @@ func (m *model) resolveProviderKeyID(slug string) string {
 	}
 	for i := range m.vaultSession.vault.Keys {
 		k := &m.vaultSession.vault.Keys[i]
-		if k.ProviderSlug == slug {
+		if provider.CredentialCompatible(slug, k.ProviderSlug) {
 			return k.ID
 		}
 	}

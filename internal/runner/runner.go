@@ -2,6 +2,8 @@ package runner
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"maps"
@@ -13,6 +15,7 @@ import (
 
 	"aegiskeys/internal/adapter"
 	"aegiskeys/internal/audit"
+	"aegiskeys/internal/bridge"
 	"aegiskeys/internal/config"
 	"aegiskeys/internal/proxy"
 	"aegiskeys/internal/sensitive"
@@ -314,6 +317,14 @@ type RunOptions struct {
 	ExactSecrets   []string
 	InheritStdio   bool
 	CleanupEnvFile bool
+
+	// ExtraInheritEnv lists parent environment variable names to pass through
+	// to the launched child in addition to the allowlisted base env. This is
+	// the sanctioned way to restore session/clipboard context (e.g. TMUX,
+	// DISPLAY) that the sanitizing allowlist otherwise drops. Requested vars
+	// override any allowlisted value of the same name and secret-looking names
+	// are refused.
+	ExtraInheritEnv []string
 }
 
 // PreparedCommand is a launch command plus cleanup work that must run after
@@ -366,6 +377,32 @@ func PrepareCommandWithCleanup(ctx context.Context, strategy *adapter.LaunchStra
 		}
 		cleanup = restore
 	}
+	// Start protocol bridges in-process so their upstream credential never
+	// crosses a process boundary. The child only receives the loopback URL.
+	if strategy.Bridge != nil {
+		bridgeToken, err := randomBridgeToken()
+		if err != nil {
+			_ = cleanup()
+			return nil, fmt.Errorf("create protocol bridge credential: %w", err)
+		}
+		b, err := bridge.Start(bridge.Config{TargetBaseURL: strategy.Bridge.TargetBaseURL, APIKey: strategy.Bridge.TargetAPIKey, ClientToken: bridgeToken})
+		if err != nil {
+			_ = cleanup()
+			return nil, fmt.Errorf("start protocol bridge: %w", err)
+		}
+		strategy.Plan.Env["ANTHROPIC_BASE_URL"] = b.URL()
+		strategy.Plan.Env["ANTHROPIC_API_KEY"] = bridgeToken
+		strategy.Plan.Env["ANTHROPIC_AUTH_TOKEN"] = bridgeToken
+		previousCleanup := cleanup
+		cleanup = func() error {
+			bridgeErr := b.Close()
+			restoreErr := previousCleanup()
+			if bridgeErr != nil {
+				return bridgeErr
+			}
+			return restoreErr
+		}
+	}
 
 	// Audit: launch_start (metadata only).
 	if opts.ConfigDir != "" {
@@ -380,6 +417,9 @@ func PrepareCommandWithCleanup(ctx context.Context, strategy *adapter.LaunchStra
 	cmd := exec.CommandContext(ctx, strategy.Plan.Command, append(strategy.Plan.Args, opts.ExtraArgs...)...)
 	allowlist := baseEnvForClass(appClassFromStrategy(strategy))
 	cmd.Env = BuildChildEnv(cleanBaseEnvWithAllowlist(os.Environ(), allowlist), strategy.Plan.Env)
+	if len(opts.ExtraInheritEnv) > 0 {
+		cmd.Env = appendInheritedEnv(cmd.Env, os.Environ(), opts.ExtraInheritEnv)
+	}
 	if opts.WorkingDir != "" {
 		cmd.Dir = opts.WorkingDir
 	}
@@ -389,6 +429,14 @@ func PrepareCommandWithCleanup(ctx context.Context, strategy *adapter.LaunchStra
 		cmd.Stderr = os.Stderr
 	}
 	return &PreparedCommand{Cmd: cmd, Cleanup: cleanup}, nil
+}
+
+func randomBridgeToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 // RunWithStrategy is the single entry point for strategy-driven CLI launches.
@@ -462,6 +510,47 @@ func BuildChildEnv(parent []string, injected map[string]string) []string {
 			// Empty value means "unset" — already blocked from parent above
 			continue
 		}
+		out = append(out, k+"="+v)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// appendInheritedEnv overlays a chosen subset of the parent environment onto
+// an already-built child env. Requested names override any allowlisted value
+// of the same name; secret-looking names are refused so this escape hatch
+// cannot be used to smuggle credentials into the child.
+func appendInheritedEnv(base []string, parent []string, names []string) []string {
+	want := make(map[string]bool, len(names))
+	for _, n := range names {
+		if n != "" {
+			want[n] = true
+		}
+	}
+	if len(want) == 0 {
+		return base
+	}
+
+	// Merge into a map so requested vars cleanly override base values.
+	merged := make(map[string]string, len(base))
+	for _, kv := range base {
+		k, v, ok := strings.Cut(kv, "=")
+		if ok {
+			merged[k] = v
+		}
+	}
+	for _, kv := range parent {
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok || !want[k] {
+			continue
+		}
+		if looksSecretName(k) {
+			continue
+		}
+		merged[k] = v
+	}
+	out := make([]string, 0, len(merged))
+	for k, v := range merged {
 		out = append(out, k+"="+v)
 	}
 	sort.Strings(out)

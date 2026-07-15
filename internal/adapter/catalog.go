@@ -44,7 +44,7 @@ func buildCatalogProviders(
 		// Find a usable key for this provider by scanning the vault.
 		var found *secret.SecretRecord
 		for i := range vault.Keys {
-			if vault.Keys[i].ProviderSlug == prov.Slug {
+			if provider.CredentialCompatible(prov.Slug, vault.Keys[i].ProviderSlug) {
 				// Verify the key allows launch injection.
 				if err := vault.Keys[i].AllowAccess(secret.AccessInjectEnv); err == nil {
 					found = &vault.Keys[i]

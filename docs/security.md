@@ -83,8 +83,9 @@ checks, and symlink/scope protection. Path expansion is restricted to
 `HOME`, `XDG_CONFIG_HOME`, and `TMPDIR`; arbitrary ambient environment
 expansion is not allowed.
 
-TOML/XML writes refuse to overwrite existing user/project config until
-parser-backed merge support exists.
+TOML uses parser-backed structural merging. XML uses an identity-aware
+structural patch (`id`, `name`, or `key` attributes), preserving unrelated
+existing nodes; root mismatches and malformed documents fail closed.
 
 ## TUI Memory Boundary
 

@@ -174,12 +174,23 @@ type ManualStep struct {
 
 // LaunchStrategy wraps a launch plan with app-level metadata.
 type LaunchStrategy struct {
-	Plan        LaunchPlan
-	Support     AppSupportContract
+	Plan    LaunchPlan
+	Support AppSupportContract
+	// Bridge requests an in-process protocol bridge before the child starts.
+	// It is never rendered into preview/config files; TargetAPIKey stays in
+	// process memory and is supplied only to the upstream HTTP request.
+	Bridge      *ProtocolBridge
 	ManualSteps []ManualStep
 	Hazards     []Hazard
 	Blocked     bool
 	BlockReason string
+}
+
+// ProtocolBridge describes the one supported wire conversion: Anthropic
+// Messages client requests to an OpenAI-compatible Chat Completions provider.
+type ProtocolBridge struct {
+	TargetBaseURL string
+	TargetAPIKey  string
 }
 
 // --- File-write safety ---

@@ -605,6 +605,7 @@ func (m *model) settingsView(s *Styles) string {
 		rotation + "  (←/→)",
 		cfg.RuntimePolicy + "  (←/→)",
 		strings.TrimPrefix(config.ConfigPath(m.configDir), m.configDir+"/"),
+		inheritEnvDisplay(cfg.InheritEnv),
 	}
 	for i, key := range settingKeys {
 		marker := m.selMarker(s, i)
@@ -857,4 +858,13 @@ func (m *model) renderDeleteModal() string {
 		return "Cannot delete:\n\n" + m.deleteBlockReason + "\n\nEsc to close"
 	}
 	return "Are you sure? This cannot be undone."
+}
+
+// inheritEnvDisplay renders the Inherit env setting value for the Settings
+// screen: the comma-joined list of passthrough var names, or a hint when empty.
+func inheritEnvDisplay(names []string) string {
+	if len(names) == 0 {
+		return "(empty)  CLI: settings set inherit_env TMUX,DISPLAY"
+	}
+	return strings.Join(names, ",") + "  (CLI)"
 }

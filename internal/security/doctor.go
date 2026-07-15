@@ -587,7 +587,7 @@ func RunDoctorUnlocked(configDir string, vault *secret.Vault, store *profile.Sto
 			})
 			continue
 		}
-		if rec.ProviderSlug != "" && rec.ProviderSlug != p.ProviderSlug {
+		if rec.ProviderSlug != "" && !provider.CredentialCompatible(p.ProviderSlug, rec.ProviderSlug) {
 			results = append(results, CheckResult{
 				Severity: SeverityWarn,
 				Message:  fmt.Sprintf("profile %q: key provider %q does not match profile provider %q", p.Name, rec.ProviderSlug, p.ProviderSlug),

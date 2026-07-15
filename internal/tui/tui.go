@@ -269,6 +269,8 @@ type model struct {
 	scratchTitleInput   textinput.Model
 	scratchBodyInput    textarea.Model
 	scratchDirty        bool
+	scratchRevision     uint64
+	scratchSaveInFlight bool
 	scratchBodyCursor   int
 	scratchSelecting    bool
 	scratchSelectAnchor int

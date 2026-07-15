@@ -3,7 +3,6 @@ package tui
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 
 	"charm.land/bubbles/v2/textinput"
@@ -274,7 +273,7 @@ var appGroups = []appGroup{
 	{
 		title:       "FULL ENV / CLI",
 		description: "AegisKeys injects secrets and launches",
-		adapterIDs:  []string{"aider", "hermes", "crush", "qwen", "claude", "cline", "goose", "vibe", "codex", "mimo", "opencode", "openhands", "gemini", "copilot", "continue"},
+		adapterIDs:  []string{"aider", "hermes", "crush", "qwen", "claude", "free-claude", "cline", "goose", "vibe", "codex", "mimo", "opencode", "openhands", "gemini", "copilot", "continue"},
 	},
 	{
 		title:       "ADVANCED GUI / IDE",
@@ -337,8 +336,7 @@ func isCommandAvailable(name string) bool {
 	if name == "" {
 		return false
 	}
-	_, err := exec.LookPath(name)
-	return err == nil
+	return adapter.FindBinary(name) != ""
 }
 
 // isAppInstalled checks if an app is installed by ID.
@@ -492,7 +490,7 @@ func (m *model) wizardFirstInjectableKeyID(providerSlug string) string {
 	if m.vaultSession != nil && m.vaultSession.vault != nil {
 		for i := range m.vaultSession.vault.Keys {
 			rec := &m.vaultSession.vault.Keys[i]
-			if rec.ProviderSlug == providerSlug && rec.AllowAccess(secret.AccessInjectEnv) == nil {
+			if provider.CredentialCompatible(providerSlug, rec.ProviderSlug) && rec.AllowAccess(secret.AccessInjectEnv) == nil {
 				return rec.ID
 			}
 		}
@@ -545,7 +543,7 @@ func (m *model) wizardVisibleKeys() []secret.MaskedKeyItem {
 	}
 	out := []secret.MaskedKeyItem{}
 	for _, k := range m.keys {
-		if k.ProviderSlug == m.wizard.draft.ProviderSlug {
+		if provider.CredentialCompatible(m.wizard.draft.ProviderSlug, k.ProviderSlug) {
 			out = append(out, k)
 		}
 	}

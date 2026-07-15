@@ -35,6 +35,9 @@ func LoadVaultWithKey(path, password string) (*Vault, [32]byte, error) {
 	if err := ValidateEnvelope(&env); err != nil {
 		return nil, zero, fmt.Errorf("invalid vault envelope: %w", err)
 	}
+	if env.KeyMode == "keyring" {
+		return nil, zero, errors.New("vault requires its OS keyring or recovery key; password unlock is disabled")
+	}
 	key, err := DeriveKeyWithParams(password, env.Salt, env.KDFParams)
 	if err != nil {
 		return nil, zero, fmt.Errorf("derive key: %w", err)
@@ -55,6 +58,12 @@ func LoadVaultWithKey(path, password string) (*Vault, [32]byte, error) {
 	return v, key, nil
 }
 
+// LoadVaultByKey opens a vault using a previously derived key. The key is
+// intended only for an OS-protected keyring entry created by explicit opt-in.
+func LoadVaultByKey(path string, key [32]byte) (*Vault, error) {
+	return loadVaultByKey(path, key)
+}
+
 // LoadVault loads and decrypts the vault at path using the given password.
 // It fails closed on wrong password or malformed data.
 func LoadVault(path, password string) (*Vault, error) {
@@ -72,6 +81,9 @@ func LoadVault(path, password string) (*Vault, error) {
 	// Validate envelope metadata before KDF so hostile params are rejected.
 	if err := ValidateEnvelope(&env); err != nil {
 		return nil, fmt.Errorf("invalid vault envelope: %w", err)
+	}
+	if env.KeyMode == "keyring" {
+		return nil, errors.New("vault requires its OS keyring or recovery key; password unlock is disabled")
 	}
 	// Use envelope's stored KDF params, falling back to defaults for old envelopes.
 	key, err := DeriveKeyWithParams(password, env.Salt, env.KDFParams)
@@ -195,6 +207,27 @@ func mergeOnDiskKeys(working *Vault, onDisk *Vault) *Vault {
 	return merged
 }
 
+// CloneVault returns an independent in-memory copy suitable for an
+// asynchronous save. It intentionally uses the vault's private safe-store
+// representation so new secret fields cannot accidentally be omitted from a
+// hand-written copy routine.
+func CloneVault(v *Vault) (*Vault, error) {
+	if v == nil {
+		return nil, errors.New("nil vault")
+	}
+	raw, err := json.Marshal(toStore(v))
+	if err != nil {
+		return nil, fmt.Errorf("clone vault: %w", err)
+	}
+	var store vaultStore
+	if err := json.Unmarshal(raw, &store); err != nil {
+		return nil, fmt.Errorf("clone vault: %w", err)
+	}
+	clone := fromStore(&store)
+	migrateVaultRecords(clone)
+	return clone, nil
+}
+
 // SaveVault serializes the vault (including secrets), encrypts it with
 // password, and writes it to path atomically with 0600 permissions.
 func SaveVault(path, password string, v *Vault) error {
@@ -267,20 +300,33 @@ func SaveVaultWithKey(path string, key [32]byte, v *Vault) error {
 		if err != nil {
 			return fmt.Errorf("marshal vault: %w", err)
 		}
-		// Reuse existing salt if the vault file already exists, so the same
-		// derived key remains valid after save.
+		// Reuse the existing envelope metadata. This is essential for both
+		// password-derived vaults (the key is tied to its salt/KDF params) and
+		// keyring-required vaults (the envelope must never be downgraded back
+		// to a password KDF merely because its contents were edited).
 		salt := ""
 		var existingParams KDFParams
+		var existingMode, existingKDF string
 		if raw, err := os.ReadFile(path); err == nil {
 			var existing VaultEnvelope
 			if err := json.Unmarshal(raw, &existing); err == nil {
 				salt = existing.Salt
 				existingParams = existing.KDFParams
+				existingMode = existing.KeyMode
+				existingKDF = existing.KDF
 			}
 		}
 		env, err := SealWithKey(key, string(plaintext), salt, existingParams)
 		if err != nil {
 			return fmt.Errorf("encrypt vault: %w", err)
+		}
+		if existingMode == "keyring" {
+			env.KeyMode = "keyring"
+			env.KDF = "keyring"
+			env.KDFParams = KDFParams{}
+		} else if existingKDF != "" {
+			env.KeyMode = existingMode
+			env.KDF = existingKDF
 		}
 		data, err := json.MarshalIndent(env, "", "  ")
 		if err != nil {
@@ -311,10 +357,80 @@ func InitVault(path, password string) error {
 	return SaveVault(path, password, &Vault{Version: 1})
 }
 
+// MigrateToKeyringRequiredWithKey atomically converts a password vault to a
+// vault that can only be opened with key. Store key in the OS keyring before
+// calling this function, and retain a recovery copy before removing password
+// unlock. It fails without changing the vault if password verification fails.
+func MigrateToKeyringRequiredWithKey(path, password string, key [32]byte) error {
+	if key == ([32]byte{}) {
+		return errors.New("keyring vault key must not be empty")
+	}
+	return withVaultWriteLock(path, func() error {
+		// Authenticate and serialize under the write lock so concurrent edits
+		// cannot be replaced by a stale pre-migration snapshot.
+		v, _, err := LoadVaultWithKey(path, password)
+		if err != nil {
+			return fmt.Errorf("refusing keyring migration: %w", err)
+		}
+		plain, err := json.MarshalIndent(toStore(v), "", "  ")
+		if err != nil {
+			return err
+		}
+		env, err := SealKeyringEnvelope(key, string(plain))
+		if err != nil {
+			return err
+		}
+		data, err := json.MarshalIndent(env, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := fsutil.AtomicWriteFile(path, data); err != nil {
+			return err
+		}
+		return os.Chmod(path, 0600)
+	})
+}
+
+// MigrateToKeyringRequired is retained for API compatibility. New callers
+// should create/store a key first, then call MigrateToKeyringRequiredWithKey
+// so a failed keyring write cannot strand the vault.
+func MigrateToKeyringRequired(path, password string) ([32]byte, error) {
+	var zero [32]byte
+	key, err := RandomVaultKey()
+	if err != nil {
+		return zero, err
+	}
+	if err := MigrateToKeyringRequiredWithKey(path, password, key); err != nil {
+		return zero, err
+	}
+	return key, nil
+}
+
 // VaultExists reports whether an encrypted vault file is present at path.
 func VaultExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// VaultKeyMode returns the vault unlock mode without decrypting its contents.
+// It is metadata only: "password" for legacy/password-derived envelopes and
+// "keyring" for a keyring-required vault.
+func VaultKeyMode(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read vault: %w", err)
+	}
+	var env VaultEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return "", fmt.Errorf("parse vault envelope: %w", err)
+	}
+	if err := ValidateEnvelope(&env); err != nil {
+		return "", fmt.Errorf("invalid vault envelope: %w", err)
+	}
+	if env.KeyMode == "keyring" {
+		return "keyring", nil
+	}
+	return "password", nil
 }
 
 // Add appends a new secret record, generating an ID and timestamps if unset.

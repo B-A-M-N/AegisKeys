@@ -136,6 +136,61 @@ func TestSaveVaultRefusesWrongPasswordOverwrite(t *testing.T) {
 	}
 }
 
+func TestMigrateToKeyringRequiredDisablesPasswordUnlock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "vault.enc")
+	const password = "test-password-keyring"
+	if err := InitVault(path, password); err != nil {
+		t.Fatal(err)
+	}
+	key, err := RandomVaultKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateToKeyringRequiredWithKey(path, password, key); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadVault(path, password); err == nil {
+		t.Fatal("password unlocked keyring-required vault")
+	}
+	if _, err := LoadVaultByKey(path, key); err != nil {
+		t.Fatalf("keyring key did not unlock vault: %v", err)
+	}
+}
+
+func TestSaveVaultWithKeyPreservesKeyringMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "vault.enc")
+	const password = "test-password-keyring"
+	if err := InitVault(path, password); err != nil {
+		t.Fatal(err)
+	}
+	key, err := RandomVaultKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := MigrateToKeyringRequiredWithKey(path, password, key); err != nil {
+		t.Fatal(err)
+	}
+	v, err := LoadVaultByKey(path, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Add(SecretRecord{ID: "key_after_migration", Secret: "sk-test", ProviderSlug: "openai"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveVaultWithKey(path, key, v); err != nil {
+		t.Fatal(err)
+	}
+	if mode, err := VaultKeyMode(path); err != nil || mode != "keyring" {
+		t.Fatalf("vault mode after save = %q, %v; want keyring", mode, err)
+	}
+	if _, err := LoadVault(path, password); err == nil {
+		t.Fatal("password unlocked keyring-required vault after save")
+	}
+	if got, err := LoadVaultByKey(path, key); err != nil || got.Get("key_after_migration") == nil {
+		t.Fatalf("keyring vault not readable after save: %v", err)
+	}
+}
+
 // TestDeriveKey_KnownSalt verifies DeriveKey produces consistent output.
 func TestDeriveKey_KnownSalt(t *testing.T) {
 	salt := "c29tZS1zYWx0LTEyMw==" // base64 "some-salt-123"

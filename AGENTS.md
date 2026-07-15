@@ -20,7 +20,7 @@ As of the latest build:
 - **Provider protocol/model catalog** (`internal/provider`) — rich provider metadata with auth spec, endpoints, model catalog, capabilities, app hints.
 - **Proxy support** (`internal/proxy`) — auto-start local proxies (SOCKS5/HTTP) when apps need them.
 - **Model slots** — profiles support per-app model roles including feature-specific slots (compression/vision/web_extract for Hermes; inline_assistant/subagent/commit_message/thread_summary/alternatives for Zed; catalog/fallback slots for catalog-driven CLIs).
-- **Config file rendering** with merge/backup/redaction semantics (`internal/adapter/filewriter.go`); TOML/XML policies refuse to overwrite existing user/project config until parser-backed merge/patch support exists.
+- **Config file rendering** with merge/backup/redaction semantics (`internal/adapter/filewriter.go`); JSON/JSONC/YAML/TOML use parser-backed merges and XML uses an identity-aware structural patch, preserving unrelated entries in existing user/project config.
 - **Hard boundary enforcement**: `ValidateLaunchStrategyForMode` is the mandatory gate. It calls `ValidateContract` to ensure adapter contracts are fully and honestly declared before any contract field is trusted, then checks raw-secret-leak, profile-env-override, and blocked-strategy invariants. `ResolveLaunchStrategy` calls it for `ResolveRun`; `ResolveLaunchStrategyCatalog` calls it for preview/run/save modes; `ResolveRunConfig` calls `ValidateLaunchStrategy` separately as a second gate; profile save validation and TUI launch both revalidate.
 - **Adapter contracts strengthened**: `ValidateContract` requires `ConfigFiles` when `CanPatchConfig=true`, `ValidationChecks` when `verified`, `DisplayName`, `DefaultCommand` when `CanLaunch=true`, `Fix` on high/critical hazards, and known enum values for support/confidence/surface/render-mode fields.
 - **Adapter confidence truthfulness**: `manual_proof` is distinct from `verified`; Generic, Crush, Aider, Qwen Code, Goose, and Claude Code are `verified` with proof JSON under `testdata/adapter_proofs/`, render goldens under `testdata/adapter_golden/`, and all four automated gates true. Catalog adapters (Crush, MiMo, OpenCode) have catalog golden snapshots and config no-secret checks.
@@ -44,6 +44,7 @@ As of the latest build:
 | **Secrets** (API keys) | `internal/secret` | `vault.enc` (Argon2id → AES-256-GCM) | Yes |
 | **Profiles** (binding) | `internal/profile` | `profiles.json` | No (refs key id) |
 | **Adapter** (rendering) | `internal/adapter` | — | No |
+| **Protocol bridge** (Anthropic↔OpenAI) | `internal/bridge` | — | In-memory only |
 | **Proxy** (tunneling) | `internal/proxy` | — | No |
 | **Logo masks** (TUI visuals) | `internal/logo` | `assets/logos/*.png` | No |
 | **Runner** (execution) | `internal/runner` | — | No |
@@ -219,8 +220,6 @@ These are the project's core contracts (SPEC §6, §10). Violating any of them i
 
 These are now implemented; remaining work is polish and future features:
 
-- Add OS keyring integration for vault-key storage (SPEC §8 optional).
-- Add parser-backed TOML/XML merge/patch support for non-destructive existing config updates.
 - Add platform-specific doctor checks such as shell history scanning.
 - Maintain `docs/future-work.md` as stable/post-stable deferred work changes.
 - Extend VHS demo coverage as new TUI flows stabilize.

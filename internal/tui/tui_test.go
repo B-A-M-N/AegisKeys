@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 
@@ -1566,6 +1567,58 @@ func TestKeyRename_TUICommit(t *testing.T) {
 	}
 }
 
+func TestScratchSaveTargetsNewPageInsteadOfPreviousSelection(t *testing.T) {
+	m := newTestModel(t)
+	m.scratchTitleInput = textinput.New()
+	m.scratchBodyInput = textarea.New()
+	m.vaultSession = &vaultSession{vault: &secret.Vault{ScratchPads: []secret.ScratchPadRecord{
+		{ID: "old", Title: "Old", Body: "keep"},
+	}}, key: [32]byte{}}
+	m.active = screenScratch
+	m.scratchListSelected = 0
+	m.newScratchPad()
+	newID := m.scratchEditingID
+	m.scratchTitleInput.SetValue("New")
+	m.scratchBodyInput.SetValue("new content")
+	m.saveScratchPad()
+	old := m.vaultSession.vault.GetScratchPad("old")
+	if old == nil || old.Body != "keep" {
+		t.Fatalf("existing page was overwritten: %#v", old)
+	}
+	if len(m.vaultSession.vault.ScratchPads) != 2 {
+		t.Fatalf("scratchpad count = %d, want 2", len(m.vaultSession.vault.ScratchPads))
+	}
+	newPage := m.vaultSession.vault.GetScratchPad(newID)
+	if newPage == nil || newPage.Title != "New" || newPage.Body != "new content" {
+		t.Fatalf("new page did not receive editor contents: %#v", newPage)
+	}
+}
+
+func TestScratchSaveKeepsEditorOpenUntilEncryptedWriteSucceeds(t *testing.T) {
+	m := newTestModel(t)
+	m.scratchTitleInput = textinput.New()
+	m.scratchBodyInput = textarea.New()
+	m.vaultSession = &vaultSession{vault: &secret.Vault{ScratchPads: []secret.ScratchPadRecord{{ID: "note", Title: "Old"}}}}
+	m.scratchEditing = true
+	m.scratchEditingID = "note"
+	m.scratchTitleInput.SetValue("New")
+	m.scratchBodyInput.SetValue("persisted")
+
+	cmd := m.saveScratchPad()
+	if !m.scratchEditing {
+		t.Fatal("editor closed before encrypted save completed")
+	}
+	msg := cmd()
+	updated, _ := m.Update(msg)
+	m = updated.(*model)
+	if m.scratchEditing {
+		t.Fatal("editor remained open after successful encrypted save")
+	}
+	if got := m.vaultSession.vault.GetScratchPad("note").Body; got != "persisted" {
+		t.Fatalf("scratch body = %q, want persisted", got)
+	}
+}
+
 // TestTUI_LaunchPrepared_ExecutesCleanup verifies the full async launch flow:
 // prepareTUILaunch resolves the strategy, produces a non-nil cleanup, and the
 // cleanup function actually restores the original config file state. This is a
@@ -1628,6 +1681,10 @@ func TestTUI_LaunchPrepared_ExecutesCleanup(t *testing.T) {
 // A config-file profile must produce a non-nil cleanup handle in the
 // launchPreparedMsg so runtime config overlays are restored after exit.
 func TestTUI_LaunchPrepared_HasCleanup(t *testing.T) {
+	// The Qwen adapter writes under $HOME.  Keep this integration test
+	// hermetic: it must never inspect, back up, or modify a developer's real
+	// ~/.qwen configuration.
+	t.Setenv("HOME", t.TempDir())
 	m := newTestModel(t)
 	m.unlocked = true
 	m.active = screenLaunch

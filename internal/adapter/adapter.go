@@ -95,7 +95,7 @@ func NewRegistry() *Registry {
 	r := &Registry{
 		adapters: make(map[string]AppAdapter),
 		order: []string{
-			"generic", "crush", "aider", "cline", "hermes", "qwen", "claude", "vibe", "goose",
+			"generic", "crush", "aider", "cline", "hermes", "qwen", "claude", "free-claude", "vibe", "goose",
 			"codex", "mimo", "opencode", "openhands", "gemini", "copilot", "continue",
 			"zed", "intellij",
 			"roo", "kilo", "cursor",
@@ -109,6 +109,7 @@ func NewRegistry() *Registry {
 		HermesAdapter{},
 		QwenCodeAdapter{},
 		ClaudeCodeAdapter{},
+		FreeClaudeAdapter{},
 		MistralVibeAdapter{},
 		GooseAdapter{},
 		CodexAdapter{},
@@ -261,7 +262,7 @@ func ResolveLaunchStrategyForMode(
 	mode ResolveMode,
 ) (*LaunchStrategy, error) {
 	// Validate key/provider binding when a key is present.
-	if key != nil && key.ProviderSlug != "" && key.ProviderSlug != prov.Slug {
+	if key != nil && !provider.CredentialCompatible(prov.Slug, key.ProviderSlug) {
 		return nil, fmt.Errorf("key %s belongs to provider %s, not %s", key.ID, key.ProviderSlug, prov.Slug)
 	}
 	// Require key only when the provider needs one.

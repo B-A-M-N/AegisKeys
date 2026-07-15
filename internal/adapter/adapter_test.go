@@ -922,6 +922,34 @@ func TestClaudeCodeAdapter(t *testing.T) {
 	}
 }
 
+func TestClaudeCodeAdapter_LongCatUsesAnthropicEndpoint(t *testing.T) {
+	a := ClaudeCodeAdapter{}
+	p := profile.Profile{Name: "longcat", ProviderSlug: "longcat", Target: profile.TargetConfig{App: "claude"},
+		Models: profile.ModelSlots{Main: &profile.ModelRef{ID: "LongCat-2.0"}}}
+	prov := provider.Provider{Name: "LongCat", Slug: "longcat", EnvVar: "LONGCAT_API_KEY",
+		BaseURL: "https://api.longcat.chat/openai", Compatibility: provider.CompatOpenAI}
+	strategy, err := a.Render(p, prov, testAPIKey("longcat-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strategy.Plan.Env["ANTHROPIC_BASE_URL"], "https://api.longcat.chat/anthropic"; got != want {
+		t.Fatalf("ANTHROPIC_BASE_URL = %q, want %q", got, want)
+	}
+}
+
+func TestFreeClaudeAdapter_RepairsLegacyGoModelPrefix(t *testing.T) {
+	a := FreeClaudeAdapter{}
+	p := profile.Profile{Name: "go", Target: profile.TargetConfig{Command: "/bin/true"}, Models: profile.ModelSlots{Main: &profile.ModelRef{ID: "opencode/minimax-m3"}}}
+	prov := provider.Provider{Slug: "opencode-go", Compatibility: provider.CompatOpenAI}
+	strategy, err := a.Render(p, prov, testAPIKey("test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strategy.Plan.Env["ANTHROPIC_DEFAULT_SONNET_MODEL"], "minimax-m3"; got != want {
+		t.Fatalf("model = %q, want %q", got, want)
+	}
+}
+
 // TestAzureOpenAIInjection verifies that the Azure OpenAI provider's declared
 // setup params (resource -> endpoint, api-version) are injected at launch from
 // the key's non-secret Fields, and that the model is left as the deployment

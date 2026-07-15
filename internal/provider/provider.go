@@ -197,6 +197,22 @@ func (p Provider) NeedsKey() bool {
 	return p.CanonicalEnvVar() != ""
 }
 
+// CredentialCompatible reports whether a key recorded for keyProviderSlug may
+// be used with providerSlug. Most credentials are provider-specific. OpenCode
+// Zen and OpenCode Go are the explicit exception: they use one Zen account API
+// key but route requests to different endpoints.
+func CredentialCompatible(providerSlug, keyProviderSlug string) bool {
+	if keyProviderSlug == "" || providerSlug == keyProviderSlug {
+		return true
+	}
+	if (providerSlug == "zen" || providerSlug == "opencode-go") &&
+		(keyProviderSlug == "zen" || keyProviderSlug == "opencode-go") {
+		return true
+	}
+	return (providerSlug == "cline" || providerSlug == "cline-pass") &&
+		(keyProviderSlug == "cline" || keyProviderSlug == "cline-pass")
+}
+
 // CanonicalEnvVar returns the environment variable name for the API key.
 // Prefers the structured Auth.EnvVar, falls back to flat EnvVar.
 func (p Provider) CanonicalEnvVar() string {
@@ -898,23 +914,23 @@ var defaultProviders = []Provider{
 	},
 	{
 		ID: "opencode-go", Name: "OpenCode Go", Slug: "opencode-go",
-		BaseURL: "https://opencode.ai/zen/v1", EnvVar: "OPENCODE_GO_API_KEY",
+		BaseURL: "https://opencode.ai/zen/go/v1", EnvVar: "OPENCODE_GO_API_KEY",
 		AuthHeader:    "Authorization: Bearer ${KEY}",
 		Compatibility: CompatOpenAI, Protocol: ProtocolOpenAI,
 		Auth:      AuthSpec{Type: "bearer", HeaderName: "Authorization", Prefix: "Bearer ", EnvVar: "OPENCODE_GO_API_KEY"},
-		Endpoints: EndpointSpec{BaseURL: "https://opencode.ai/zen/v1"},
-		Catalog:   ModelCatalogSpec{Source: "dynamic", RefreshURL: "https://opencode.ai/zen/v1/models"},
+		Endpoints: EndpointSpec{BaseURL: "https://opencode.ai/zen/go/v1"},
+		Catalog:   ModelCatalogSpec{Source: "dynamic", RefreshURL: "https://opencode.ai/zen/go/v1/models"},
 		Models: []ProviderModel{
-			{ID: "opencode/deepseek-v4-pro", Name: "DeepSeek V4 Pro", ContextSize: 131072},
-			{ID: "opencode/deepseek-v4-flash", Name: "DeepSeek V4 Flash", ContextSize: 131072},
-			{ID: "opencode/qwen3.7-max", Name: "Qwen3.7 Max", ContextSize: 131072},
-			{ID: "opencode/qwen3.7-plus", Name: "Qwen3.7 Plus", ContextSize: 131072},
-			{ID: "opencode/kimi-k2.7-code", Name: "Kimi K2.7 Code", ContextSize: 131072},
-			{ID: "opencode/minimax-m3", Name: "MiniMax M3", ContextSize: 131072},
-			{ID: "opencode/glm-5.2", Name: "GLM 5.2", ContextSize: 128000},
-			{ID: "opencode/mimo-v2.5-pro", Name: "MiMo V2.5 Pro", ContextSize: 131072},
+			{ID: "opencode-go/deepseek-v4-pro", Name: "DeepSeek V4 Pro", ContextSize: 131072},
+			{ID: "opencode-go/deepseek-v4-flash", Name: "DeepSeek V4 Flash", ContextSize: 131072},
+			{ID: "opencode-go/qwen3.7-max", Name: "Qwen3.7 Max", ContextSize: 131072},
+			{ID: "opencode-go/qwen3.7-plus", Name: "Qwen3.7 Plus", ContextSize: 131072},
+			{ID: "opencode-go/kimi-k2.7-code", Name: "Kimi K2.7 Code", ContextSize: 131072},
+			{ID: "opencode-go/minimax-m3", Name: "MiniMax M3", ContextSize: 131072},
+			{ID: "opencode-go/glm-5.2", Name: "GLM 5.2", ContextSize: 128000},
+			{ID: "opencode-go/mimo-v2.5-pro", Name: "MiMo V2.5 Pro", ContextSize: 131072},
 		},
-		ModelPolicy:  ModelCatalogPolicy{Source: ModelSourceDynamic, RefreshURL: "https://opencode.ai/zen/v1/models"},
+		ModelPolicy:  ModelCatalogPolicy{Source: ModelSourceDynamic, RefreshURL: "https://opencode.ai/zen/go/v1/models"},
 		Capabilities: Capabilities{ToolUse: true, Vision: true, Streaming: true, FunctionCalling: true},
 		Tags:         []string{"gateway", "coding", "subscription"},
 	},
@@ -1025,6 +1041,26 @@ var defaultProviders = []Provider{
 		Capabilities: Capabilities{ToolUse: true, Vision: true, Streaming: true, FunctionCalling: true},
 		Tags:         []string{"gateway", "coding", "paid", "cline-pass"},
 		Notes:        "Single provider for both Cline usage-billing and ClinePass. Same CLINE_API_KEY and endpoint. ClinePass models (marked) use cline-pass/ prefix and require $9.99/month sub for 2-5x rate limits. Free/credit models use bare names and dynamic catalog.",
+	},
+	{
+		ID: "cline-pass", Name: "ClinePass", Slug: "cline-pass",
+		BaseURL: "https://api.cline.bot/api/v1", EnvVar: "CLINE_API_KEY",
+		AuthHeader:    "Authorization: Bearer ${KEY}",
+		Compatibility: CompatOpenAI, Protocol: ProtocolOpenAI,
+		Auth:      AuthSpec{Type: "bearer", HeaderName: "Authorization", Prefix: "Bearer ", EnvVar: "CLINE_API_KEY"},
+		Endpoints: EndpointSpec{BaseURL: "https://api.cline.bot/api/v1", APIPath: "/chat/completions"},
+		Catalog:   ModelCatalogSpec{Source: "dynamic", RefreshURL: "https://api.cline.bot/api/v1/models"},
+		Models: []ProviderModel{
+			{ID: "cline-pass/glm-5.2", Name: "GLM 5.2 (ClinePass)", ContextSize: 128000},
+			{ID: "cline-pass/kimi-k2.7-code", Name: "Kimi K2.7 Code (ClinePass)", ContextSize: 131072},
+			{ID: "cline-pass/deepseek-v4-pro", Name: "DeepSeek V4 Pro (ClinePass)", ContextSize: 131072},
+			{ID: "cline-pass/mimo-v2.5-pro", Name: "MiMo V2.5 Pro (ClinePass)", ContextSize: 131072},
+			{ID: "cline-pass/minimax-m3", Name: "MiniMax M3 (ClinePass)", ContextSize: 131072},
+		},
+		ModelPolicy:  ModelCatalogPolicy{Source: ModelSourceDynamic, RefreshURL: "https://api.cline.bot/api/v1/models"},
+		Capabilities: Capabilities{ToolUse: true, Vision: true, Streaming: true, FunctionCalling: true},
+		Tags:         []string{"gateway", "coding", "subscription", "cline-pass"},
+		Notes:        "Uses the same CLINE_API_KEY and Cline API endpoint as Cline pay-as-you-go. This profile groups ClinePass model IDs; refresh the dynamic catalog to see current entitlement-specific models.",
 	},
 	{
 		ID: "tencent", Name: "Tencent Cloud", Slug: "tencent",

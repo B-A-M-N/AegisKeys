@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -40,17 +41,6 @@ func ApplyFileWrites(writes []FileWrite, env map[string]string) error {
 			return fmt.Errorf("refusing to write raw secret to %s (redact_check enabled)", path)
 		}
 
-		if w.MergePolicy == MergeTOML {
-			if err := refuseUnsafeReplace(path, w.Scope, "toml"); err != nil {
-				return err
-			}
-		}
-		if w.MergePolicy == PatchXML {
-			if err := refuseUnsafeReplace(path, w.Scope, "xml"); err != nil {
-				return err
-			}
-		}
-
 		// Backup existing file per policy — seeded with current env values.
 		if err := backupWithPolicy(path, w.BackupPolicy, w.Scope, knownSecrets); err != nil {
 			return fmt.Errorf("backup %s: %w", path, err)
@@ -81,13 +71,8 @@ func ApplyFileWrites(writes []FileWrite, env map[string]string) error {
 				return fmt.Errorf("merge toml %s: %w", path, err)
 			}
 		case PatchXML:
-			// XML patching is not implemented; do not clobber existing
-			// user/project files under a misleading merge policy.
-			if err := ensureDir(path); err != nil {
-				return err
-			}
-			if err := atomicWrite(path, []byte(w.Content), w.Mode); err != nil {
-				return fmt.Errorf("write %s: %w", path, err)
+			if err := mergeXMLFile(path, []byte(w.Content), w.Mode); err != nil {
+				return fmt.Errorf("patch xml %s: %w", path, err)
 			}
 		case AvoidWrite:
 			return fmt.Errorf("adapter requested avoid-write for %s", path)
@@ -723,4 +708,111 @@ func mergeTOMLFile(path string, newContent []byte, mode os.FileMode) error {
 		return err
 	}
 	return atomicWrite(path, merged, mode)
+}
+
+// xmlNode is a deliberately small DOM for config-style XML. Child identity is
+// element name plus an id/name/key attribute when present; otherwise a child
+// is matched only when it is the sole element of that name. This preserves
+// existing sibling entries and makes incoming settings an explicit overlay.
+type xmlNode struct {
+	XMLName xml.Name
+	Attrs   []xml.Attr `xml:",any,attr"`
+	Text    string     `xml:",chardata"`
+	Nodes   []xmlNode  `xml:",any"`
+}
+
+func mergeXMLFile(path string, newContent []byte, mode os.FileMode) error {
+	var incoming xmlNode
+	if err := xml.Unmarshal(newContent, &incoming); err != nil {
+		return fmt.Errorf("invalid xml: %w", err)
+	}
+	if incoming.XMLName.Local == "" {
+		return fmt.Errorf("invalid xml: missing root element")
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		if err := ensureDir(path); err != nil {
+			return err
+		}
+		return atomicWrite(path, newContent, mode)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	var existing xmlNode
+	if err := xml.Unmarshal(data, &existing); err != nil {
+		return fmt.Errorf("existing %s is not valid XML (refusing to patch): %w", path, err)
+	}
+	if existing.XMLName != incoming.XMLName {
+		return fmt.Errorf("XML root mismatch: existing <%s>, incoming <%s>", existing.XMLName.Local, incoming.XMLName.Local)
+	}
+	mergeXMLNode(&existing, incoming)
+	merged, err := xml.MarshalIndent(existing, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal merged xml: %w", err)
+	}
+	merged = append([]byte(xml.Header), merged...)
+	if err := ensureDir(path); err != nil {
+		return err
+	}
+	return atomicWrite(path, merged, mode)
+}
+
+func mergeXMLNode(dst *xmlNode, incoming xmlNode) {
+	for _, attr := range incoming.Attrs {
+		found := false
+		for i := range dst.Attrs {
+			if dst.Attrs[i].Name == attr.Name {
+				dst.Attrs[i].Value = attr.Value
+				found = true
+				break
+			}
+		}
+		if !found {
+			dst.Attrs = append(dst.Attrs, attr)
+		}
+	}
+	if strings.TrimSpace(incoming.Text) != "" {
+		dst.Text = incoming.Text
+	}
+	for _, child := range incoming.Nodes {
+		idx := findXMLChild(dst.Nodes, child)
+		if idx < 0 {
+			dst.Nodes = append(dst.Nodes, child)
+			continue
+		}
+		mergeXMLNode(&dst.Nodes[idx], child)
+	}
+}
+
+func findXMLChild(nodes []xmlNode, target xmlNode) int {
+	id := xmlIdentity(target)
+	var only, count = -1, 0
+	for i := range nodes {
+		if nodes[i].XMLName != target.XMLName {
+			continue
+		}
+		count++
+		if id != "" && xmlIdentity(nodes[i]) == id {
+			return i
+		}
+		if id == "" {
+			only = i
+		}
+	}
+	if id == "" && count == 1 {
+		return only
+	}
+	return -1
+}
+
+func xmlIdentity(n xmlNode) string {
+	for _, key := range []string{"id", "name", "key"} {
+		for _, a := range n.Attrs {
+			if a.Name.Local == key {
+				return key + "=" + a.Value
+			}
+		}
+	}
+	return ""
 }

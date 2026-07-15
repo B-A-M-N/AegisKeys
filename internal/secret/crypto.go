@@ -47,8 +47,11 @@ type KDFParams struct {
 }
 
 type VaultEnvelope struct {
-	Version    int       `json:"version"`
-	KDF        string    `json:"kdf"` // "argon2id"
+	Version int    `json:"version"`
+	KDF     string `json:"kdf"` // "argon2id"
+	// KeyMode is empty/password for legacy password-derived vaults and
+	// keyring for vaults sealed with an OS-keyring/recovery key.
+	KeyMode    string    `json:"key_mode,omitempty"`
 	KDFParams  KDFParams `json:"kdf_params"`
 	Salt       string    `json:"salt"`
 	Nonce      string    `json:"nonce"`
@@ -191,6 +194,26 @@ func SealWithKey(key [32]byte, plaintext, saltB64 string, originalParams KDFPara
 		Nonce:      nonce,
 		Ciphertext: base64.StdEncoding.EncodeToString(ciphertext),
 	}, nil
+}
+
+// SealKeyringEnvelope seals plaintext with a random OS-keyring/recovery key.
+// It deliberately has no password KDF: callers must keep the key in an OS
+// keyring and present a separately stored recovery key if recovery is needed.
+func SealKeyringEnvelope(key [32]byte, plaintext string) (*VaultEnvelope, error) {
+	env, err := SealWithKey(key, plaintext, "", KDFParams{})
+	if err != nil {
+		return nil, err
+	}
+	env.KDF = "keyring"
+	env.KeyMode = "keyring"
+	env.KDFParams = KDFParams{}
+	return env, nil
+}
+
+func RandomVaultKey() ([32]byte, error) {
+	var key [32]byte
+	_, err := rand.Read(key[:])
+	return key, err
 }
 
 // OpenWithKey decrypts an envelope using the given 32-byte key.
@@ -479,7 +502,13 @@ func ValidateEnvelope(env *VaultEnvelope) error {
 	if env.Version != 1 {
 		return fmt.Errorf("unsupported envelope version %d", env.Version)
 	}
-	if env.KDF != "argon2id" {
+	if env.KeyMode == "keyring" {
+		if env.KDF != "keyring" {
+			return fmt.Errorf("keyring vault has invalid KDF %q", env.KDF)
+		}
+	} else if env.KeyMode != "" && env.KeyMode != "password" {
+		return fmt.Errorf("unsupported key mode %q", env.KeyMode)
+	} else if env.KDF != "argon2id" {
 		return fmt.Errorf("unsupported KDF %q", env.KDF)
 	}
 	if env.Ciphertext == "" {
@@ -499,6 +528,9 @@ func ValidateEnvelope(env *VaultEnvelope) error {
 	}
 	// Validate KDF params are within safe bounds.
 	p := env.KDFParams
+	if env.KeyMode == "keyring" {
+		return nil
+	}
 	if p.Time != 0 {
 		if p.Time < minArgon2Time {
 			return fmt.Errorf("Argon2 time %d below minimum %d", p.Time, minArgon2Time)

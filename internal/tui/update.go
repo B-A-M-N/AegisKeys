@@ -139,8 +139,53 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case scratchExternalEditedMsg:
 		if m.scratchEditing && m.scratchEditingID != "" {
 			m.scratchBodyInput.SetValue(msg.body)
-			m.scratchDirty = true
-			m.statusMsg = "Loaded from external editor (ctrl+s to save)."
+			m.markScratchDirty()
+			m.statusMsg = "Loaded from external editor; saving automatically."
+			return m, m.scheduleScratchAutosave()
+		}
+		return m, nil
+
+	case scratchAutosaveMsg:
+		if msg.id != m.scratchEditingID || msg.revision != m.scratchRevision || !m.scratchDirty || m.scratchSaveInFlight {
+			return m, nil
+		}
+		return m, m.saveScratchPadDraft(false, true)
+
+	case profileEditSavedMsg:
+		if msg.err != nil {
+			m.statusMsg = "Profile save failed: " + msg.err.Error()
+			return m, nil
+		}
+		m.profiles = msg.profiles
+		if msg.vault != nil && m.vaultSession != nil {
+			m.vaultSession.vault = msg.vault
+			m.keys = secret.ToMaskedList(msg.vault.Keys)
+		}
+		m.logAudit("profile.edit", "", msg.name)
+		m.statusMsg = "Updated."
+		return m, nil
+
+	case scratchSavedMsg:
+		m.scratchSaveInFlight = false
+		if msg.err != nil {
+			m.statusMsg = "Scratchpad save failed: " + msg.err.Error()
+			return m, nil
+		}
+		if msg.revision == m.scratchRevision {
+			m.scratchDirty = false
+		}
+		m.logAudit("scratch.update", "", "")
+		if msg.closeEditor && m.scratchEditingID == msg.id {
+			m.scratchEditing = false
+			m.scratchEditingID = ""
+			m.scratchTitleInput.Blur()
+			m.scratchBodyInput.Blur()
+		}
+		if m.scratchDirty {
+			return m, m.scheduleScratchAutosave()
+		}
+		if !msg.autosave {
+			m.statusMsg = "Scratchpad saved."
 		}
 		return m, nil
 
@@ -272,8 +317,8 @@ func (m *model) handlePaste(content string) (tea.Model, tea.Cmd) {
 		} else {
 			m.scratchBodyInput, cmd = m.scratchBodyInput.Update(tea.PasteMsg{Content: content})
 		}
-		m.scratchDirty = true
-		return m, cmd
+		m.markScratchDirty()
+		return m, tea.Batch(cmd, m.scheduleScratchAutosave())
 	}
 	return m, nil
 }
@@ -864,8 +909,14 @@ func (m *model) adjustSetting(dir int) (tea.Model, tea.Cmd) {
 			m.cfg.EnableRiskyExport = false
 		}
 		m.statusMsg = "Runtime policy: " + m.cfg.RuntimePolicy
-	default:
+	case 9:
 		m.statusMsg = "Config path: " + config.ConfigPath(m.configDir)
+		return m, nil
+	case 10:
+		// Inherit env is edited via CLI (it is a free-form list of var names).
+		m.statusMsg = "Edit inherit_env via CLI: aegiskeys settings set inherit_env TMUX,DISPLAY"
+		return m, nil
+	default:
 		return m, nil
 	}
 	if err := config.SaveConfig(config.ConfigPath(m.configDir), m.cfg); err != nil {
@@ -903,15 +954,10 @@ func (m *model) handleScratchKey(key string, k tea.KeyPressMsg) (tea.Model, tea.
 			}
 			return m, nil
 		case "esc":
-			if m.scratchDirty {
-				m.scratchDirty = false
-				m.statusMsg = "Edit discarded."
-			}
-			m.scratchEditing = false
-			m.scratchEditingID = ""
-			m.scratchTitleInput.Blur()
-			m.scratchBodyInput.Blur()
-			return m, nil
+			// Closing an editor must not silently discard the user's note.  The
+			// previous behavior made a missed Ctrl+S indistinguishable from data
+			// loss after leaving the scratch screen.
+			return m, m.saveScratchPad()
 		}
 		// Route keystroke to the focused input's Update method.
 		var cmd tea.Cmd
@@ -920,8 +966,8 @@ func (m *model) handleScratchKey(key string, k tea.KeyPressMsg) (tea.Model, tea.
 		} else {
 			m.scratchBodyInput, cmd = m.scratchBodyInput.Update(k)
 		}
-		m.scratchDirty = true
-		return m, cmd
+		m.markScratchDirty()
+		return m, tea.Batch(cmd, m.scheduleScratchAutosave())
 	}
 
 	switch key {
@@ -988,19 +1034,24 @@ func (m *model) newScratchPad() tea.Cmd {
 	if err := m.vaultSession.vault.AddScratchPad(sp); err != nil {
 		return nil
 	}
+	// The editor must target the page it just created, rather than whatever
+	// page happened to be selected before `n` was pressed.
+	m.scratchListSelected = len(m.visibleScratchPads()) - 1
 	m.scratchEditingID = sp.ID
 	m.scratchTitleInput.SetValue(sp.Title)
 	m.scratchBodyInput.SetValue("")
 	m.scratchBodyInput.SetWidth(maxInt(40, m.width-10))
 	m.scratchBodyInput.SetHeight(maxInt(8, m.height-12))
 	m.scratchEditing = true
-	m.scratchDirty = true
+	m.markScratchDirty()
 	m.scratchEditingTitle = true
 	m.resetScratchSelection()
 	m.scratchTitleInput.Focus()
 	m.scratchBodyInput.Blur()
 	m.logAudit("scratch.create", "", "")
-	return nil
+	// Persist the blank page immediately so a newly created note is recoverable
+	// even if the session is locked before its first explicit save.
+	return m.saveScratchPadDraft(false, false)
 }
 
 // editScratchPad opens the selected scratchpad for editing.
@@ -1025,23 +1076,55 @@ func (m *model) editScratchPad() tea.Cmd {
 
 // saveScratchPad persists the edited scratchpad to the vault.
 func (m *model) saveScratchPad() tea.Cmd {
-	sp := m.selectedScratchPad()
+	return m.saveScratchPadDraft(true, false)
+}
+
+// saveScratchPadDraft records the current editor fields and persists the vault
+// asynchronously.  closeEditor is only honored after the encrypted write
+// succeeds, so a filesystem error cannot look like a successful save.
+func (m *model) saveScratchPadDraft(closeEditor, autosave bool) tea.Cmd {
+	if m.vaultSession == nil || m.vaultSession.vault == nil || m.scratchEditingID == "" {
+		return nil
+	}
+	sp := m.vaultSession.vault.GetScratchPad(m.scratchEditingID)
 	if sp == nil {
 		return nil
 	}
 	sp.Title = m.scratchTitleInput.Value()
 	sp.Body = m.scratchBodyInput.Value()
 	if err := m.vaultSession.vault.UpdateScratchPad(sp.ID, *sp); err != nil {
+		return func() tea.Msg { return scratchSavedMsg{err: err} }
+	}
+	// Never start a second vault write while one is in flight. The in-memory
+	// model still receives the latest fields; the completion handler schedules
+	// a follow-up autosave when a newer revision exists.
+	if m.scratchSaveInFlight {
 		return nil
 	}
-	if err := secret.SaveVaultWithKey(config.VaultPath(m.configDir), m.vaultSession.key, m.vaultSession.vault); err != nil {
+	vault, err := secret.CloneVault(m.vaultSession.vault)
+	if err != nil {
+		return func() tea.Msg { return scratchSavedMsg{err: err} }
+	}
+	m.scratchSaveInFlight = true
+	key, configDir, id, revision := m.vaultSession.key, m.configDir, sp.ID, m.scratchRevision
+	return func() tea.Msg {
+		return scratchSavedMsg{id: id, closeEditor: closeEditor, autosave: autosave, revision: revision, err: secret.SaveVaultWithKey(config.VaultPath(configDir), key, vault)}
+	}
+}
+
+func (m *model) markScratchDirty() {
+	m.scratchDirty = true
+	m.scratchRevision++
+}
+
+func (m *model) scheduleScratchAutosave() tea.Cmd {
+	if !m.scratchEditing || m.scratchEditingID == "" || !m.scratchDirty {
 		return nil
 	}
-	m.scratchEditing = false
-	m.scratchDirty = false
-	m.scratchEditingID = ""
-	m.logAudit("scratch.update", "", "")
-	return nil
+	id, revision := m.scratchEditingID, m.scratchRevision
+	return tea.Tick(750*time.Millisecond, func(time.Time) tea.Msg {
+		return scratchAutosaveMsg{id: id, revision: revision}
+	})
 }
 
 // copyScratchBody copies the scratchpad body to clipboard (if policy allows).
@@ -1194,12 +1277,25 @@ type scratchExternalEditedMsg struct {
 	body string
 }
 
+type scratchSavedMsg struct {
+	id          string
+	closeEditor bool
+	autosave    bool
+	revision    uint64
+	err         error
+}
+
+type scratchAutosaveMsg struct {
+	id       string
+	revision uint64
+}
+
 type statusMsgMsg struct {
 	msg string
 }
 
 // settingKeys enumerates the adjustable settings on the Settings screen.
-var settingKeys = []string{"Auto-lock", "Theme", "Default profile", "Clipboard TTL", "Verify timeout", "Animations", "Risky export", "Rotation reminders", "Runtime policy", "Config file"}
+var settingKeys = []string{"Auto-lock", "Theme", "Default profile", "Clipboard TTL", "Verify timeout", "Animations", "Risky export", "Rotation reminders", "Runtime policy", "Config file", "Inherit env"}
 
 // cycleTheme returns the next theme name after the current one, wrapping
 // around to the first. Used by the Settings screen to step through themes.
@@ -1313,6 +1409,7 @@ func (m *model) startEdit() (tea.Model, tea.Cmd) {
 	m.addStep = 0
 	m.addValues = nil
 	m.addInput.Reset()
+	m.addInput.EchoMode = textinput.EchoNormal
 	m.addInput.Placeholder = m.editPlaceholder()
 	m.modalPrompt = m.editPrompt()
 	cmd := m.addInput.Focus()
@@ -1378,7 +1475,7 @@ func (m *model) editFields() []addField {
 		return []addField{
 			{label: "Profile name", placeholder: p.Name},
 			{label: "Provider slug", placeholder: p.ProviderSlug},
-			{label: "Key ID", placeholder: p.KeyID},
+			{label: "Key ID or API key (paste)", placeholder: p.KeyID, secret: true},
 		}
 	case screenKeys:
 		k := m.selectedKey()
@@ -1850,6 +1947,7 @@ type addField struct {
 	label       string
 	placeholder string
 	required    bool
+	secret      bool
 }
 
 func (m *model) addFields() []addField {
@@ -2112,6 +2210,12 @@ func (m *model) handleEditKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.addInput.Reset()
 			m.addInput.Placeholder = m.editPlaceholder()
 			m.modalPrompt = m.editPrompt()
+			if fields[m.addStep].secret {
+				m.addInput.EchoMode = textinput.EchoPassword
+				m.addInput.EchoCharacter = '•'
+			} else {
+				m.addInput.EchoMode = textinput.EchoNormal
+			}
 			return m, m.addInput.Focus()
 		}
 		return m.commitEdit()
@@ -2316,44 +2420,7 @@ func (m *model) commitEdit() (tea.Model, tea.Cmd) {
 			}
 		}
 	case screenProfiles:
-		p := m.selectedProfile()
-		if p != nil && len(vals) >= 3 {
-			newProviderSlug := sanitizeSlug(vals[1])
-			// Validate provider exists.
-			prov := m.providers.Find(newProviderSlug)
-			if prov == nil {
-				m.statusMsg = "Unknown provider: " + newProviderSlug
-				m.closeEditModal()
-				return m, nil
-			}
-			// Validate key exists and matches provider.
-			var key *secret.SecretRecord
-			if m.vaultSession != nil && m.vaultSession.vault != nil {
-				key = m.vaultSession.vault.Get(vals[2])
-				if key == nil {
-					m.statusMsg = "Unknown key: " + vals[2]
-					m.closeEditModal()
-					return m, nil
-				}
-				if key.ProviderSlug != "" && key.ProviderSlug != prov.Slug {
-					m.statusMsg = fmt.Sprintf("Key provider %q does not match profile provider %q", key.ProviderSlug, prov.Slug)
-					m.closeEditModal()
-					return m, nil
-				}
-			}
-			p.Name = vals[0]
-			p.ProviderSlug = newProviderSlug
-			p.KeyID = vals[2]
-			// If we resolved the adapter, update the target RenderMode.
-			if a, ok := m.adapterRegistry.Get(p.TargetApp()); ok {
-				p.Target.RenderMode = adapter.RenderModeForContract(a.Contract())
-			}
-			_ = key
-			err = profile.SaveStore(config.ProfilesPath(m.configDir), m.profiles)
-			if err == nil {
-				m.logAudit("profile.edit", "", p.Name)
-			}
-		}
+		return m.commitProfileEdit(vals)
 	case screenKeys:
 		k := m.selectedKey()
 		if k != nil && m.vaultSession != nil && m.vaultSession.vault != nil && len(vals) >= 3 {
@@ -2382,6 +2449,100 @@ func (m *model) commitEdit() (tea.Model, tea.Cmd) {
 	}
 	m.statusMsg = "Updated."
 	return m, nil
+}
+
+// commitProfileEdit snapshots both stores before doing disk I/O. This keeps
+// paste-heavy profile edits responsive and prevents a failed vault write from
+// mutating the live UI state.
+func (m *model) commitProfileEdit(vals []string) (tea.Model, tea.Cmd) {
+	p := m.selectedProfile()
+	if p == nil || len(vals) < 3 {
+		m.closeEditModal()
+		m.statusMsg = "Profile edit is incomplete."
+		return m, nil
+	}
+	if m.vaultSession == nil || m.vaultSession.vault == nil {
+		m.closeEditModal()
+		m.statusMsg = "Unlock the vault before changing a profile key."
+		return m, nil
+	}
+	prov := m.providers.Find(sanitizeSlug(vals[1]))
+	if prov == nil {
+		m.closeEditModal()
+		m.statusMsg = "Unknown provider: " + sanitizeSlug(vals[1])
+		return m, nil
+	}
+	stores, err := profile.CloneStore(m.profiles)
+	if err != nil {
+		m.statusMsg = "Profile clone failed: " + err.Error()
+		return m, nil
+	}
+	vault, err := secret.CloneVault(m.vaultSession.vault)
+	if err != nil {
+		m.statusMsg = "Vault clone failed: " + err.Error()
+		return m, nil
+	}
+	updated := stores.Find(p.Name)
+	if updated == nil {
+		m.statusMsg = "Profile no longer exists."
+		return m, nil
+	}
+	key := vault.Get(vals[2])
+	createdKey := false
+	if key == nil {
+		if strings.TrimSpace(vals[2]) == "" {
+			m.statusMsg = "A key ID or API key is required."
+			return m, nil
+		}
+		if err := vault.Add(secret.SecretRecord{
+			Kind:         secret.SecretAPIKey,
+			ProviderSlug: prov.Slug,
+			Label:        vals[0],
+			Secret:       vals[2],
+		}); err != nil {
+			m.statusMsg = "Key add failed: " + err.Error()
+			return m, nil
+		}
+		key = &vault.Keys[len(vault.Keys)-1]
+		createdKey = true
+	}
+	if !provider.CredentialCompatible(prov.Slug, key.ProviderSlug) {
+		m.statusMsg = fmt.Sprintf("Key provider %q does not match profile provider %q", key.ProviderSlug, prov.Slug)
+		return m, nil
+	}
+	updated.Name = vals[0]
+	updated.ProviderSlug = prov.Slug
+	updated.KeyID = key.ID
+	if a, ok := m.adapterRegistry.Get(updated.TargetApp()); ok {
+		updated.Target.RenderMode = adapter.RenderModeForContract(a.Contract())
+	}
+	m.modal = modalNone
+	m.focus = focusContent
+	m.addInput.Blur()
+	m.addValues = nil
+	m.statusMsg = "Saving profile..."
+	configDir, keyMaterial, name := m.configDir, m.vaultSession.key, updated.Name
+	return m, func() tea.Msg {
+		if createdKey {
+			if err := secret.SaveVaultWithKey(config.VaultPath(configDir), keyMaterial, vault); err != nil {
+				return profileEditSavedMsg{err: err}
+			}
+		}
+		if err := profile.SaveStore(config.ProfilesPath(configDir), stores); err != nil {
+			return profileEditSavedMsg{err: err}
+		}
+		if !createdKey {
+			vault = nil
+		}
+		return profileEditSavedMsg{profiles: stores, vault: vault, name: name}
+	}
+}
+
+type profileEditSavedMsg struct {
+	profiles *profile.Store
+	vault    *secret.Vault
+	name     string
+	err      error
 }
 
 // handleLaunchKey routes keys on the Launch screen.
@@ -2537,10 +2698,11 @@ func (m *model) prepareTUILaunch(commandLine string) tea.Cmd {
 			}
 		}
 		prepared, err := runner.PrepareCommandWithCleanup(context.Background(), strategy, runner.RunOptions{
-			ProfileName:  prof.Name,
-			ConfigDir:    configDir,
-			ExtraArgs:    extraArgs,
-			InheritStdio: true,
+			ProfileName:     prof.Name,
+			ConfigDir:       configDir,
+			ExtraArgs:       extraArgs,
+			InheritStdio:    true,
+			ExtraInheritEnv: m.cfg.InheritEnv,
 		})
 		if err != nil {
 			return launchPreparedMsg{profile: prof.Name, err: err}

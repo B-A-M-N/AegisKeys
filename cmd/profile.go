@@ -10,6 +10,7 @@ import (
 	"aegiskeys/internal/audit"
 	"aegiskeys/internal/config"
 	"aegiskeys/internal/profile"
+	"aegiskeys/internal/provider"
 	"aegiskeys/internal/resolve"
 )
 
@@ -74,7 +75,7 @@ var profileCreateCmd = &cobra.Command{
 		if rec == nil {
 			return fmt.Errorf("no key with id %q", profCreateKey)
 		}
-		if rec.ProviderSlug != "" && rec.ProviderSlug != prov.Slug {
+		if !provider.CredentialCompatible(prov.Slug, rec.ProviderSlug) {
 			return fmt.Errorf("key %q belongs to provider %q, not %q", profCreateKey, rec.ProviderSlug, prov.Slug)
 		}
 

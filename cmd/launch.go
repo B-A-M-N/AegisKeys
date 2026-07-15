@@ -92,10 +92,11 @@ var launchCmd = &cobra.Command{
 		}
 
 		return runner.Run(context.Background(), strategy, runner.RunOptions{
-			ProfileName:  prof.Name,
-			ConfigDir:    resolvedConfigDir(),
-			ExtraArgs:    finalExtraArgs,
-			InheritStdio: true,
+			ProfileName:     prof.Name,
+			ConfigDir:       resolvedConfigDir(),
+			ExtraArgs:       finalExtraArgs,
+			InheritStdio:    true,
+			ExtraInheritEnv: loadAppConfig().InheritEnv,
 		})
 	},
 }

@@ -158,6 +158,16 @@ func (r *Registry) MergeDefaults(defaults []Provider) bool {
 				cur.ModelPolicy = def.ModelPolicy
 				changed = true
 			}
+			// OpenCode Go was originally published with Zen's endpoint. Repair
+			// only that exact known-bad default so custom Go endpoints remain
+			// untouched.
+			if def.Slug == "opencode-go" && cur.BaseURL == "https://opencode.ai/zen/v1" {
+				cur.BaseURL = def.BaseURL
+				cur.Endpoints = def.Endpoints
+				cur.Catalog = def.Catalog
+				cur.ModelPolicy = def.ModelPolicy
+				changed = true
+			}
 			continue
 		}
 

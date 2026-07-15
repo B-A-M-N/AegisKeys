@@ -193,12 +193,14 @@ func buildOpenCodeConfigFor(p profile.Profile, prov provider.Provider, path, des
 	}
 	cfg := map[string]any{}
 	if modelID != "" {
+		modelID = openCodeModelID(prov, modelID)
 		if strings.Contains(modelID, "/") {
 			cfg["model"] = modelID
 		} else {
 			cfg["model"] = prov.Slug + "/" + modelID
 		}
 	}
+	providerID := openCodeProviderID(prov)
 	providerEntry := map[string]any{
 		"options": map[string]any{
 			"baseURL": prov.CanonicalBaseURL(),
@@ -210,7 +212,7 @@ func buildOpenCodeConfigFor(p profile.Profile, prov provider.Provider, path, des
 		providerEntry["env"] = []string{envVar}
 	}
 	cfg["provider"] = map[string]any{
-		prov.Slug: providerEntry,
+		providerID: providerEntry,
 	}
 	content, _ := json.MarshalIndent(cfg, "", "  ")
 	return []FileWrite{
@@ -241,6 +243,7 @@ func buildOpenCodeCatalogConfigFor(ctx ProviderCatalogRenderContext, path, descr
 	}
 	cfg := map[string]any{}
 	if modelID != "" {
+		modelID = openCodeModelID(ctx.SelectedProvider, modelID)
 		if strings.Contains(modelID, "/") {
 			cfg["model"] = modelID
 		} else if ctx.SelectedProvider.Slug != "" {
@@ -258,7 +261,7 @@ func buildOpenCodeCatalogConfigFor(ctx ProviderCatalogRenderContext, path, descr
 		if _, ok := ctx.KeysByProvider[prov.Slug]; ok {
 			entry["env"] = []string{prov.CanonicalEnvVar()}
 		}
-		providers[prov.Slug] = entry
+		providers[openCodeProviderID(prov)] = entry
 	}
 	cfg["provider"] = providers
 
@@ -275,6 +278,26 @@ func buildOpenCodeCatalogConfigFor(ctx ProviderCatalogRenderContext, path, descr
 			Description:  description,
 		},
 	}
+}
+
+// openCodeProviderID maps curated OpenCode services to the provider IDs that
+// OpenCode itself expects in model references. Zen models are opencode/<id>,
+// while Go models are opencode-go/<id>; their AegisKeys slugs need not match.
+func openCodeProviderID(prov provider.Provider) string {
+	if prov.Slug == "zen" {
+		return "opencode"
+	}
+	return prov.Slug
+}
+
+// openCodeModelID repairs the old Go catalog prefix and keeps profiles saved
+// before that correction launchable. OpenCode documents Go models as
+// opencode-go/<model>, not opencode/<model>.
+func openCodeModelID(prov provider.Provider, modelID string) string {
+	if prov.Slug == "opencode-go" {
+		return strings.Replace(modelID, "opencode/", "opencode-go/", 1)
+	}
+	return modelID
 }
 
 // OpenHandsAdapter renders config for OpenHands CLI.

@@ -132,6 +132,8 @@ func (p Profile) Command() string {
 		return "qwen"
 	case "claude":
 		return "claude"
+	case "free-claude":
+		return "free-code"
 	case "vibe":
 		return "vibe"
 	case "goose":
@@ -353,4 +355,22 @@ func SaveStore(path string, s *Store) error {
 		return err
 	}
 	return fsutil.AtomicWriteFile(path, data)
+}
+
+// CloneStore returns an independent copy suitable for asynchronous persistence.
+// JSON round-tripping keeps this clone correct as profile fields evolve.
+func CloneStore(s *Store) (*Store, error) {
+	if s == nil {
+		return nil, errors.New("nil profile store")
+	}
+	raw, err := json.Marshal(s)
+	if err != nil {
+		return nil, err
+	}
+	var clone Store
+	if err := json.Unmarshal(raw, &clone); err != nil {
+		return nil, err
+	}
+	migrateStore(&clone)
+	return &clone, nil
 }

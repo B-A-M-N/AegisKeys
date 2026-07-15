@@ -99,10 +99,11 @@ var runCmd = &cobra.Command{
 		// audit events, and cleanup. CLI only resolves the strategy and
 		// persists vault metadata.
 		return runner.Run(context.Background(), strategy, runner.RunOptions{
-			ProfileName:  prof.Name,
-			ConfigDir:    resolvedConfigDir(),
-			ExtraArgs:    extraArgs,
-			InheritStdio: true,
+			ProfileName:     prof.Name,
+			ConfigDir:       resolvedConfigDir(),
+			ExtraArgs:       extraArgs,
+			InheritStdio:    true,
+			ExtraInheritEnv: loadAppConfig().InheritEnv,
 		})
 	},
 }

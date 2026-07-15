@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -72,6 +73,13 @@ func (GenericOpenAIAdapter) Render(p profile.Profile, prov provider.Provider, ke
 	cmd := p.Command()
 	if cmd == "" {
 		return nil, fmt.Errorf("no command for profile %s", p.Name)
+	}
+	// Resolve to an absolute path when the command is found in a known
+	// location (~/.local/bin, ~/.cargo/bin, etc.) so the spawned child
+	// (which has a sanitized env) can find it even if the parent PATH
+	// doesn't include that directory.
+	if abs := FindBinary(cmd); abs != "" {
+		cmd = abs
 	}
 	return &LaunchStrategy{
 		Plan: LaunchPlan{Command: cmd, Env: env, Preview: buildPreview(p.Name, prov)},
@@ -964,23 +972,19 @@ func (ClaudeCodeAdapter) Render(p profile.Profile, prov provider.Provider, key *
 	}
 
 	if p.Models.Main != nil && p.Models.Main.ID != "" {
-		env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = p.Models.Main.ID
+		env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = anthropicModelID(prov, p.Models.Main.ID)
 	}
 	if p.Models.Fast != nil && p.Models.Fast.ID != "" {
-		env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = p.Models.Fast.ID
+		env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = anthropicModelID(prov, p.Models.Fast.ID)
 	}
 	if p.Models.Planner != nil && p.Models.Planner.ID != "" {
-		env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = p.Models.Planner.ID
+		env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = anthropicModelID(prov, p.Models.Planner.ID)
 	}
 	if p.Models.Subagent != nil && p.Models.Subagent.ID != "" {
-		env["CLAUDE_CODE_SUBAGENT_MODEL"] = p.Models.Subagent.ID
+		env["CLAUDE_CODE_SUBAGENT_MODEL"] = anthropicModelID(prov, p.Models.Subagent.ID)
 	}
 
-	baseURL := prov.CanonicalBaseURL()
-	// The Anthropic SDK natively appends "/v1/messages" to the base URL.
-	// If the provider's canonical URL already ends in "/v1", we must trim it
-	// to prevent requests going to "/v1/v1/messages" (which 404s on OpenRouter).
-	baseURL, _ = strings.CutSuffix(baseURL, "/v1")
+	baseURL := anthropicBaseURL(prov)
 
 	switch prov.Compatibility {
 	case provider.CompatAnthropic:
@@ -1019,6 +1023,273 @@ func (ClaudeCodeAdapter) Render(p profile.Profile, prov provider.Provider, key *
 			},
 		},
 	}, nil
+}
+
+// FindBinary searches for a binary on PATH and in well-known install
+// locations (~/.local/bin, ~/.cargo/bin, ~/bin, ~/.bin, /usr/local/bin,
+// /opt/homebrew/bin, /usr/bin). It returns the absolute path if found,
+// or an empty string if the binary could not be located anywhere.
+func FindBinary(name string) string {
+	if name == "" {
+		return ""
+	}
+	if abs, err := exec.LookPath(name); err == nil && abs != "" {
+		return abs
+	}
+	home := os.Getenv("HOME")
+	if home == "" {
+		if h, err := os.UserHomeDir(); err == nil {
+			home = h
+		}
+	}
+	if home != "" {
+		candidates := []string{
+			filepath.Join(home, ".local", "bin", name),
+			filepath.Join(home, ".cargo", "bin", name),
+			filepath.Join(home, "bin", name),
+			filepath.Join(home, ".bin", name),
+		}
+		for _, c := range candidates {
+			if info, err := os.Stat(c); err == nil && !info.IsDir() {
+				if runtime.GOOS != "windows" {
+					if info.Mode()&0111 != 0 {
+						return c
+					}
+				} else {
+					return c
+				}
+			}
+		}
+	}
+	systemPaths := []string{
+		"/usr/local/bin/" + name,
+		"/opt/homebrew/bin/" + name,
+		"/usr/bin/" + name,
+	}
+	for _, c := range systemPaths {
+		if info, err := os.Stat(c); err == nil && !info.IsDir() {
+			if runtime.GOOS != "windows" {
+				if info.Mode()&0111 != 0 {
+					return c
+				}
+			} else {
+				return c
+			}
+		}
+	}
+	return ""
+}
+
+// findFreeCodeBinary searches for the free-code binary using FindBinary.
+func findFreeCodeBinary() string {
+	return FindBinary("free-code")
+}
+
+// FreeClaudeAdapter renders config for free-code (the guardrail/telemetry-stripped
+// Claude Code fork, installed binary "free-code"). It is wire-compatible with Claude
+// Code: same env vars (ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN),
+// same model overrides, same Anthropic/OpenAI compatibility. The only difference from
+// ClaudeCodeAdapter is the launched binary ("free-code" instead of "claude") and the
+// honesty hazards below. Confidence is manual_proof (not verified): structurally
+// identical to Claude Code but not independently proof-tested by AegisKeys.
+type FreeClaudeAdapter struct{}
+
+func (FreeClaudeAdapter) ID() string             { return "free-claude" }
+func (FreeClaudeAdapter) DisplayName() string    { return "Free Claude (free-code)" }
+func (FreeClaudeAdapter) DefaultCommand() string { return "free-code" }
+
+func (FreeClaudeAdapter) SupportsProvider(p provider.Provider) bool {
+	return p.Compatibility == provider.CompatAnthropic || p.Compatibility == provider.CompatOpenAI
+}
+
+func (FreeClaudeAdapter) CanInjectCredential(p provider.Provider) bool  { return true }
+func (FreeClaudeAdapter) CanConfigureProvider(p provider.Provider) bool { return true }
+
+func (FreeClaudeAdapter) Contract() AppSupportContract {
+	return AppSupportContract{
+		ID:                 "free-claude",
+		DisplayName:        "Free Claude (free-code)",
+		DefaultCommand:     "free-code",
+		SupportLevel:       SupportFullEnv,
+		CredentialControl:  CredentialEnvInjected,
+		SupportConfidence:  ConfidenceExperimental,
+		Verification:       AdapterVerification{RenderGolden: false, NoSecretLeak: true, ConfigMergeTest: false, LaunchSmokeTest: false},
+		RenderModes:        []string{"env"},
+		LaunchSurfaces:     []string{"cli"},
+		CanLaunch:          true,
+		CanInjectSecrets:   true,
+		CanPatchConfig:     false,
+		CanManageModels:    true,
+		CanIsolateProfile:  false,
+		RequiresManualStep: false,
+		ValidationChecks:   []string{"env_injection_only", "model_slots_validated"},
+		ModelSlots: []ModelSlotContract{
+			{Name: "main", Description: "Primary model (Sonnet equivalent)"},
+			{Name: "fast", Description: "Fast model (Haiku equivalent)", Optional: true},
+			{Name: "planner", Description: "Complex model (Opus equivalent)", Optional: true},
+			{Name: "subagent", Description: "Subagent model", Optional: true},
+		},
+		Hazards: []Hazard{
+			{
+				Severity: "warn",
+				Title:    "free-code is a guardrail/telemetry-stripped Claude Code fork",
+				Detail:   "free-code removes Anthropic's safety guardrails and usage telemetry. Using it violates Anthropic's Terms of Service and may get your API key flagged or banned.",
+				Fix:      "Use only with your own API key you are willing to risk; avoid keys tied to paid Claude subscriptions or OAuth.",
+			},
+			{
+				Severity: "warn",
+				Title:    "free-code OAuth/persisted auth may shadow AegisKeys",
+				Detail:   "If free-code has existing OAuth tokens, they may take precedence over injected env vars.",
+				Fix:      "Use API key mode or clear existing auth if injection does not work.",
+			},
+		},
+		AcceptedCompatibility: []provider.CompatibilityMode{provider.CompatAnthropic, provider.CompatOpenAI},
+	}
+}
+
+func (FreeClaudeAdapter) Validate(p profile.Profile, prov provider.Provider) ([]string, error) {
+	var warnings []string
+	if p.ModelID() == "" {
+		warnings = append(warnings, "no main model selected; free-code will use its default (claude-sonnet-4-5)")
+	}
+	if needsAnthropicBridge(p, prov) {
+		warnings = append(warnings, "one or more selected models use AegisKeys' local Anthropic-to-OpenAI bridge")
+	}
+	if prov.Compatibility == provider.CompatOpenAI && prov.Slug != "openrouter" {
+		warnings = append(warnings, "using an OpenAI-compatible provider through free-code's Anthropic Messages gateway")
+	}
+	return warnings, nil
+}
+
+// supportsAnthropicMessages identifies the known OpenCode models that accept
+// Anthropic Messages requests directly. Other OpenCode Go/Zen models use the
+// local bridge when launched through Free Code.
+func supportsAnthropicMessages(prov provider.Provider, modelID string) bool {
+	if prov.Slug != "zen" && prov.Slug != "opencode-go" {
+		return true
+	}
+	modelID = anthropicModelID(prov, modelID)
+	if prov.Slug == "opencode-go" {
+		return strings.HasPrefix(modelID, "minimax-") || strings.HasPrefix(modelID, "qwen")
+	}
+	return strings.HasPrefix(modelID, "claude-") || strings.HasPrefix(modelID, "qwen")
+}
+
+func needsAnthropicBridge(p profile.Profile, prov provider.Provider) bool {
+	for _, model := range []*profile.ModelRef{p.Models.Main, p.Models.Fast, p.Models.Planner, p.Models.Subagent} {
+		if model != nil && model.ID != "" && !supportsAnthropicMessages(prov, model.ID) {
+			return true
+		}
+	}
+	return false
+}
+
+func (FreeClaudeAdapter) Render(p profile.Profile, prov provider.Provider, key *secret.SecretRecord) (*LaunchStrategy, error) {
+	env, err := buildBaseEnv(p, prov, key)
+	if err != nil {
+		return nil, err
+	}
+
+	if p.Models.Main != nil && p.Models.Main.ID != "" {
+		env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = anthropicModelID(prov, p.Models.Main.ID)
+	}
+	if p.Models.Fast != nil && p.Models.Fast.ID != "" {
+		env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = anthropicModelID(prov, p.Models.Fast.ID)
+	}
+	if p.Models.Planner != nil && p.Models.Planner.ID != "" {
+		env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = anthropicModelID(prov, p.Models.Planner.ID)
+	}
+	if p.Models.Subagent != nil && p.Models.Subagent.ID != "" {
+		env["CLAUDE_CODE_SUBAGENT_MODEL"] = anthropicModelID(prov, p.Models.Subagent.ID)
+	}
+
+	baseURL := anthropicBaseURL(prov)
+
+	var protocolBridge *ProtocolBridge
+	switch prov.Compatibility {
+	case provider.CompatAnthropic:
+		if prov.CanonicalEnvVar() != "" && key != nil {
+			env["ANTHROPIC_API_KEY"] = key.Secret
+		}
+		env["ANTHROPIC_BASE_URL"] = baseURL
+	case provider.CompatOpenAI:
+		if prov.Auth.Type == "aws" {
+			break
+		}
+		delete(env, prov.CanonicalEnvVar())
+		if key != nil {
+			// free-code uses the Anthropic SDK request path.  Unlike Claude
+			// Code, it does not reject a non-sk-ant key in ANTHROPIC_API_KEY;
+			// leaving that variable empty causes the SDK to make an unauthenticated
+			// request for OpenAI-compatible gateways such as OpenCode Go.
+			env["ANTHROPIC_AUTH_TOKEN"] = key.Secret
+			env["ANTHROPIC_API_KEY"] = key.Secret
+		}
+		env["ANTHROPIC_BASE_URL"] = baseURL
+		if needsAnthropicBridge(p, prov) {
+			if key == nil || key.Secret == "" {
+				return nil, fmt.Errorf("OpenAI bridge requires an API key")
+			}
+			// The bridge authenticates to the upstream itself. Free Code only
+			// needs a non-empty local credential to satisfy its Anthropic client.
+			env["ANTHROPIC_AUTH_TOKEN"] = "aegiskeys-local-bridge"
+			env["ANTHROPIC_API_KEY"] = "aegiskeys-local-bridge"
+			protocolBridge = &ProtocolBridge{TargetBaseURL: prov.CanonicalBaseURL(), TargetAPIKey: key.Secret}
+		}
+	}
+
+	// Resolve launcher: try auto-detect first, then fall back to the
+	// Try auto-detect first, then fall back to the user-configured
+	// command override (profile Target.Command) so that non-standard
+	// install locations work.
+	freeCodeCmd := findFreeCodeBinary()
+	if freeCodeCmd == "" {
+		freeCodeCmd = p.Target.Command
+	}
+	if freeCodeCmd == "" {
+		return nil, fmt.Errorf("free-code binary not found on PATH or in ~/.local/bin, ~/.cargo/bin, /usr/local/bin — install free-code or set a custom command in the profile target")
+	}
+
+	return &LaunchStrategy{
+		Plan:   LaunchPlan{Command: freeCodeCmd, Env: env, Preview: buildPreview(p.Name, prov)},
+		Bridge: protocolBridge,
+		Support: AppSupportContract{
+			ID: "free-claude", DisplayName: "Free Claude (free-code)", SupportLevel: SupportFullEnv,
+		},
+		Hazards: []Hazard{
+			{
+				Severity: "warn",
+				Title:    "free-code is a guardrail/telemetry-stripped Claude Code fork",
+				Detail:   "free-code removes Anthropic's safety guardrails and usage telemetry. Using it violates Anthropic's Terms of Service and may get your API key flagged or banned.",
+				Fix:      "Use only with your own API key you are willing to risk; avoid keys tied to paid Claude subscriptions or OAuth.",
+			},
+		},
+	}, nil
+}
+
+// anthropicBaseURL returns the Anthropic-compatible endpoint for providers
+// that expose more than one wire format. LongCat's OpenAI endpoint must never
+// be passed to Claude Code, which sends Anthropic Messages requests.
+func anthropicBaseURL(prov provider.Provider) string {
+	if prov.Slug == "longcat" {
+		return "https://api.longcat.chat/anthropic"
+	}
+	baseURL, _ := strings.CutSuffix(prov.CanonicalBaseURL(), "/v1")
+	return baseURL
+}
+
+func anthropicModelID(prov provider.Provider, modelID string) string {
+	switch prov.Slug {
+	case "zen":
+		return strings.TrimPrefix(modelID, "opencode/")
+	case "opencode-go":
+		// The opencode-go/ prefix names the provider inside OpenCode's own
+		// configuration. The direct Go Messages endpoint expects the bare
+		// model ID (for example minimax-m3).
+		return strings.TrimPrefix(openCodeModelID(prov, modelID), "opencode-go/")
+	default:
+		return modelID
+	}
 }
 
 // MistralVibeAdapter renders config for Mistral Vibe.

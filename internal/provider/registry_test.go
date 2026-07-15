@@ -151,6 +151,7 @@ func TestNormalizeNewProviders(t *testing.T) {
 		{"tencent", CompatOpenAI, ProtocolOpenAI, "bearer", "HUNYUAN_API_KEY"},
 		{"commandcode", CompatOpenAI, ProtocolOpenAI, "bearer", "COMMANDCODE_API_KEY"},
 		{"cline", CompatOpenAI, ProtocolOpenAI, "bearer", "CLINE_API_KEY"},
+		{"cline-pass", CompatOpenAI, ProtocolOpenAI, "bearer", "CLINE_API_KEY"},
 	}
 	slugMap := map[string]Provider{}
 	for _, p := range DefaultProviders() {
@@ -175,6 +176,44 @@ func TestNormalizeNewProviders(t *testing.T) {
 		if p.CanonicalEnvVar() != tc.wantEnvVar {
 			t.Errorf("%s: env var = %q, want %q", tc.slug, p.CanonicalEnvVar(), tc.wantEnvVar)
 		}
+	}
+}
+
+func TestCredentialCompatible_SharedServiceCredentials(t *testing.T) {
+	cases := []struct {
+		provider string
+		key      string
+		want     bool
+	}{
+		{"zen", "opencode-go", true},
+		{"opencode-go", "zen", true},
+		{"cline", "cline-pass", true},
+		{"cline-pass", "cline", true},
+		{"openai", "cline", false},
+	}
+	for _, tc := range cases {
+		if got := CredentialCompatible(tc.provider, tc.key); got != tc.want {
+			t.Errorf("CredentialCompatible(%q, %q) = %t, want %t", tc.provider, tc.key, got, tc.want)
+		}
+	}
+}
+
+func TestOpenCodeGoUsesItsDedicatedEndpoint(t *testing.T) {
+	var goProvider *Provider
+	for i := range DefaultProviders() {
+		if DefaultProviders()[i].Slug == "opencode-go" {
+			goProvider = &DefaultProviders()[i]
+			break
+		}
+	}
+	if goProvider == nil {
+		t.Fatal("opencode-go provider missing")
+	}
+	if got, want := goProvider.CanonicalBaseURL(), "https://opencode.ai/zen/go/v1"; got != want {
+		t.Fatalf("Go base URL = %q, want %q", got, want)
+	}
+	if got, want := goProvider.ModelRefreshURL(), "https://opencode.ai/zen/go/v1/models"; got != want {
+		t.Fatalf("Go models URL = %q, want %q", got, want)
 	}
 }
 
