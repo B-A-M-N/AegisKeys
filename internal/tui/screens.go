@@ -394,6 +394,18 @@ func (m *model) launchView(s *Styles) string {
 		b.WriteString("\n")
 	}
 
+	// Adapter-provided preview details are intentionally sanitized: they show
+	// the selected transport, endpoint, command target, and build identity but
+	// never any credential value.
+	if len(strategy.Plan.Preview) > 0 {
+		b.WriteString("\n")
+		b.WriteString(s.SectionHeader.Render("Resolved launch details"))
+		b.WriteString("\n")
+		for _, detail := range strategy.Plan.Preview {
+			b.WriteString(fmt.Sprintf("  %s\n", s.Muted.Render(detail)))
+		}
+	}
+
 	// Env preview (masked). Keys sorted for stable display across re-renders.
 	if len(strategy.Plan.Env) > 0 {
 		b.WriteString("\n")

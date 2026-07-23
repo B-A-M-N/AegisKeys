@@ -111,6 +111,20 @@ func TestBuildChildEnv_StripsNonCredentialVarSecrets(t *testing.T) {
 	}
 }
 
+func TestBuildChildEnv_StripsAnthropicAuthToken(t *testing.T) {
+	parent := []string{
+		"PATH=/usr/bin",
+		"ANTHROPIC_AUTH_TOKEN=stale-token",
+		"ANTHROPIC_API_KEY=stale-key",
+	}
+	got := BuildChildEnv(parent, map[string]string{"OPENAI_API_KEY": "profile-key"})
+	for _, kv := range got {
+		if strings.HasPrefix(kv, "ANTHROPIC_AUTH_TOKEN=") || strings.HasPrefix(kv, "ANTHROPIC_API_KEY=") {
+			t.Errorf("stale Anthropic credential leaked into child env: %s", kv)
+		}
+	}
+}
+
 // TestPrepareCommand_AppliesEnvAllowlist verifies that PrepareCommandWithCleanup
 // filters the parent env through the allowlist derived from the strategy's app
 // class, not just the CredentialVar denylist.

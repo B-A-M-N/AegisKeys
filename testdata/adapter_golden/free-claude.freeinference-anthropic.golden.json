@@ -1,0 +1,15 @@
+{
+  "app": "free-claude",
+  "transport": "anthropic_messages",
+  "env_keys": [
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL"
+  ],
+  "forbidden_env_keys": [
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_USE_OPENAI_COMPATIBLE",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL"
+  ],
+  "endpoint": "https://freeinference.org/anthropic"
+}

@@ -544,6 +544,41 @@ func ValidateLaunchStrategyForMode(
 		return fmt.Errorf("profile env cannot override provider secret env %s", prov.CanonicalEnvVar())
 	}
 
+	if err := validateTransport(strategy.Plan); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func validateTransport(plan LaunchPlan) error {
+	if plan.Transport == "" {
+		return nil // Older adapters have not declared a wire transport yet.
+	}
+	has := func(name string) bool { return plan.Env[name] != "" }
+	switch plan.Transport {
+	case TransportOpenAIChat:
+		if !has("CLAUDE_CODE_USE_OPENAI_COMPATIBLE") || !has("OPENAI_BASE_URL") || !has("OPENAI_API_KEY") {
+			return errors.New("OpenAI Chat transport requires CLAUDE_CODE_USE_OPENAI_COMPATIBLE, OPENAI_BASE_URL, and OPENAI_API_KEY")
+		}
+		for _, name := range []string{"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"} {
+			if has(name) {
+				return fmt.Errorf("OpenAI Chat transport forbids %s", name)
+			}
+		}
+	case TransportAnthropicMessages:
+		if !has("ANTHROPIC_BASE_URL") {
+			return errors.New("Anthropic Messages transport requires ANTHROPIC_BASE_URL")
+		}
+		if has("ANTHROPIC_API_KEY") == has("ANTHROPIC_AUTH_TOKEN") {
+			return errors.New("Anthropic Messages transport requires exactly one Anthropic credential")
+		}
+		for _, name := range []string{"OPENAI_API_KEY", "OPENAI_BASE_URL", "CLAUDE_CODE_USE_OPENAI_COMPATIBLE"} {
+			if has(name) {
+				return fmt.Errorf("Anthropic Messages transport forbids %s", name)
+			}
+		}
+	}
 	return nil
 }
 

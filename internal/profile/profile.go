@@ -34,9 +34,10 @@ const (
 
 // TargetConfig describes which application this profile launches and how.
 type TargetConfig struct {
-	App        string     `json:"app"`               // crush, aider, cline, hermes, qwen, claude, vibe, generic
-	RenderMode RenderMode `json:"render_mode"`       // how to render the launch
-	Command    string     `json:"command,omitempty"` // override command (empty = use app default)
+	App             string     `json:"app"`                        // crush, aider, cline, hermes, qwen, claude, vibe, generic
+	RenderMode      RenderMode `json:"render_mode"`                // how to render the launch
+	Command         string     `json:"command,omitempty"`          // override command (empty = use app default)
+	AdapterRevision int        `json:"adapter_revision,omitempty"` // semantic revision of adapter rendering
 }
 
 // ModelRef references a specific model from a provider.
@@ -260,7 +261,7 @@ func NeedsMultiModel(app string) bool {
 }
 
 // Store holds all profiles.
-const StoreVersion = 2
+const StoreVersion = 3
 
 type Store struct {
 	Version  int       `json:"version"`
@@ -339,8 +340,19 @@ func migrateStore(s *Store) {
 		s.Version = 1
 	}
 	if s.Version == 1 {
-		// v1 → v2: nothing structural yet; placeholder for future migrations.
-		s.Version = StoreVersion
+		// v1 → v2: no profile field changes.
+		s.Version = 2
+	}
+	if s.Version == 2 {
+		// v2 → v3: Free Claude revision 1 used the obsolete Anthropic-gateway
+		// shape for generic OpenAI providers. Mark these profiles so any stored
+		// preview can be identified as needing regeneration.
+		for i := range s.Profiles {
+			if s.Profiles[i].Target.App == "free-claude" {
+				s.Profiles[i].Target.AdapterRevision = 2
+			}
+		}
+		s.Version = 3
 	}
 }
 

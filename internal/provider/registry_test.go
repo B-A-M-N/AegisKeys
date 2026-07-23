@@ -263,3 +263,58 @@ func TestAnyRouterAnthropicCompat(t *testing.T) {
 		t.Errorf("anyrouter env var = %q, want ANTHROPIC_AUTH_TOKEN", p.EnvVar)
 	}
 }
+
+func TestFreeInferenceProviders(t *testing.T) {
+	slugMap := map[string]Provider{}
+	for _, p := range DefaultProviders() {
+		slugMap[p.Slug] = p
+	}
+	fi, ok := slugMap["freeinference"]
+	if !ok {
+		t.Fatal("freeinference provider missing")
+	}
+	fia, ok := slugMap["freeinference-anthropic"]
+	if !ok {
+		t.Fatal("freeinference-anthropic provider missing")
+	}
+	// OpenAI provider must be OpenAI-compatible with the /v1 base URL.
+	fi.Normalize()
+	if fi.Compatibility != CompatOpenAI {
+		t.Errorf("freeinference compatibility = %q, want openai", fi.Compatibility)
+	}
+	if got, want := fi.CanonicalBaseURL(), "https://freeinference.org/v1"; got != want {
+		t.Errorf("freeinference base URL = %q, want %q", got, want)
+	}
+	// Anthropic provider must be Anthropic-compatible with the /anthropic base URL.
+	fia.Normalize()
+	if fia.Compatibility != CompatAnthropic {
+		t.Errorf("freeinference-anthropic compatibility = %q, want anthropic", fia.Compatibility)
+	}
+	if got, want := fia.CanonicalBaseURL(), "https://freeinference.org/anthropic"; got != want {
+		t.Errorf("freeinference-anthropic base URL = %q, want %q", got, want)
+	}
+	// Both must share the same API key env var.
+	if fi.CanonicalEnvVar() != fia.CanonicalEnvVar() {
+		t.Errorf("freeinference env vars differ: %q vs %q", fi.CanonicalEnvVar(), fia.CanonicalEnvVar())
+	}
+}
+
+func TestFreeInferenceSharedCredential(t *testing.T) {
+	// A key recorded for either FreeInference slug must work with both.
+	cases := []struct {
+		provider string
+		key      string
+		want     bool
+	}{
+		{"freeinference", "freeinference-anthropic", true},
+		{"freeinference-anthropic", "freeinference", true},
+		{"freeinference", "freeinference", true},
+		{"freeinference-anthropic", "openai", false},
+		{"openai", "freeinference-anthropic", false},
+	}
+	for _, tc := range cases {
+		if got := CredentialCompatible(tc.provider, tc.key); got != tc.want {
+			t.Errorf("CredentialCompatible(%q, %q) = %t, want %t", tc.provider, tc.key, got, tc.want)
+		}
+	}
+}

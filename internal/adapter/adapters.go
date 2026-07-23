@@ -985,11 +985,12 @@ func (ClaudeCodeAdapter) Render(p profile.Profile, prov provider.Provider, key *
 	}
 
 	baseURL := anthropicBaseURL(prov)
+	var protocolBridge *ProtocolBridge
 
 	switch prov.Compatibility {
 	case provider.CompatAnthropic:
 		if prov.CanonicalEnvVar() != "" && key != nil {
-			env["ANTHROPIC_API_KEY"] = key.Secret
+			env[anthropicAuthEnvFor(prov)] = key.Secret
 		}
 		env["ANTHROPIC_BASE_URL"] = baseURL
 	case provider.CompatOpenAI:
@@ -1007,10 +1008,22 @@ func (ClaudeCodeAdapter) Render(p profile.Profile, prov provider.Provider, key *
 			env["ANTHROPIC_API_KEY"] = ""
 		}
 		env["ANTHROPIC_BASE_URL"] = baseURL
+		// FreeInference's /v1 endpoint only speaks OpenAI Chat Completions.
+		// Claude Code sends Anthropic Messages, so route it through the local
+		// bridge rather than mistakenly calling FreeInference's Anthropic API.
+		if prov.Slug == "freeinference" {
+			if key == nil || key.Secret == "" {
+				return nil, fmt.Errorf("FreeInference OpenAI bridge requires an API key")
+			}
+			env["ANTHROPIC_AUTH_TOKEN"] = "aegiskeys-local-bridge"
+			env["ANTHROPIC_API_KEY"] = "aegiskeys-local-bridge"
+			protocolBridge = &ProtocolBridge{TargetBaseURL: prov.CanonicalBaseURL(), TargetAPIKey: key.Secret}
+		}
 	}
 
 	return &LaunchStrategy{
-		Plan: LaunchPlan{Command: "claude", Env: env, Preview: buildPreview(p.Name, prov)},
+		Plan:   LaunchPlan{Command: "claude", Env: env, Preview: buildPreview(p.Name, prov)},
+		Bridge: protocolBridge,
 		Support: AppSupportContract{
 			ID: "claude", DisplayName: "Claude Code", SupportLevel: SupportFullEnv,
 		},
@@ -1085,6 +1098,62 @@ func findFreeCodeBinary() string {
 	return FindBinary("free-code")
 }
 
+// FreeClaudeAdapterRevision marks the native generic OpenAI transport. Earlier
+// renderings used a gateway-shaped Anthropic environment and must not be
+// treated as equivalent cached previews.
+const FreeClaudeAdapterRevision = 2
+
+type freeCodeCapabilities struct {
+	Version                         string `json:"version"`
+	BuildTime                       string `json:"build_time"`
+	Executable                      string `json:"executable"`
+	OpenAICompatibleChatCompletions bool   `json:"openai_compatible_chat_completions"`
+}
+
+func resolveFreeCodeCommand(requested string) (ResolvedCommand, error) {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return ResolvedCommand{}, fmt.Errorf("free-code command is empty")
+	}
+
+	executable := requested
+	if filepath.IsAbs(requested) {
+		info, err := os.Stat(requested)
+		if err != nil {
+			return ResolvedCommand{}, fmt.Errorf("selected free-code command %q is unavailable: %w", requested, err)
+		}
+		if info.IsDir() || (runtime.GOOS != "windows" && info.Mode()&0111 == 0) {
+			return ResolvedCommand{}, fmt.Errorf("selected free-code command %q is not executable", requested)
+		}
+	} else {
+		var err error
+		executable, err = exec.LookPath(requested)
+		if err != nil {
+			return ResolvedCommand{}, fmt.Errorf("selected free-code command %q cannot be resolved: %w", requested, err)
+		}
+	}
+	if absolute, err := filepath.Abs(executable); err == nil {
+		executable = absolute
+	}
+	resolvedTarget := executable
+	if target, err := filepath.EvalSymlinks(executable); err == nil {
+		resolvedTarget = target
+	}
+	return ResolvedCommand{Requested: requested, Executable: executable, ResolvedTarget: resolvedTarget}, nil
+}
+
+func readFreeCodeCapabilities(command ResolvedCommand) (freeCodeCapabilities, error) {
+	output, err := exec.Command(command.Executable, "capabilities", "--json").Output()
+	if err != nil {
+		return freeCodeCapabilities{}, err
+	}
+	var capabilities freeCodeCapabilities
+	if err := json.Unmarshal(output, &capabilities); err != nil {
+		return freeCodeCapabilities{}, err
+	}
+	return capabilities, nil
+}
+
 // FreeClaudeAdapter renders config for free-code (the guardrail/telemetry-stripped
 // Claude Code fork, installed binary "free-code"). It is wire-compatible with Claude
 // Code: same env vars (ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN),
@@ -1152,11 +1221,8 @@ func (FreeClaudeAdapter) Validate(p profile.Profile, prov provider.Provider) ([]
 	if p.ModelID() == "" {
 		warnings = append(warnings, "no main model selected; free-code will use its default (claude-sonnet-4-5)")
 	}
-	if needsAnthropicBridge(p, prov) {
-		warnings = append(warnings, "one or more selected models use AegisKeys' local Anthropic-to-OpenAI bridge")
-	}
 	if prov.Compatibility == provider.CompatOpenAI && prov.Slug != "openrouter" {
-		warnings = append(warnings, "using an OpenAI-compatible provider through free-code's Anthropic Messages gateway")
+		warnings = append(warnings, "using free-code's native OpenAI-compatible Chat Completions transport")
 	}
 	return warnings, nil
 }
@@ -1203,55 +1269,80 @@ func (FreeClaudeAdapter) Render(p profile.Profile, prov provider.Provider, key *
 		env["CLAUDE_CODE_SUBAGENT_MODEL"] = anthropicModelID(prov, p.Models.Subagent.ID)
 	}
 
-	baseURL := anthropicBaseURL(prov)
-
 	var protocolBridge *ProtocolBridge
 	switch prov.Compatibility {
 	case provider.CompatAnthropic:
+		delete(env, "ANTHROPIC_API_KEY")
+		delete(env, "OPENAI_API_KEY")
+		delete(env, "OPENAI_BASE_URL")
+		delete(env, "CLAUDE_CODE_USE_OPENAI_COMPATIBLE")
+		delete(env, "CLAUDE_CODE_USE_OPENAI")
+		delete(env, "CLAUDE_CODE_USE_CODEX")
+		delete(env, prov.CanonicalEnvVar())
 		if prov.CanonicalEnvVar() != "" && key != nil {
-			env["ANTHROPIC_API_KEY"] = key.Secret
+			env[anthropicAuthEnvFor(prov)] = key.Secret
 		}
-		env["ANTHROPIC_BASE_URL"] = baseURL
+		env["ANTHROPIC_BASE_URL"] = anthropicBaseURL(prov)
 	case provider.CompatOpenAI:
 		if prov.Auth.Type == "aws" {
 			break
 		}
+		if key == nil || key.Secret == "" {
+			return nil, fmt.Errorf("OpenAI-compatible free-code launch requires an API key")
+		}
 		delete(env, prov.CanonicalEnvVar())
-		if key != nil {
-			// free-code uses the Anthropic SDK request path.  Unlike Claude
-			// Code, it does not reject a non-sk-ant key in ANTHROPIC_API_KEY;
-			// leaving that variable empty causes the SDK to make an unauthenticated
-			// request for OpenAI-compatible gateways such as OpenCode Go.
-			env["ANTHROPIC_AUTH_TOKEN"] = key.Secret
-			env["ANTHROPIC_API_KEY"] = key.Secret
-		}
-		env["ANTHROPIC_BASE_URL"] = baseURL
-		if needsAnthropicBridge(p, prov) {
-			if key == nil || key.Secret == "" {
-				return nil, fmt.Errorf("OpenAI bridge requires an API key")
-			}
-			// The bridge authenticates to the upstream itself. Free Code only
-			// needs a non-empty local credential to satisfy its Anthropic client.
-			env["ANTHROPIC_AUTH_TOKEN"] = "aegiskeys-local-bridge"
-			env["ANTHROPIC_API_KEY"] = "aegiskeys-local-bridge"
-			protocolBridge = &ProtocolBridge{TargetBaseURL: prov.CanonicalBaseURL(), TargetAPIKey: key.Secret}
-		}
+		delete(env, "ANTHROPIC_API_KEY")
+		delete(env, "ANTHROPIC_AUTH_TOKEN")
+		delete(env, "ANTHROPIC_BASE_URL")
+		delete(env, "CLAUDE_CODE_USE_OPENAI")
+		delete(env, "CLAUDE_CODE_USE_CODEX")
+		env["CLAUDE_CODE_USE_OPENAI_COMPATIBLE"] = "1"
+		env["OPENAI_BASE_URL"] = prov.CanonicalBaseURL()
+		env["OPENAI_API_KEY"] = key.Secret
+		protocolBridge = nil
 	}
 
 	// Resolve launcher: try auto-detect first, then fall back to the
 	// Try auto-detect first, then fall back to the user-configured
 	// command override (profile Target.Command) so that non-standard
 	// install locations work.
-	freeCodeCmd := findFreeCodeBinary()
-	if freeCodeCmd == "" {
-		freeCodeCmd = p.Target.Command
+	freeCodeRequested := strings.TrimSpace(p.Target.Command)
+	if freeCodeRequested == "" {
+		freeCodeRequested = findFreeCodeBinary()
 	}
-	if freeCodeCmd == "" {
+	if freeCodeRequested == "" {
 		return nil, fmt.Errorf("free-code binary not found on PATH or in ~/.local/bin, ~/.cargo/bin, /usr/local/bin — install free-code or set a custom command in the profile target")
 	}
+	command, err := resolveFreeCodeCommand(freeCodeRequested)
+	if err != nil {
+		return nil, err
+	}
+	var capabilities freeCodeCapabilities
+	if prov.Compatibility == provider.CompatOpenAI {
+		capabilities, err = requireFreeCodeOpenAICompatibility(command)
+		if err != nil {
+			return nil, err
+		}
+	} else if loaded, capabilityErr := readFreeCodeCapabilities(command); capabilityErr == nil {
+		capabilities = loaded
+	}
 
+	transport := TransportAnthropicMessages
+	if prov.Compatibility == provider.CompatOpenAI {
+		transport = TransportOpenAIChat
+	}
+	preview := freeClaudePreview(p, prov, transport, command, capabilities)
 	return &LaunchStrategy{
-		Plan:   LaunchPlan{Command: freeCodeCmd, Env: env, Preview: buildPreview(p.Name, prov)},
+		Plan: LaunchPlan{
+			Command:           command.Executable,
+			Env:               env,
+			Preview:           preview,
+			Transport:         transport,
+			CommandResolution: &command,
+			BuildTime:         capabilities.BuildTime,
+			BuildExecutable:   capabilities.Executable,
+			AdapterRevision:   FreeClaudeAdapterRevision,
+		},
 		Bridge: protocolBridge,
 		Support: AppSupportContract{
 			ID: "free-claude", DisplayName: "Free Claude (free-code)", SupportLevel: SupportFullEnv,
@@ -1267,6 +1358,48 @@ func (FreeClaudeAdapter) Render(p profile.Profile, prov provider.Provider, key *
 	}, nil
 }
 
+func requireFreeCodeOpenAICompatibility(command ResolvedCommand) (freeCodeCapabilities, error) {
+	capabilities, err := readFreeCodeCapabilities(command)
+	if err != nil || !capabilities.OpenAICompatibleChatCompletions {
+		return freeCodeCapabilities{}, fmt.Errorf("selected free-code binary does not support the generic OpenAI-compatible transport; rebuild/install current free-code or set target.command to a compatible binary")
+	}
+	return capabilities, nil
+}
+
+func freeClaudePreview(p profile.Profile, prov provider.Provider, transport TransportKind, command ResolvedCommand, capabilities freeCodeCapabilities) []string {
+	preview := buildPreview(p.Name, prov)
+	preview = append(preview,
+		"Application: Free Claude",
+		"Transport: "+freeClaudeTransportName(transport),
+		"Command: "+command.Requested,
+		"Resolved command: "+command.ResolvedTarget,
+	)
+	if capabilities.BuildTime != "" {
+		preview = append(preview, "Build time: "+capabilities.BuildTime)
+	}
+	if transport == TransportOpenAIChat {
+		preview = append(preview, "Endpoint: "+prov.CanonicalBaseURL(), "Credential variable: OPENAI_API_KEY")
+	} else {
+		preview = append(preview, "Endpoint: "+anthropicBaseURL(prov), "Credential variable: "+anthropicAuthEnvFor(prov))
+	}
+	if p.Models.Main != nil && p.Models.Main.ID != "" {
+		preview = append(preview, "Model: "+anthropicModelID(prov, p.Models.Main.ID))
+	}
+	preview = append(preview, fmt.Sprintf("Adapter revision: %d", FreeClaudeAdapterRevision))
+	return preview
+}
+
+func freeClaudeTransportName(transport TransportKind) string {
+	switch transport {
+	case TransportOpenAIChat:
+		return "OpenAI Chat Completions"
+	case TransportAnthropicMessages:
+		return "Anthropic Messages"
+	default:
+		return string(transport)
+	}
+}
+
 // anthropicBaseURL returns the Anthropic-compatible endpoint for providers
 // that expose more than one wire format. LongCat's OpenAI endpoint must never
 // be passed to Claude Code, which sends Anthropic Messages requests.
@@ -1276,6 +1409,21 @@ func anthropicBaseURL(prov provider.Provider) string {
 	}
 	baseURL, _ := strings.CutSuffix(prov.CanonicalBaseURL(), "/v1")
 	return baseURL
+}
+
+// anthropicAuthEnvFor returns the env var through which the provider's API key
+// should be delivered to an Anthropic-SDK client (Claude Code / free-code).
+// Real Anthropic and most Anthropic-compat gateways read ANTHROPIC_API_KEY.
+// FreeInference's /anthropic endpoint, however, follows Claude Code's
+// ANTHROPIC_AUTH_TOKEN convention (the key is not an sk-ant-* value), so the
+// key must be injected there — otherwise the client treats the value as a real
+// Anthropic key and the gateway rejects it, falling back to an interactive auth
+// prompt.
+func anthropicAuthEnvFor(prov provider.Provider) string {
+	if prov.Slug == "freeinference-anthropic" {
+		return "ANTHROPIC_AUTH_TOKEN"
+	}
+	return "ANTHROPIC_API_KEY"
 }
 
 func anthropicModelID(prov provider.Provider, modelID string) string {

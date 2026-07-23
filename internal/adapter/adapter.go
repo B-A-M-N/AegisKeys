@@ -22,9 +22,38 @@ type LaunchPlan struct {
 	Files   []FileWrite
 	Preview []string // human-readable summary lines
 
-	Warnings []string
-	Hazards  []Hazard
+	// CommandResolution records both the path selected for execution and its
+	// symlink-resolved target. It lets previews distinguish a user's launcher
+	// from the artifact that will actually run.
+	CommandResolution *ResolvedCommand
+	BuildTime         string
+	BuildExecutable   string
+	AdapterRevision   int
+
+	Warnings  []string
+	Hazards   []Hazard
+	Transport TransportKind
 }
+
+// ResolvedCommand separates the path requested by a profile from the path
+// executed by the OS and the final symlink target used for diagnostics.
+// None of these fields contain credentials.
+type ResolvedCommand struct {
+	Requested      string
+	Executable     string
+	ResolvedTarget string
+}
+
+// TransportKind records the wire protocol selected for a launch plan so the
+// runner and preview can reject contradictory credential environments.
+type TransportKind string
+
+const (
+	TransportAnthropicMessages TransportKind = "anthropic_messages"
+	TransportOpenAIChat        TransportKind = "openai_chat_completions"
+	TransportCodexResponses    TransportKind = "codex_responses"
+	TransportLocalBridge       TransportKind = "local_bridge"
+)
 
 // AppAdapter renders a profile into a launch strategy for one application type.
 type AppAdapter interface {

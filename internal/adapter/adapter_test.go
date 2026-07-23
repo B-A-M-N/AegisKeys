@@ -939,7 +939,7 @@ func TestClaudeCodeAdapter_LongCatUsesAnthropicEndpoint(t *testing.T) {
 
 func TestFreeClaudeAdapter_RepairsLegacyGoModelPrefix(t *testing.T) {
 	a := FreeClaudeAdapter{}
-	p := profile.Profile{Name: "go", Target: profile.TargetConfig{Command: "/bin/true"}, Models: profile.ModelSlots{Main: &profile.ModelRef{ID: "opencode/minimax-m3"}}}
+	p := profile.Profile{Name: "go", Target: profile.TargetConfig{}, Models: profile.ModelSlots{Main: &profile.ModelRef{ID: "opencode/minimax-m3"}}}
 	prov := provider.Provider{Slug: "opencode-go", Compatibility: provider.CompatOpenAI}
 	strategy, err := a.Render(p, prov, testAPIKey("test"))
 	if err != nil {

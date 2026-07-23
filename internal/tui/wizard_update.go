@@ -661,8 +661,9 @@ func (m *model) wizardSave() (tea.Model, tea.Cmd) {
 		ProviderSlug: d.ProviderSlug,
 		KeyID:        d.KeyID,
 		Target: profile.TargetConfig{
-			App:        d.AppID,
-			RenderMode: renderMode,
+			App:             d.AppID,
+			RenderMode:      renderMode,
+			AdapterRevision: freeClaudeAdapterRevisionFor(d.AppID),
 		},
 		Models: d.Models,
 		Env:    d.Env,
@@ -695,6 +696,13 @@ func (m *model) wizardSave() (tea.Model, tea.Cmd) {
 	m.wizard.active = false
 	m.statusMsg = "Profile saved: " + name
 	return m, nil
+}
+
+func freeClaudeAdapterRevisionFor(appID string) int {
+	if appID == "free-claude" {
+		return adapter.FreeClaudeAdapterRevision
+	}
+	return 0
 }
 
 // targetConfigFiles converts adapter FileWrites to profile TargetConfigFiles.

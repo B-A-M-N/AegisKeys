@@ -10,13 +10,13 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 
+	"aegiskeys/internal/adapter"
 	"aegiskeys/internal/audit"
+	"aegiskeys/internal/config"
 	"aegiskeys/internal/logo"
 	"aegiskeys/internal/profile"
 	"aegiskeys/internal/provider"
 	"aegiskeys/internal/secret"
-
-	"aegiskeys/internal/adapter"
 )
 
 func newTestModel(t *testing.T) *model {
@@ -49,6 +49,109 @@ func newTestModel(t *testing.T) *model {
 	m.addInput.Placeholder = "name"
 	m.addInput.SetWidth(40)
 	return m
+}
+
+func unlockTestVault(t *testing.T, m *model, records ...secret.SecretRecord) string {
+	t.Helper()
+	password := "test vault password"
+	vaultPath := config.VaultPath(m.configDir)
+	if err := secret.InitVault(vaultPath, password); err != nil {
+		t.Fatalf("init vault: %v", err)
+	}
+	vault, key, err := secret.LoadVaultWithKey(vaultPath, password)
+	if err != nil {
+		t.Fatalf("load vault: %v", err)
+	}
+	for _, rec := range records {
+		if err := vault.Add(rec); err != nil {
+			t.Fatalf("add test key: %v", err)
+		}
+	}
+	if err := secret.SaveVaultWithKey(vaultPath, key, vault); err != nil {
+		t.Fatalf("save test vault: %v", err)
+	}
+	m.unlocked = true
+	m.vaultSession = &vaultSession{vault: vault, key: key}
+	m.keys = secret.ToMaskedList(vault.Keys)
+	return password
+}
+
+func TestProfileReplaceKeyRepairsMissingVaultRecord(t *testing.T) {
+	m := newTestModel(t)
+	password := unlockTestVault(t, m)
+	m.active = screenProfiles
+	m.focus = focusContent
+
+	sendKey(t, m, "t")
+	if m.modal != modalReplaceProfileKey {
+		t.Fatalf("expected profile key replacement modal, got %v", m.modal)
+	}
+	if m.modalTarget != "key_1" {
+		t.Fatalf("expected profile key target, got %q", m.modalTarget)
+	}
+	if strings.Contains(m.modalPrompt, "key_1") {
+		t.Fatalf("replacement prompt exposed opaque key ID: %q", m.modalPrompt)
+	}
+	modalView := stripANSIForTest(m.View().Content)
+	if !strings.Contains(modalView, "Replace API Key") || !strings.Contains(modalView, "Replace API key for or-main") {
+		t.Fatal("profile key replacement modal did not render its prompt")
+	}
+
+	const replacement = "new-openrouter-key"
+	m.addInput.SetValue(replacement)
+	_, _ = m.commitRotate()
+
+	if m.modal != modalNone {
+		t.Fatal("expected replacement modal to close")
+	}
+	if got := m.vaultSession.vault.Get("key_1"); got == nil || got.Secret != replacement {
+		t.Fatal("expected missing profile key to be recreated")
+	}
+	if got := m.vaultSession.vault.Get("key_1"); got.ProviderSlug != "openrouter" {
+		t.Fatalf("expected recreated key provider openrouter, got %q", got.ProviderSlug)
+	}
+	if !strings.Contains(m.statusMsg, "or-main") || strings.Contains(m.statusMsg, replacement) {
+		t.Fatal("replacement status did not identify the profile safely")
+	}
+	if m.addInput.Value() != "" {
+		t.Fatal("replacement secret remained in input buffer")
+	}
+
+	persisted, err := secret.LoadVault(config.VaultPath(m.configDir), password)
+	if err != nil {
+		t.Fatalf("reload saved vault: %v", err)
+	}
+	if got := persisted.Get("key_1"); got == nil || got.Secret != replacement {
+		t.Fatal("recreated profile key was not persisted")
+	}
+	if strings.Contains(stripANSIForTest(m.View().Content), replacement) {
+		t.Fatal("replacement secret leaked into the TUI view")
+	}
+}
+
+func TestProfileReplaceKeyRotatesExistingRecord(t *testing.T) {
+	m := newTestModel(t)
+	unlockTestVault(t, m, secret.SecretRecord{
+		ID:           "key_1",
+		Kind:         secret.SecretAPIKey,
+		ProviderSlug: "openrouter",
+		Label:        "existing key",
+		Secret:       "old-key",
+	})
+	m.active = screenProfiles
+	m.focus = focusContent
+
+	_, _ = m.handleProfilesKey("t")
+	m.addInput.SetValue("replacement-key")
+	_, _ = m.commitRotate()
+
+	got := m.vaultSession.vault.Get("key_1")
+	if got == nil || got.Secret != "replacement-key" {
+		t.Fatal("expected existing key to rotate")
+	}
+	if got.Label != "existing key" || got.LastRotatedAt == nil {
+		t.Fatal("expected existing key metadata to be preserved and stamped")
+	}
 }
 
 func sendKey(t *testing.T, m *model, key string) {

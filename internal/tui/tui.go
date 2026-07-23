@@ -160,6 +160,7 @@ const (
 	modalEdit
 	modalAddKey
 	modalRotate
+	modalReplaceProfileKey
 )
 
 type launchMode int

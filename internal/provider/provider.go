@@ -209,8 +209,19 @@ func CredentialCompatible(providerSlug, keyProviderSlug string) bool {
 		(keyProviderSlug == "zen" || keyProviderSlug == "opencode-go") {
 		return true
 	}
-	return (providerSlug == "cline" || providerSlug == "cline-pass") &&
-		(keyProviderSlug == "cline" || keyProviderSlug == "cline-pass")
+	if (providerSlug == "cline" || providerSlug == "cline-pass") &&
+		(keyProviderSlug == "cline" || keyProviderSlug == "cline-pass") {
+		return true
+	}
+
+	// freeinference and freeinference-anthropic share a single FreeInference
+	// API key but expose different wire formats (OpenAI vs Anthropic). A key
+	// recorded for either slug works with both providers.
+	if (providerSlug == "freeinference" || providerSlug == "freeinference-anthropic") &&
+		(keyProviderSlug == "freeinference" || keyProviderSlug == "freeinference-anthropic") {
+		return true
+	}
+	return false
 }
 
 // CanonicalEnvVar returns the environment variable name for the API key.
@@ -1077,6 +1088,62 @@ var defaultProviders = []Provider{
 		ModelPolicy:  ModelCatalogPolicy{Source: ModelSourceStatic},
 		Capabilities: Capabilities{ToolUse: true, Vision: false, Streaming: true, FunctionCalling: true},
 		Tags:         []string{"coding", "paid"},
+	},
+	{
+		ID: "freeinference", Name: "FreeInference", Slug: "freeinference",
+		BaseURL: "https://freeinference.org/v1", EnvVar: "FREEINFERENCE_API_KEY",
+		AuthHeader:    "Authorization: Bearer ${KEY}",
+		Compatibility: CompatOpenAI, Protocol: ProtocolOpenAI,
+		Auth:      AuthSpec{Type: "bearer", HeaderName: "Authorization", Prefix: "Bearer ", EnvVar: "FREEINFERENCE_API_KEY"},
+		Endpoints: EndpointSpec{BaseURL: "https://freeinference.org/v1", APIPath: "/chat/completions", ModelsURL: "https://freeinference.org/v1/models"},
+		Catalog:   ModelCatalogSpec{Source: "static"},
+		Models: []ProviderModel{
+			{ID: "glm-5.1", Name: "GLM-5.1", ContextSize: 200000, Aliases: []string{"freeinference-glm-5.1"}},
+			{ID: "glm-5.2", Name: "GLM-5.2", ContextSize: 1000000, Aliases: []string{"freeinference-glm-5.2"}},
+			{ID: "glm-5-turbo", Name: "GLM-5 Turbo", ContextSize: 200000, Aliases: []string{"freeinference-glm-5-turbo"}},
+			{ID: "qwen3.6-35b", Name: "Qwen3.6 35B", ContextSize: 262144},
+			{ID: "minimax-m2.5", Name: "MiniMax M2.5", ContextSize: 204800},
+			{ID: "minimax-m2.7", Name: "MiniMax M2.7", ContextSize: 204800},
+			{ID: "minimax-m3", Name: "MiniMax M3", ContextSize: 1048576},
+			{ID: "kimi-k2.7-code", Name: "Kimi K2.7 Code", ContextSize: 262144, Aliases: []string{"Kimi-K2.7-Code", "kimi-k2.7"}},
+		},
+		ModelPolicy:  ModelCatalogPolicy{Source: ModelSourceStatic},
+		Capabilities: Capabilities{ToolUse: true, Vision: true, Streaming: true, FunctionCalling: true, MaxContext: 1048576},
+		Tags:         []string{"coding", "chat", "router", "multilingual", "paid", "free-tier"},
+		AppHints: []AppHint{
+			{App: "claude-code", Notes: "FreeInference also exposes an Anthropic-compatible endpoint at https://freeinference.org/anthropic for Claude Code. Set ANTHROPIC_BASE_URL=https://freeinference.org/anthropic, ANTHROPIC_AUTH_TOKEN=<key>, and ANTHROPIC_MODEL to a public FreeInference model (e.g. glm-5.1)."},
+			{App: "cursor", Notes: "Cursor: set OpenAI API Key to your FreeInference key and Override OpenAI Base URL to https://freeinference.org/v1."},
+			{App: "kilo-code", Notes: "Kilo Code: OpenAI Compatible provider with base URL https://freeinference.org/v1."},
+			{App: "roo-code", Notes: "Roo Code / Cline / Windsurf: OpenAI Compatible provider with base URL https://freeinference.org/v1."},
+			{App: "continue", Notes: "Continue: provider openai, apiBase https://freeinference.org/v1."},
+		},
+		Notes: "OpenAI-compatible endpoint is https://freeinference.org/v1 (base URL, no extra path). An Anthropic-compatible endpoint at https://freeinference.org/anthropic is also available for Claude Code. glm-5.2 is internal/staff-only and returns 403 on public keys. Embeddings are exposed at /v1/embeddings for IDE codebase indexing.",
+	},
+	{
+		ID: "freeinference-anthropic", Name: "FreeInference (Anthropic)", Slug: "freeinference-anthropic",
+		BaseURL: "https://freeinference.org/anthropic", EnvVar: "FREEINFERENCE_API_KEY",
+		AuthHeader:    "Authorization: Bearer ${KEY}",
+		Compatibility: CompatAnthropic, Protocol: ProtocolAnthropic,
+		Auth:      AuthSpec{Type: "bearer", HeaderName: "Authorization", Prefix: "Bearer ", EnvVar: "FREEINFERENCE_API_KEY"},
+		Endpoints: EndpointSpec{BaseURL: "https://freeinference.org/anthropic", APIPath: "/v1/messages"},
+		Catalog:   ModelCatalogSpec{Source: "static"},
+		Models: []ProviderModel{
+			{ID: "glm-5.1", Name: "GLM-5.1", ContextSize: 200000, Aliases: []string{"freeinference-glm-5.1"}},
+			{ID: "glm-5.2", Name: "GLM-5.2", ContextSize: 1000000, Aliases: []string{"freeinference-glm-5.2"}},
+			{ID: "glm-5-turbo", Name: "GLM-5 Turbo", ContextSize: 200000, Aliases: []string{"freeinference-glm-5-turbo"}},
+			{ID: "qwen3.6-35b", Name: "Qwen3.6 35B", ContextSize: 262144},
+			{ID: "minimax-m2.5", Name: "MiniMax M2.5", ContextSize: 204800},
+			{ID: "minimax-m2.7", Name: "MiniMax M2.7", ContextSize: 204800},
+			{ID: "minimax-m3", Name: "MiniMax M3", ContextSize: 1048576},
+			{ID: "kimi-k2.7-code", Name: "Kimi K2.7 Code", ContextSize: 262144, Aliases: []string{"Kimi-K2.7-Code", "kimi-k2.7"}},
+		},
+		ModelPolicy:  ModelCatalogPolicy{Source: ModelSourceStatic},
+		Capabilities: Capabilities{ToolUse: true, Vision: true, Streaming: true, FunctionCalling: true, MaxContext: 1048576},
+		Tags:         []string{"coding", "chat", "anthropic-compat", "router", "multilingual", "paid", "free-tier"},
+		AppHints: []AppHint{
+			{App: "claude-code", Notes: "Native Anthropic-compatible endpoint for Claude Code. AegisKeys sets ANTHROPIC_BASE_URL=https://freeinference.org/anthropic and injects the FreeInference key. Set the profile model to a public FreeInference model (e.g. glm-5.1)."},
+		},
+		Notes: "Anthropic-wire-format endpoint for Claude Code and other Anthropic-SDK agents. Shares the same FreeInference API key as the OpenAI-compatible 'freeinference' provider. glm-5.2 is internal/staff-only. Use this provider for Claude Code-based apps with ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL.",
 	},
 }
 

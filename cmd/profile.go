@@ -90,8 +90,9 @@ var profileCreateCmd = &cobra.Command{
 			KeyID:        profCreateKey,
 			Notes:        profCreateNotes,
 			Target: profile.TargetConfig{
-				App:     appID,
-				Command: profCreateCommand,
+				App:             appID,
+				Command:         profCreateCommand,
+				AdapterRevision: freeClaudeRevisionFor(appID),
 			},
 		}
 		if profCreateAlias != "" {
@@ -164,6 +165,13 @@ var profileCreateCmd = &cobra.Command{
 		fmt.Printf("Created profile %s\n", profCreateName)
 		return nil
 	},
+}
+
+func freeClaudeRevisionFor(appID string) int {
+	if appID == "free-claude" {
+		return adapter.FreeClaudeAdapterRevision
+	}
+	return 0
 }
 
 var profileListCmd = &cobra.Command{

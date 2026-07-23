@@ -166,6 +166,31 @@ func TestValidateLaunchStrategyRejectsRawSecretSubstrings(t *testing.T) {
 	})
 }
 
+func TestValidateLaunchStrategyEnforcesFreeClaudeTransportEnv(t *testing.T) {
+	base := AppSupportContract{ID: "test", DisplayName: "Test", DefaultCommand: "test", SupportLevel: SupportFullEnv, CredentialControl: CredentialEnvInjected, SupportConfidence: ConfidenceExperimental, RenderModes: []string{"env"}, LaunchSurfaces: []string{"cli"}, CanLaunch: true, CanInjectSecrets: true}
+	prof := profile.Profile{Name: "test"}
+	prov := provider.Provider{}
+	key := testAPIKey("secret")
+
+	validOpenAI := &LaunchStrategy{Support: base, Plan: LaunchPlan{Command: "test", Transport: TransportOpenAIChat, Env: map[string]string{"CLAUDE_CODE_USE_OPENAI_COMPATIBLE": "1", "OPENAI_BASE_URL": "https://example.test/v1", "OPENAI_API_KEY": "secret"}}}
+	if err := ValidateLaunchStrategy(validOpenAI, prof, prov, key, DefaultSecurityPolicy()); err != nil {
+		t.Fatalf("valid OpenAI transport rejected: %v", err)
+	}
+	validOpenAI.Plan.Env["ANTHROPIC_API_KEY"] = "contamination"
+	if err := ValidateLaunchStrategy(validOpenAI, prof, prov, key, DefaultSecurityPolicy()); err == nil {
+		t.Fatal("contaminated OpenAI transport accepted")
+	}
+
+	validAnthropic := &LaunchStrategy{Support: base, Plan: LaunchPlan{Command: "test", Transport: TransportAnthropicMessages, Env: map[string]string{"ANTHROPIC_BASE_URL": "https://example.test/anthropic", "ANTHROPIC_AUTH_TOKEN": "secret"}}}
+	if err := ValidateLaunchStrategy(validAnthropic, prof, prov, key, DefaultSecurityPolicy()); err != nil {
+		t.Fatalf("valid Anthropic transport rejected: %v", err)
+	}
+	validAnthropic.Plan.Env["ANTHROPIC_API_KEY"] = "second"
+	if err := ValidateLaunchStrategy(validAnthropic, prof, prov, key, DefaultSecurityPolicy()); err == nil {
+		t.Fatal("dual Anthropic credentials accepted")
+	}
+}
+
 // TestContractEnforcement_ManualAppNoSecret verifies that a manual-credential app
 // (cursor) either resolves without leaking the raw secret or gets blocked by the
 // contract enforcer. Both outcomes are acceptable for security.

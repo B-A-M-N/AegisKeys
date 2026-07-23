@@ -614,7 +614,12 @@ func (d keyDelegate) Render(w io.Writer, m list.Model, index int, item list.Item
 
 ### 4.4 Profiles Screen
 
-**Purpose**: List, create, edit, validate profiles.
+**Purpose**: List, create, edit, validate profiles, and replace their API keys.
+
+With a profile selected, press `T` to replace its API key. The prompt accepts a
+new secret without exposing the profile's key ID. If the referenced encrypted
+key record was deleted, AegisKeys restores that record under the same ID so the
+profile can be launched again.
 
 ```go
 // internal/tui/profiles.go

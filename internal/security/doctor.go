@@ -76,6 +76,7 @@ func RunDoctor(configDir string) []CheckResult {
 		{"Providers validate strictly", func() CheckResult { return checkProvidersStrict(configDir) }},
 		{"Adapter contracts complete", func() CheckResult { return checkContracts() }},
 		{"Adapter proof status", func() CheckResult { return checkAdapterProofStatus() }},
+		{"Free Claude transport contracts", func() CheckResult { return checkFreeClaudeTransportProfiles(configDir) }},
 		{"Temp env files not stale", func() CheckResult { return checkTempEnvfiles(configDir) }},
 	}
 	var results []CheckResult
@@ -83,6 +84,91 @@ func RunDoctor(configDir string) []CheckResult {
 		results = append(results, c.fn())
 	}
 	return results
+}
+
+// checkFreeClaudeTransportProfiles re-renders Free Claude profiles with a
+// disposable in-memory secret. This verifies the selected executable and
+// transport shape without loading or printing vault material.
+func checkFreeClaudeTransportProfiles(dir string) CheckResult {
+	store, err := profile.LoadStore(filepath.Join(dir, "profiles.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return CheckResult{SeverityOK, "No Free Claude profiles configured", ""}
+		}
+		return CheckResult{SeverityWarn, fmt.Sprintf("Cannot inspect Free Claude profiles: %v", err), "Repair profiles.json and run doctor again"}
+	}
+	providers, err := provider.LoadRegistry(filepath.Join(dir, "providers.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return CheckResult{SeverityOK, "No Free Claude profiles configured", ""}
+		}
+		return CheckResult{SeverityWarn, fmt.Sprintf("Cannot inspect Free Claude providers: %v", err), "Repair providers.json and run doctor again"}
+	}
+
+	registry := adapter.NewRegistry()
+	var issues []string
+	checked := 0
+	for _, p := range store.Profiles {
+		if p.TargetApp() != "free-claude" {
+			continue
+		}
+		checked++
+		prov := providers.Find(p.ProviderSlug)
+		if prov == nil {
+			issues = append(issues, fmt.Sprintf("profile %q references missing provider %q", p.Name, p.ProviderSlug))
+			continue
+		}
+		key := &secret.SecretRecord{ID: "doctor-placeholder", ProviderSlug: prov.Slug, Secret: "aegiskeys-doctor-placeholder", Kind: secret.SecretAPIKey}
+		strategy, renderErr := adapter.ResolveLaunchStrategyForMode(p, *prov, key, registry, adapter.ResolvePreview)
+		if renderErr != nil {
+			issues = append(issues, fmt.Sprintf("profile %q cannot produce a valid Free Claude launch plan: %v", p.Name, renderErr))
+			continue
+		}
+		plan := strategy.Plan
+		if p.Target.AdapterRevision < adapter.FreeClaudeAdapterRevision {
+			issues = append(issues, fmt.Sprintf("profile %q uses Free Claude adapter revision %d; regenerate its preview with revision %d", p.Name, p.Target.AdapterRevision, adapter.FreeClaudeAdapterRevision))
+		}
+		switch plan.Transport {
+		case adapter.TransportOpenAIChat:
+			for _, forbidden := range []string{"ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"} {
+				if plan.Env[forbidden] != "" {
+					issues = append(issues, fmt.Sprintf("profile %q OpenAI transport incorrectly sets %s", p.Name, forbidden))
+				}
+			}
+			if plan.Env["CLAUDE_CODE_USE_OPENAI_COMPATIBLE"] != "1" || plan.Env["OPENAI_BASE_URL"] == "" || plan.Env["OPENAI_API_KEY"] == "" {
+				issues = append(issues, fmt.Sprintf("profile %q OpenAI transport is missing a required selector, endpoint, or credential variable", p.Name))
+			}
+			if prov.Slug == "freeinference" && plan.Env["OPENAI_BASE_URL"] != "https://freeinference.org/v1" {
+				issues = append(issues, fmt.Sprintf("profile %q lost the required FreeInference /v1 OpenAI endpoint", p.Name))
+			}
+		case adapter.TransportAnthropicMessages:
+			if plan.Env["ANTHROPIC_BASE_URL"] == "" || (plan.Env["ANTHROPIC_API_KEY"] == "" && plan.Env["ANTHROPIC_AUTH_TOKEN"] == "") {
+				issues = append(issues, fmt.Sprintf("profile %q Anthropic transport is missing an endpoint or credential variable", p.Name))
+			}
+			if plan.Env["ANTHROPIC_API_KEY"] != "" && plan.Env["ANTHROPIC_AUTH_TOKEN"] != "" {
+				issues = append(issues, fmt.Sprintf("profile %q sets both ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN", p.Name))
+			}
+			for _, forbidden := range []string{"OPENAI_BASE_URL", "OPENAI_API_KEY", "CLAUDE_CODE_USE_OPENAI_COMPATIBLE"} {
+				if plan.Env[forbidden] != "" {
+					issues = append(issues, fmt.Sprintf("profile %q Anthropic transport incorrectly sets %s", p.Name, forbidden))
+				}
+			}
+		default:
+			issues = append(issues, fmt.Sprintf("profile %q has no recognized Free Claude transport", p.Name))
+		}
+		if plan.CommandResolution == nil || plan.BuildExecutable == "" {
+			issues = append(issues, fmt.Sprintf("profile %q cannot verify the selected free-code build identity", p.Name))
+		} else if filepath.Clean(plan.CommandResolution.ResolvedTarget) != filepath.Clean(plan.BuildExecutable) {
+			issues = append(issues, fmt.Sprintf("profile %q selected free-code launcher resolves to %q but capabilities reports %q", p.Name, plan.CommandResolution.ResolvedTarget, plan.BuildExecutable))
+		}
+	}
+	if len(issues) > 0 {
+		return CheckResult{SeverityFail, strings.Join(issues, "; "), "Use a current free-code binary, regenerate the profile preview, and remove cross-transport environment variables"}
+	}
+	if checked == 0 {
+		return CheckResult{SeverityOK, "No Free Claude profiles configured", ""}
+	}
+	return CheckResult{SeverityOK, fmt.Sprintf("All %d Free Claude profile(s) have valid transport and build identity", checked), ""}
 }
 
 func checkConfigDir(dir string) CheckResult {

@@ -31,7 +31,36 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.matrix != nil {
 			m.matrix.Resize(m.width, m.height)
 		}
+		// Re-focus active inputs after terminal resize/refocus so the user
+		// doesn't need to Tab/Escape to "wake up" the app after navigating
+		// back to the terminal (terminal emulators often lose cursor tracking
+		// during SIGTSTP/focus-loss).
+		if m.focus == focusModal {
+			if m.addInput.Focused() {
+				return m, m.addInput.Focus()
+			}
+		}
+		if !m.unlocked && m.vaultExists {
+			if !m.passwordInput.Focused() {
+				return m, m.passwordInput.Focus()
+			}
+		}
 		return m, nil
+
+	case tea.FocusMsg:
+		// Terminal regained focus (e.g. after Ctrl+Z / fg or alt-tab back).
+		// Re-assert focus on whichever input owns the cursor so the user
+		// doesn't need a Tab/Esc to "wake up" the app.
+		if m.focus == focusModal && m.modal != modalNone && m.modal != modalConfirmDelete && m.modal != modalDetail {
+			if !m.addInput.Focused() {
+				return m, m.addInput.Focus()
+			}
+		}
+		if !m.unlocked && m.vaultExists {
+			return m, m.passwordInput.Focus()
+		}
+		// Resend screen init commands to re-stabilise layout after refocus.
+		return m, m.screenInitCmd(m.active)
 
 	case matrixMsg:
 		if m.matrix != nil {
@@ -297,29 +326,38 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // (specifically the secret field) is the main case, but delete-confirm and
 // other modals ignore paste.
 func (m *model) handlePaste(content string) (tea.Model, tea.Cmd) {
-	if m.modal == modalAddKey {
+	if m.focus != focusModal {
+		// While locked, let the password field receive pastes too.
+		if !m.unlocked && m.vaultExists {
+			var cmd tea.Cmd
+			m.passwordInput, cmd = m.passwordInput.Update(tea.PasteMsg{Content: content})
+			return m, cmd
+		}
+		// Scratchpad editor: route paste to the focused input.
+		if m.active == screenScratch && m.scratchEditing {
+			var cmd tea.Cmd
+			if m.scratchEditingTitle {
+				m.scratchTitleInput, cmd = m.scratchTitleInput.Update(tea.PasteMsg{Content: content})
+			} else {
+				m.scratchBodyInput, cmd = m.scratchBodyInput.Update(tea.PasteMsg{Content: content})
+			}
+			m.markScratchDirty()
+			return m, tea.Batch(cmd, m.scheduleScratchAutosave())
+		}
+		return m, nil
+	}
+
+	// Modal is active: route paste to addInput for any modal that uses it.
+	switch m.modal {
+	case modalAddKey, modalAdd, modalEdit, modalRotate, modalReplaceProfileKey:
 		var cmd tea.Cmd
 		m.addInput, cmd = m.addInput.Update(tea.PasteMsg{Content: content})
-		m.syncKeyField()
-		return m, cmd
-	}
-	// While locked, let the password field receive pastes too.
-	if !m.unlocked && m.vaultExists {
-		var cmd tea.Cmd
-		m.passwordInput, cmd = m.passwordInput.Update(tea.PasteMsg{Content: content})
-		return m, cmd
-	}
-	// Scratchpad editor: route paste to the focused input.
-	if m.active == screenScratch && m.scratchEditing {
-		var cmd tea.Cmd
-		if m.scratchEditingTitle {
-			m.scratchTitleInput, cmd = m.scratchTitleInput.Update(tea.PasteMsg{Content: content})
-		} else {
-			m.scratchBodyInput, cmd = m.scratchBodyInput.Update(tea.PasteMsg{Content: content})
+		if m.modal == modalAddKey {
+			m.syncKeyField()
 		}
-		m.markScratchDirty()
-		return m, tea.Batch(cmd, m.scheduleScratchAutosave())
+		return m, cmd
 	}
+
 	return m, nil
 }
 
@@ -794,6 +832,8 @@ func (m *model) handleProfilesKey(key string) (tea.Model, tea.Cmd) {
 		m.focus = focusSidebar
 	case "e":
 		return m.startEdit()
+	case "t":
+		return m.startProfileKeyReplace()
 	case "z", "n":
 		return m.contextualAdd()
 	case "x":
@@ -1454,6 +1494,39 @@ func (m *model) startRotate() (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// startProfileKeyReplace lets a profile owner replace its credential without
+// exposing or requiring its opaque key ID. If the key was deleted, commitRotate
+// recreates that same ID so the profile becomes usable again.
+func (m *model) startProfileKeyReplace() (tea.Model, tea.Cmd) {
+	if m.vaultSession == nil || m.vaultSession.vault == nil {
+		m.statusMsg = "Unlock the vault before replacing a profile API key."
+		return m, nil
+	}
+	p := m.selectedProfile()
+	if p == nil {
+		m.statusMsg = "Nothing to replace."
+		return m, nil
+	}
+	if strings.TrimSpace(p.KeyID) == "" {
+		m.statusMsg = "Profile has no API key to replace. Edit the profile to choose one."
+		return m, nil
+	}
+	if m.providers.Find(p.ProviderSlug) == nil {
+		m.statusMsg = "Profile provider is unavailable."
+		return m, nil
+	}
+	m.modal = modalReplaceProfileKey
+	m.focus = focusModal
+	m.modalTarget = p.KeyID
+	m.addStep = 0
+	m.addValues = nil
+	m.addInput.Reset()
+	m.addInput.Placeholder = "new API key"
+	m.addInput.EchoMode = textinput.EchoPassword
+	m.modalPrompt = "Replace API key for " + p.Name
+	return m, m.addInput.Focus()
+}
+
 func (m *model) editFields() []addField {
 	switch m.active {
 	case screenProviders:
@@ -1683,7 +1756,7 @@ func (m *model) handleModalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.modal == modalAddKey {
 		return m.handleKeyAddKey(k)
 	}
-	if m.modal == modalRotate {
+	if m.modal == modalRotate || m.modal == modalReplaceProfileKey {
 		return m.handleRotateKey(k)
 	}
 	switch key {
@@ -2235,6 +2308,7 @@ func (m *model) handleRotateKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.modalTarget = ""
 		m.focus = focusContent
 		m.addInput.Blur()
+		m.addInput.Reset()
 		m.addInput.EchoMode = textinput.EchoNormal
 		m.addValues = nil
 		return m, nil
@@ -2247,7 +2321,9 @@ func (m *model) handleRotateKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
-// commitRotate rotates the secret for the selected key.
+// commitRotate rotates a selected key or replaces the credential used by a
+// selected profile. Profile replacement recreates a deleted key with its
+// existing opaque ID, preserving every profile that refers to it.
 func (m *model) commitRotate() (tea.Model, tea.Cmd) {
 	if m.vaultSession == nil || m.vaultSession.vault == nil {
 		m.statusMsg = "Vault session unavailable."
@@ -2256,18 +2332,59 @@ func (m *model) commitRotate() (tea.Model, tea.Cmd) {
 	newSecret := strings.TrimSpace(m.addInput.Value())
 	if newSecret == "" {
 		m.statusMsg = "Rotation cancelled (empty secret)."
+		if m.modal == modalReplaceProfileKey {
+			m.statusMsg = "API key replacement cancelled (empty key)."
+		}
 		m.modal = modalNone
 		m.focus = focusContent
+		m.addInput.Reset()
 		m.addInput.EchoMode = textinput.EchoNormal
 		return m, nil
 	}
-	var rotatedKeyProvider string
-	if rec := m.vaultSession.vault.Get(m.modalTarget); rec != nil {
-		rotatedKeyProvider = rec.ProviderSlug
-	}
-	if err := m.vaultSession.vault.Rotate(m.modalTarget, newSecret); err != nil {
-		m.statusMsg = "Rotation failed: " + err.Error()
-		return m, nil
+
+	profileReplacement := m.modal == modalReplaceProfileKey
+	providerSlug := ""
+	profileName := ""
+	if profileReplacement {
+		p := m.selectedProfile()
+		if p == nil || p.KeyID != m.modalTarget {
+			m.statusMsg = "Profile changed; API key was not replaced."
+			return m, nil
+		}
+		if m.providers.Find(p.ProviderSlug) == nil {
+			m.statusMsg = "Profile provider is unavailable."
+			return m, nil
+		}
+		providerSlug = p.ProviderSlug
+		profileName = p.Name
+		if rec := m.vaultSession.vault.Get(m.modalTarget); rec != nil {
+			if !provider.CredentialCompatible(p.ProviderSlug, rec.ProviderSlug) {
+				m.statusMsg = "Profile key belongs to an incompatible provider."
+				return m, nil
+			}
+			if err := m.vaultSession.vault.Rotate(m.modalTarget, newSecret); err != nil {
+				m.statusMsg = "API key replacement failed: " + err.Error()
+				return m, nil
+			}
+		} else if err := m.vaultSession.vault.Add(secret.SecretRecord{
+			ID:           m.modalTarget,
+			Kind:         secret.SecretAPIKey,
+			ProviderSlug: p.ProviderSlug,
+			Label:        p.Name + " API key",
+			Secret:       newSecret,
+			Policy:       secret.DefaultSecretPolicy(secret.SecretAPIKey),
+		}); err != nil {
+			m.statusMsg = "API key replacement failed: " + err.Error()
+			return m, nil
+		}
+	} else {
+		if rec := m.vaultSession.vault.Get(m.modalTarget); rec != nil {
+			providerSlug = rec.ProviderSlug
+		}
+		if err := m.vaultSession.vault.Rotate(m.modalTarget, newSecret); err != nil {
+			m.statusMsg = "Rotation failed: " + err.Error()
+			return m, nil
+		}
 	}
 	if err := secret.SaveVaultWithKey(config.VaultPath(m.configDir), m.vaultSession.key, m.vaultSession.vault); err != nil {
 		m.statusMsg = "Vault save failed: " + err.Error()
@@ -2277,11 +2394,18 @@ func (m *model) commitRotate() (tea.Model, tea.Cmd) {
 	m.modal = modalNone
 	m.focus = focusContent
 	m.addInput.EchoMode = textinput.EchoNormal
-	msg := "Key rotated: " + m.modalTarget
+	msg := "Key rotated."
+	if profileReplacement {
+		msg = "API key replaced for " + profileName + "."
+	}
 	// Clear the rotated secret from the input buffer + reset echo mode.
 	m.addInput.Reset()
 	m.addValues = nil
-	m.logAudit("key.rotate", rotatedKeyProvider, "")
+	if profileReplacement {
+		m.logAudit("key.replace", providerSlug, profileName)
+	} else {
+		m.logAudit("key.rotate", providerSlug, "")
+	}
 	m.modalTarget = ""
 	m.statusMsg = msg
 	return m, nil

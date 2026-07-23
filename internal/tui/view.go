@@ -482,6 +482,12 @@ func (m *model) drawModal(grid [][]gridCell, priority [][]int, r Rect, s *Styles
 	if m.modal == modalEdit {
 		title = "Edit"
 	}
+	if m.modal == modalRotate {
+		title = "Rotate Key"
+	}
+	if m.modal == modalReplaceProfileKey {
+		title = "Replace API Key"
+	}
 	writeLine(grid, priority, r.X+2, r.Y+1, title, 22, contentLayer, w, h, false)
 
 	// Body.
@@ -501,14 +507,14 @@ func (m *model) drawModal(grid [][]gridCell, priority [][]int, r Rect, s *Styles
 		writeLine(grid, priority, r.X+2, r.Y+3+i, line, 23, contentLayer, w, h, false)
 	}
 
-	// Render the add/edit input field.
-	if m.modal == modalAdd || m.modal == modalEdit {
+	// Render single-value add/edit/rotation input fields.
+	if m.modal == modalAdd || m.modal == modalEdit || m.modal == modalRotate || m.modal == modalReplaceProfileKey {
 		fields := m.addFields()
 		if m.modal == modalEdit {
 			fields = m.editFields()
 		}
 		stepText := m.modalPrompt
-		if len(fields) > 0 {
+		if (m.modal == modalAdd || m.modal == modalEdit) && len(fields) > 0 {
 			stepText = fmt.Sprintf("%s  (%d/%d)", m.modalPrompt, m.addStep+1, len(fields))
 		}
 		writeLine(grid, priority, r.X+2, r.Y+3, stepText, 22, contentLayer, w, h, false)
@@ -974,6 +980,7 @@ func (m *model) contextHints() []hintRow {
 		return []hintRow{
 			{"Z", "new profile"},
 			{"E", "edit profile"},
+			{"T", "replace API key"},
 			{"X", "delete profile"},
 			{"Enter", "details"},
 		}

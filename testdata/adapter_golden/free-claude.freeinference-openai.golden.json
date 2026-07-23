@@ -1,0 +1,19 @@
+{
+  "app": "free-claude",
+  "transport": "openai_chat_completions",
+  "env_keys": [
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "CLAUDE_CODE_USE_OPENAI_COMPATIBLE",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL"
+  ],
+  "forbidden_env_keys": [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "FREEINFERENCE_API_KEY"
+  ],
+  "endpoint": "https://freeinference.org/v1"
+}
