@@ -20,7 +20,10 @@ func (m *model) View() tea.View {
 		return v
 	}
 
-	if m.width < 100 || m.height < 30 {
+	// The matrix logo renderer supports an 80×24 terminal. Keep the compact
+	// unlocked TUI functional at that common terminal size instead of replacing
+	// it with the static "too small" view.
+	if m.width < 80 || m.height < 24 {
 		v := tea.NewView(m.renderTooSmall(s))
 		v.AltScreen = true
 		return v
@@ -59,7 +62,7 @@ func (m *model) View() tea.View {
 	}
 
 	// Layer 1: Matrix background (only in unprotected cells).
-	if m.matrix != nil {
+	if m.unlocked && m.cfg.EnableAnimations && m.matrix != nil {
 		m.matrix.SetLogo(m.activeMatrixLogoID())
 		buf := NewMatrixBuffer(w, h)
 		buf.Protected = protected
@@ -1031,6 +1034,8 @@ func (m *model) contentForeground(s *Styles) string {
 		return m.settingsView(s)
 	case screenScratch:
 		return m.scratchView(s)
+	case screenAccess:
+		return m.accessView(s)
 	case screenHelp:
 		return m.helpView(s)
 	}

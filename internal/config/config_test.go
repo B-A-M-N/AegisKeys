@@ -5,8 +5,8 @@ import "testing"
 func TestConfigDefaults_MigrateV1ButPreserveV2ZeroTTL(t *testing.T) {
 	old := Config{Version: 1, Theme: "dark"}
 	migrated := old.WithDefaults()
-	if migrated.Version != 2 {
-		t.Fatalf("expected schema migration to v2, got %d", migrated.Version)
+	if migrated.Version != DefaultConfig().Version {
+		t.Fatalf("expected schema migration to current, got %d", migrated.Version)
 	}
 	if migrated.Theme != "vault" {
 		t.Fatalf("expected legacy dark theme to normalize to vault, got %q", migrated.Theme)

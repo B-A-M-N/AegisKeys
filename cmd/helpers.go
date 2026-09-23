@@ -102,7 +102,7 @@ func loadVault() (*secret.Vault, error) {
 // promptPassword reads the master password from the user (no echo).
 func promptPassword() (string, error) {
 	// A successful OS-keyring unlock replaces the password prompt for every
-	// existing CLI command. Commands still call openVault/saveVault, which use
+	// existing CLI command. Commands authenticate with openVault and mutate with mutateVault, which use
 	// the same keyring key, so this does not create a password-less plaintext
 	// path or leave a key in an environment variable.
 	if _, ok := loadVaultFromKeyring(); ok {
@@ -129,14 +129,36 @@ func openVault(password string) (*secret.Vault, error) {
 	return secret.LoadVault(vaultPath, password)
 }
 
-// saveVault encrypts and persists the vault with the given password.
-func saveVault(password string, v *secret.Vault) error {
+// mutateVault applies one update to the latest encrypted vault state. This
+// prevents a command's old in-memory snapshot from resurrecting concurrent
+// deletions or overwriting concurrent edits.
+func mutateVault(password string, mutation secret.SessionMutation) error {
+	vaultPath := config.VaultPath(resolvedConfigDir())
 	if cfg := loadAppConfig(); cfg.KeyringEnabled {
 		if key, err := keychain.Load(resolvedConfigDir()); err == nil {
-			return secret.SaveVaultWithKey(config.VaultPath(resolvedConfigDir()), key, v)
+			return secret.MutateVaultSession(vaultPath, "", key, mutation)
 		}
 	}
-	return secret.SaveVault(config.VaultPath(resolvedConfigDir()), password, v)
+	return secret.MutateVaultSession(vaultPath, password, [32]byte{}, mutation)
+}
+
+// precheckVault authenticates and checks the latest state without writing.
+func precheckVault(password string, precheck func(*secret.Vault) error) error {
+	vaultPath := config.VaultPath(resolvedConfigDir())
+	if cfg := loadAppConfig(); cfg.KeyringEnabled {
+		if key, err := keychain.Load(resolvedConfigDir()); err == nil {
+			latest, err := secret.LoadVaultByKey(vaultPath, key)
+			if err != nil {
+				return err
+			}
+			return precheck(latest)
+		}
+	}
+	latest, err := secret.LoadVault(vaultPath, password)
+	if err != nil {
+		return err
+	}
+	return precheck(latest)
 }
 
 // loadVaultFromKeyring is intentionally fail-closed and silent. Callers can

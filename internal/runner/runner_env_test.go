@@ -19,6 +19,23 @@ func TestBaseEnvForClass_CLI(t *testing.T) {
 	if env["DISPLAY"] {
 		t.Error("CLI env should NOT include DISPLAY")
 	}
+	if !env["HTTPS_PROXY"] || !env["ALL_PROXY"] {
+		t.Error("CLI env should include standard proxy routing variables")
+	}
+}
+
+func TestCleanBaseEnvWithAllowlist_PreservesCredentialFreeProxy(t *testing.T) {
+	parent := []string{
+		"HTTPS_PROXY=http://127.0.0.1:7890",
+		"HTTP_PROXY=http://user:pass@proxy.example.test:8080",
+	}
+	got := cleanBaseEnvWithAllowlist(parent, baseEnvForClass("cli"))
+	if !strings.Contains(strings.Join(got, "\n"), "HTTPS_PROXY=http://127.0.0.1:7890") {
+		t.Fatalf("credential-free proxy was not inherited: %v", got)
+	}
+	if strings.Contains(strings.Join(got, "\n"), "HTTP_PROXY=") {
+		t.Fatalf("credential-bearing proxy leaked into child environment: %v", got)
+	}
 }
 
 func TestBaseEnvForClass_GUI(t *testing.T) {

@@ -35,6 +35,12 @@ The test suite covers:
 - CLI security contracts, including no raw secret argv flags and profile
   resolution validation
 - integration paths for runtime injection and child-process execution
+- transactional vault mutations, including persisted deletes and concurrent
+  independent add/rotate/delete operations under `-race`
+- vault zeroization for primary secrets, private notes, extra secret components,
+  and scratchpad bodies
+- broker metadata permissions, socket safety, policy/grant authorization,
+  rotation scope, protocol validation, and real Unix-socket request flows (the E2E test reports a sandbox skip rather than falsely passing when the host forbids `socket(2)`)
 - hermetic TUI config-write tests; tests must use a temporary `HOME` and never
   read, back up, or modify a developer's live application configuration
 

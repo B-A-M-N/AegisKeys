@@ -171,42 +171,6 @@ func loadVaultByKey(path string, key [32]byte) (*Vault, error) {
 	return v, nil
 }
 
-// mergeOnDiskKeys preserves keys and scratchpads that were committed by a
-// concurrent save and are not already present in the working set, preventing
-// silent data loss. The working set wins for matching IDs (it reflects the
-// latest in-memory edit).
-func mergeOnDiskKeys(working *Vault, onDisk *Vault) *Vault {
-	if onDisk == nil {
-		return working
-	}
-	keyHave := make(map[string]bool, len(working.Keys))
-	merged := &Vault{
-		Version:     working.Version,
-		Keys:        append([]SecretRecord{}, working.Keys...),
-		ScratchPads: append([]ScratchPadRecord{}, working.ScratchPads...),
-	}
-	for _, k := range working.Keys {
-		keyHave[k.ID] = true
-	}
-	scratchHave := make(map[string]bool, len(working.ScratchPads))
-	for _, s := range working.ScratchPads {
-		scratchHave[s.ID] = true
-	}
-	for _, k := range onDisk.Keys {
-		if !keyHave[k.ID] {
-			merged.Keys = append(merged.Keys, k)
-			keyHave[k.ID] = true
-		}
-	}
-	for _, s := range onDisk.ScratchPads {
-		if !scratchHave[s.ID] {
-			merged.ScratchPads = append(merged.ScratchPads, s)
-			scratchHave[s.ID] = true
-		}
-	}
-	return merged
-}
-
 // CloneVault returns an independent in-memory copy suitable for an
 // asynchronous save. It intentionally uses the vault's private safe-store
 // representation so new secret fields cannot accidentally be omitted from a
@@ -228,8 +192,55 @@ func CloneVault(v *Vault) (*Vault, error) {
 	return clone, nil
 }
 
+// MutateVault loads the latest vault under the exclusive write lock, applies
+// one mutation to that authoritative state, and atomically writes the result.
+// It deliberately does not merge a caller's old in-memory snapshot back into
+// the file: absence now means deletion, while concurrent additions and edits
+// made after the caller loaded its snapshot remain intact.
+func MutateVault(path, password string, mutate func(*Vault) error) error {
+	if password == "" {
+		return errors.New("master password is required")
+	}
+	if mutate == nil {
+		return errors.New("nil vault mutation")
+	}
+	return withVaultWriteLock(path, func() error {
+		v, err := LoadVault(path, password)
+		if err != nil {
+			return err
+		}
+		if err := mutate(v); err != nil {
+			return err
+		}
+		return writeVaultWithPasswordLocked(path, password, v)
+	})
+}
+
+// MutateVaultWithKey is MutateVault for an already-derived vault key. It has
+// the same latest-state transaction semantics and uses the same exclusive
+// cross-process lock.
+func MutateVaultWithKey(path string, key [32]byte, mutate func(*Vault) error) error {
+	if mutate == nil {
+		return errors.New("nil vault mutation")
+	}
+	return withVaultWriteLock(path, func() error {
+		v, err := loadVaultByKey(path, key)
+		if err != nil {
+			return err
+		}
+		if err := mutate(v); err != nil {
+			return err
+		}
+		return writeVaultWithKeyLocked(path, key, v)
+	})
+}
+
 // SaveVault serializes the vault (including secrets), encrypts it with
-// password, and writes it to path atomically with 0600 permissions.
+// password, and writes it atomically with 0600 permissions.
+//
+// This is a full-snapshot authenticated replace, not a merge. Existing callers
+// that perform a specific update should use MutateVault instead; init and
+// recovery flows intentionally remain full-snapshot writes.
 func SaveVault(path, password string, v *Vault) error {
 	if password == "" {
 		return errors.New("master password is required")
@@ -241,43 +252,22 @@ func SaveVault(path, password string, v *Vault) error {
 		v.Version = 1
 	}
 	return withVaultWriteLock(path, func() error {
-		// Reload the on-disk vault under the lock so a concurrent writer's
-		// keys are preserved instead of overwritten.
-		if _, statErr := os.Stat(path); statErr == nil {
-			onDisk, lerr := LoadVault(path, password)
-			if lerr != nil {
-				return fmt.Errorf("refusing to overwrite existing vault that cannot be opened: %w", lerr)
+		if VaultExists(path) {
+			if _, err := LoadVault(path, password); err != nil {
+				return fmt.Errorf("refusing to overwrite existing vault that cannot be opened: %w", err)
 			}
-			v = mergeOnDiskKeys(v, onDisk)
 		}
-		store := toStore(v)
-		plaintext, err := json.MarshalIndent(store, "", "  ")
-		if err != nil {
-			return fmt.Errorf("marshal vault: %w", err)
-		}
-		env, err := SealEnvelope(password, string(plaintext))
-		if err != nil {
-			return fmt.Errorf("encrypt vault: %w", err)
-		}
-		data, err := json.MarshalIndent(env, "", "  ")
-		if err != nil {
-			return err
-		}
-		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-			return err
-		}
-		if err := fsutil.AtomicWriteFile(path, data); err != nil {
-			return err
-		}
-		// Enforce 0600 explicitly — atomic writes may create with broader mode.
-		return os.Chmod(path, 0600)
+		return writeVaultWithPasswordLocked(path, password, v)
 	})
 }
 
 // SaveVaultWithKey is like SaveVault but uses a pre-derived 32-byte key
-// instead of a password. This allows the TUI to save the vault without
-// retaining the master password in memory. To keep the same derived key valid
-// across saves, the existing salt is reused when the vault already exists.
+// instead of a password. To keep the same derived key valid across saves, the
+// existing salt and envelope metadata are reused when the vault exists.
+//
+// This is a full-snapshot authenticated replace. Specific mutations should use
+// MutateVaultWithKey so concurrent records are neither resurrected nor
+// overwritten by a stale snapshot.
 func SaveVaultWithKey(path string, key [32]byte, v *Vault) error {
 	if v == nil {
 		return errors.New("nil vault")
@@ -286,60 +276,88 @@ func SaveVaultWithKey(path string, key [32]byte, v *Vault) error {
 		v.Version = 1
 	}
 	return withVaultWriteLock(path, func() error {
-		// Reload the on-disk vault under the lock so a concurrent writer's
-		// keys are preserved instead of overwritten.
-		if _, statErr := os.Stat(path); statErr == nil {
-			onDisk, lerr := loadVaultByKey(path, key)
-			if lerr != nil {
-				return fmt.Errorf("refusing to save with stale vault key; re-unlock required: %w", lerr)
-			}
-			v = mergeOnDiskKeys(v, onDisk)
-		}
-		store := toStore(v)
-		plaintext, err := json.MarshalIndent(store, "", "  ")
-		if err != nil {
-			return fmt.Errorf("marshal vault: %w", err)
-		}
-		// Reuse the existing envelope metadata. This is essential for both
-		// password-derived vaults (the key is tied to its salt/KDF params) and
-		// keyring-required vaults (the envelope must never be downgraded back
-		// to a password KDF merely because its contents were edited).
-		salt := ""
-		var existingParams KDFParams
-		var existingMode, existingKDF string
-		if raw, err := os.ReadFile(path); err == nil {
-			var existing VaultEnvelope
-			if err := json.Unmarshal(raw, &existing); err == nil {
-				salt = existing.Salt
-				existingParams = existing.KDFParams
-				existingMode = existing.KeyMode
-				existingKDF = existing.KDF
+		if VaultExists(path) {
+			if _, err := loadVaultByKey(path, key); err != nil {
+				return fmt.Errorf("refusing to save with stale vault key; re-unlock required: %w", err)
 			}
 		}
-		env, err := SealWithKey(key, string(plaintext), salt, existingParams)
-		if err != nil {
-			return fmt.Errorf("encrypt vault: %w", err)
-		}
-		if existingMode == "keyring" {
-			env.KeyMode = "keyring"
-			env.KDF = "keyring"
-			env.KDFParams = KDFParams{}
-		} else if existingKDF != "" {
-			env.KeyMode = existingMode
-			env.KDF = existingKDF
-		}
-		data, err := json.MarshalIndent(env, "", "  ")
-		if err != nil {
-			return err
-		}
-		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-			return err
-		}
-		if err := fsutil.AtomicWriteFile(path, data); err != nil {
-			return err
-		}
-		return os.Chmod(path, 0600)
+		return writeVaultWithKeyLocked(path, key, v)
 	})
+}
+
+// writeVaultWithPasswordLocked seals and replaces a vault. The caller must
+// already hold withVaultWriteLock; locking here would deadlock.
+func writeVaultWithPasswordLocked(path, password string, v *Vault) error {
+	if v == nil {
+		return errors.New("nil vault")
+	}
+	if v.Version == 0 {
+		v.Version = 1
+	}
+	plaintext, err := json.MarshalIndent(toStore(v), "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal vault: %w", err)
+	}
+	env, err := SealEnvelope(password, string(plaintext))
+	if err != nil {
+		return fmt.Errorf("encrypt vault: %w", err)
+	}
+	return writeVaultEnvelopeLocked(path, env)
+}
+
+// writeVaultWithKeyLocked seals and replaces a vault with a derived key while
+// preserving the existing salt/key mode. The caller must already hold the
+// vault write lock.
+func writeVaultWithKeyLocked(path string, key [32]byte, v *Vault) error {
+	if v == nil {
+		return errors.New("nil vault")
+	}
+	if v.Version == 0 {
+		v.Version = 1
+	}
+	plaintext, err := json.MarshalIndent(toStore(v), "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal vault: %w", err)
+	}
+	salt := ""
+	var existingParams KDFParams
+	var existingMode, existingKDF string
+	if raw, err := os.ReadFile(path); err == nil {
+		var existing VaultEnvelope
+		if err := json.Unmarshal(raw, &existing); err == nil {
+			salt = existing.Salt
+			existingParams = existing.KDFParams
+			existingMode = existing.KeyMode
+			existingKDF = existing.KDF
+		}
+	}
+	env, err := SealWithKey(key, string(plaintext), salt, existingParams)
+	if err != nil {
+		return fmt.Errorf("encrypt vault: %w", err)
+	}
+	if existingMode == "keyring" {
+		env.KeyMode = "keyring"
+		env.KDF = "keyring"
+		env.KDFParams = KDFParams{}
+	} else if existingKDF != "" {
+		env.KeyMode = existingMode
+		env.KDF = existingKDF
+	}
+	return writeVaultEnvelopeLocked(path, env)
+}
+
+func writeVaultEnvelopeLocked(path string, env *VaultEnvelope) error {
+	data, err := json.MarshalIndent(env, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	if err := fsutil.AtomicWriteFile(path, data); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0600)
 }
 
 // AtomicWriteFile is an alias for fsutil.AtomicWriteFile for backward compatibility.

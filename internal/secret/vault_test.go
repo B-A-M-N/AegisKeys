@@ -222,6 +222,41 @@ func TestVaultCRUD(t *testing.T) {
 	}
 }
 
+func TestZeroVaultClearsAllSecretComponents(t *testing.T) {
+	v := &Vault{Version: 1}
+	if err := v.Add(SecretRecord{
+		ID:          "k1",
+		Secret:      "primary-material",
+		PrivateNote: "private-material",
+		ExtraSecrets: []NamedSecret{
+			{Key: "secret", EnvVar: "AWS_SECRET_ACCESS_KEY", Secret: "secondary-material"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.AddScratchPad(ScratchPadRecord{ID: "note", Body: "scratch-material"}); err != nil {
+		t.Fatal(err)
+	}
+	key := [32]byte{1, 2, 3}
+
+	ZeroVault(v)
+	for i := range key {
+		key[i] = 0
+	}
+	if v.Keys[0].Secret != "" || v.Keys[0].PrivateNote != "" {
+		t.Fatal("primary secret or private note remained after ZeroVault")
+	}
+	if len(v.Keys[0].ExtraSecrets) != 0 {
+		t.Fatal("extra secrets remained after ZeroVault")
+	}
+	if v.ScratchPads[0].Body != "" {
+		t.Fatal("scratchpad body remained after ZeroVault")
+	}
+	if key != ([32]byte{}) {
+		t.Fatal("derived key was not explicitly zeroed")
+	}
+}
+
 func TestSecretNeverSerialized(t *testing.T) {
 	// Vault.Serialize must omit the secret field.
 	v := &Vault{Version: 1}

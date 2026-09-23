@@ -10,12 +10,13 @@ A local-first, secure terminal app (Go 1.25.12+) that stores API **provider** me
 
 As of the latest build:
 - `go build -buildvcs=false ./...` passes (VCS stamping errors unless `-buildvcs=false` is set, due to .git metadata in this checkout).
-- `go test ./...` passes across all packages.
+- `go test ./...` passes in this sandbox except `internal/bridge`, whose `httptest` TCP listener is blocked by the sandbox (`socket(2)` permission); the same suite is race-clean outside the sandbox. The new Unix-socket broker tests explicitly report an environment skip rather than falsely passing when Unix bind is blocked.
+- `go test -race ./...` was run for this work; all touched packages and the broker passed.
 - `go vet ./...` is clean.
 - `gofmt -l .` is empty.
-- `go run golang.org/x/vuln/cmd/govulncheck@latest ./...` reports no reachable vulnerabilities when run with Go 1.25.12+.
-- Full CLI (Cobra) with all SPEC §18 commands implemented and tested end-to-end.
-- An interactive TUI (bubbletea v2) with password-unlock, 9 screens, multi-field add forms with provider/key selection, model-slot collection, and real child-process launch via `tea.ExecProcess`.
+- `govulncheck ./...` could not fetch its vulnerability database because this sandbox denies network/DNS. Use the documented gate on a network-enabled host before release.
+- Full CLI (Cobra) with all SPEC §18 commands, plus `broker` and `access` management, implemented and tested.
+- An interactive TUI (bubbletea v2) with password-unlock, 10 numbered screens plus help, multi-field add forms with provider/key selection, model-slot collection, and real child-process launch via `tea.ExecProcess`.
 - **Adapter system** (`internal/adapter`) — per-app renderers implementing `AppAdapter` contract interface with `AppSupportContract` metadata for 21 targets: Generic, Crush, Aider, Cline, Hermes, Qwen Code, Goose, Claude Code, Mistral Vibe, Codex, MiMo, OpenCode, OpenHands, Gemini CLI, Copilot CLI, Continue, Roo Code, Kilo Code, Cursor, Zed, IntelliJ.
 - **FreeClaude transport contract** — `free-claude` declares Anthropic Messages or OpenAI Chat Completions in its launch plan. The central validation gate rejects incompatible credential sets; generic OpenAI launches require a capability-bearing `free-code` binary. Plans retain requested/resolved command paths, build identity, and adapter revision so previews and doctor can identify stale launchers without exposing credentials.
 - **Runner credential boundary** — parent credentials, including both `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN`, are always stripped before a profile environment is injected. Do not add either variable to inherited-environment settings.
@@ -29,11 +30,14 @@ As of the latest build:
 - **Adapter proof doctor**: `doctor` reports adapter confidence/proof status, fails falsely verified adapters, and warns if repo-local manual-proof files are missing when `testdata/adapter_proofs/` is discoverable.
 - **Provider HTTPS enforcement**: `ValidateStrict` rejects non-https base URLs for non-local providers (loopback exempted), including CLI `provider add/edit/validate`.
 - **Secret argv protection**: `key add`, `vault add`, `key rotate`, and `vault reveal` never accept raw secret flags; secrets are read through no-echo prompts. The sole exception is `init --password` for non-interactive automation (flagged as less secure). Launch validation rejects raw-secret substrings in argv, preview, config file content, and non-injecting env plans.
-- **Vault overwrite protection**: `SaveVault`/`SaveVaultWithKey` refuse to overwrite an existing vault if the password/session key cannot reopen the on-disk envelope.
+- **Vault overwrite protection**: `SaveVault`/`SaveVaultWithKey` refuse to overwrite an existing vault if the password/session key cannot reopen the on-disk envelope. Do not use these full-snapshot APIs for ordinary edits; use `MutateVault*`.
+- **Transactional vault mutations**: specific CLI/TUI updates use `MutateVault*`/`MutateVaultSession` under the exclusive vault lock, loading the latest state each time. Do not reintroduce merge-on-save: absence is deletion, and stale whole-snapshot writes are reserved for init/authenticated recovery only.
+- **Central secret cleanup**: `secret.ZeroVault`/`ZeroRecord` clear primary secrets, private notes, extra secret components, and scratchpad bodies. Use them from TUI lock/quit, broker request teardown/auto-lock/shutdown, failed unlock/request paths, and any new decrypted-vault request flow. Go string cleanup is best-effort reference hygiene, not guaranteed physical zeroization.
+- **Credential broker boundary** (`internal/broker`): optional local Unix-socket HTTP service. Metadata-only `broker.json` is 0600, runtime dir/socket are private, Linux peer UID/path/hash must match an explicit grant, and secret policy independently allows `broker_resolve`/`broker_rotate`. Records default to broker-deny; `access binding add` can enable matching policy only after an explicit confirmation. Resolve is read-only at the vault layer. Rotate changes only the binding target's primary secret. Never add TCP, enumeration, arbitrary file-write, raw-secret argv, or audit secret fields.
 - **Filewriter symlink protection**: `rejectSymlinkParents` walks every parent directory; `expandPath` only expands HOME/XDG_CONFIG_HOME/TMPDIR (no ambient env injection).
 - **Secret cleanup**: `lockVault` runs on every quit path (`ctrl+c`, `q`) to zero the derived key.
 - **Wizard** — app-first profile creation with real model-slot input collection and `wizardCanAdvance` validation.
-- Unit tests for all packages: `internal/{secret,provider,profile,adapter,proxy,runner,redact,security,tui,config,audit}`.
+- Unit tests for all packages: `internal/{secret,provider,profile,adapter,proxy,runner,redact,security,tui,config,audit,broker}`.
 - **Env allowlist enforced on all launch paths**: both `Run()` (strategy-driven) and `RunLegacy()` filter parent env through `baseEnvForClass` (CLI vs GUI/IDE) before `BuildChildEnv`, stripping non-allowlisted and secret-looking vars so unrelated parent secrets do not leak into child processes.
 
 ### Architecture
@@ -50,6 +54,7 @@ As of the latest build:
 | **Proxy** (tunneling) | `internal/proxy` | — | No |
 | **Logo masks** (TUI visuals) | `internal/logo` | `assets/logos/*.png` | No |
 | **Runner** (execution) | `internal/runner` | — | No |
+| **Broker** (local app access) | `internal/broker` | `broker.json` | No |
 
 **Profile → Launch Plan flow:**
 ```
@@ -132,6 +137,9 @@ aegiskeys handoff --profile <name>
 aegiskeys settings {show|set|reset}
 aegiskeys adapter verify [--app <id>] [--installed]
 aegiskeys completion {bash|zsh|fish|powershell}
+aegiskeys broker {serve|status}
+aegiskeys access binding {add|list|inspect|rebind|delete}
+aegiskeys access {grant|revoke|list|inspect}
 ```
 
 ### Dependency Portability
@@ -222,6 +230,7 @@ These are the project's core contracts (SPEC §6, §10). Violating any of them i
 
 These are now implemented; remaining work is polish and future features:
 
+- Add broker grant update workflows for rebuilt hash-pinned executables.
 - Add platform-specific doctor checks such as shell history scanning.
 - Maintain `docs/future-work.md` as stable/post-stable deferred work changes.
 - Extend VHS demo coverage as new TUI flows stabilize.

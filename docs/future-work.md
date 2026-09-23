@@ -16,6 +16,9 @@ Deferred work for post-stable AegisKeys releases.
 
 ## Operations
 
+- Interactive Access TUI workflows for creating/rebinding bindings, granting/revoking access, and broker running-state controls.
+- Optional broker integration examples for additional language ecosystems.
+- Hash-only grant workflows with signed update/rebuild flows.
 - Automatic stale temporary env-file cleanup.
 - Shell plugin integration for guided workflows that still avoid parent-shell secret export.
 - Team mode with public-key sharing.

@@ -1,16 +1,59 @@
 package adapter
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"aegiskeys/internal/profile"
 	"aegiskeys/internal/provider"
 	"aegiskeys/internal/secret"
 )
+
+func TestReadFreeCodeCapabilitiesCachesByBinaryIdentity(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "free-code")
+	counter := filepath.Join(tmp, "count")
+	script := fmt.Sprintf("#!/bin/sh\nprintf x >> %q\nprintf '%%s\\n' '{\"openai_compatible_chat_completions\":true}'\n", counter)
+	if err := os.WriteFile(path, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	freeCodeCapabilityCache.Lock()
+	freeCodeCapabilityCache.values = make(map[freeCodeCapabilityCacheKey]freeCodeCapabilities)
+	freeCodeCapabilityCache.Unlock()
+	command := ResolvedCommand{Executable: path, ResolvedTarget: path}
+	for range 2 {
+		if _, err := readFreeCodeCapabilities(context.Background(), command); err != nil {
+			t.Fatalf("read capabilities: %v", err)
+		}
+	}
+	contents, err := os.ReadFile(counter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(contents), "x"); got != 1 {
+		t.Fatalf("capability probe ran %d times, want 1", got)
+	}
+
+	if err := os.Chtimes(path, time.Now(), time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readFreeCodeCapabilities(context.Background(), command); err != nil {
+		t.Fatalf("re-read capabilities after replacement: %v", err)
+	}
+	contents, err = os.ReadFile(counter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(contents), "x"); got != 2 {
+		t.Fatalf("capability probe after binary change ran %d times, want 2", got)
+	}
+}
 
 func writeFreeCodeCapabilitiesScript(t *testing.T, name, capabilityJSON string) string {
 	t.Helper()

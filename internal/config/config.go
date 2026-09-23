@@ -24,6 +24,7 @@ type Config struct {
 	RotationReminderDays        int       `json:"rotation_reminder_days"` // days before flagging a key for rotation; 0 = disabled
 	RuntimePolicy               string    `json:"runtime_policy"`         // strict (default), standard, permissive
 	KeyringEnabled              bool      `json:"keyring_enabled,omitempty"`
+	BrokerAutoLockMinutes       int       `json:"broker_auto_lock_minutes"`
 
 	// InheritEnv lists parent environment variable names that are passed
 	// through to launched profile apps on top of the strict allowlist. This
@@ -51,7 +52,7 @@ func (c Config) AllowsRiskyExport() bool {
 
 func DefaultConfig() Config {
 	return Config{
-		Version:                     2,
+		Version:                     3,
 		Initialized:                 false,
 		AutoLock:                    15,
 		Theme:                       "vault",
@@ -76,6 +77,9 @@ func (c Config) WithDefaults() Config {
 	}
 	if c.AutoLock < 0 {
 		c.AutoLock = d.AutoLock
+	}
+	if originalVersion < 3 && c.BrokerAutoLockMinutes < 0 {
+		c.BrokerAutoLockMinutes = d.BrokerAutoLockMinutes
 	}
 	if originalVersion < 2 && c.ClipboardTTLSeconds == 0 {
 		c.ClipboardTTLSeconds = d.ClipboardTTLSeconds

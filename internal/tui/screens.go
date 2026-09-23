@@ -2,11 +2,12 @@ package tui
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
-	"aegiskeys/internal/adapter"
+	"aegiskeys/internal/broker"
 	"aegiskeys/internal/config"
 	"aegiskeys/internal/provider"
 	"aegiskeys/internal/secret"
@@ -197,7 +198,7 @@ func (m *model) providersView(s *Styles) string {
 // keysView shows masked secrets only.
 func (m *model) keysView(s *Styles) string {
 	var b strings.Builder
-	b.WriteString(s.Title.Render("Keys (masked)"))
+	b.WriteString(s.Title.Render("Vault (masked)"))
 	b.WriteString("\n\n")
 	if !m.unlocked {
 		b.WriteString(s.Muted.Render("Vault locked."))
@@ -294,6 +295,37 @@ func (m *model) launchView(s *Styles) string {
 	var b strings.Builder
 	b.WriteString(s.Title.Render("Launch"))
 	b.WriteString("\n\n")
+	if m.launchFailure != nil {
+		failure := m.launchFailure
+		b.WriteString(s.Danger.Render("Application failed during startup"))
+		b.WriteString("\n\n")
+		b.WriteString(fmt.Sprintf("  Profile: %s\n", failure.Profile))
+		b.WriteString(fmt.Sprintf("  Command: %s\n", failure.Command))
+		b.WriteString(fmt.Sprintf("  Directory: %s\n", failure.WorkingDir))
+		b.WriteString(fmt.Sprintf("  Runtime: %s\n", failure.Duration.Round(time.Millisecond)))
+		b.WriteString(fmt.Sprintf("  TTY: stdin=%t stdout=%t stderr=%t\n", failure.StdinTTY, failure.StdoutTTY, failure.StderrTTY))
+		if failure.ExitCode != 0 {
+			b.WriteString(fmt.Sprintf("  Exit code: %d\n", failure.ExitCode))
+		}
+		if failure.Signal != "" {
+			b.WriteString(fmt.Sprintf("  Signal: %s\n", failure.Signal))
+		}
+		if failure.Error != "" {
+			b.WriteString(fmt.Sprintf("  Error: %s\n", failure.Error))
+		}
+		if failure.OutputTail != "" {
+			b.WriteString("\n")
+			b.WriteString(s.SectionHeader.Render("Final child output"))
+			b.WriteString("\n")
+			b.WriteString(failure.OutputTail)
+			if !strings.HasSuffix(failure.OutputTail, "\n") {
+				b.WriteString("\n")
+			}
+		}
+		b.WriteString("\n")
+		b.WriteString(s.Muted.Render("Esc or Enter dismisses this report."))
+		return b.String()
+	}
 	if !m.unlocked {
 		b.WriteString(s.Muted.Render("Unlock the vault to preview a launch."))
 		return b.String()
@@ -310,12 +342,13 @@ func (m *model) launchView(s *Styles) string {
 	if maxLaunchRows > 8 {
 		maxLaunchRows = 8
 	}
-	start, end := visibleWindow(len(m.profiles.Profiles), m.selected[screenLaunch], maxLaunchRows)
+	idx := m.launchSelectionIndex()
+	start, end := visibleWindow(len(m.profiles.Profiles), idx, maxLaunchRows)
 	for i := start; i < end; i++ {
 		p := m.profiles.Profiles[i]
 		marker := " "
 		style := s.KeyLabel
-		if i == m.selected[screenLaunch] && m.launchMode == launchSelectProfile {
+		if i == idx && m.launchMode == launchSelectProfile {
 			marker = "›"
 			pstyle := s.SelectedRow
 			style = pstyle
@@ -335,48 +368,32 @@ func (m *model) launchView(s *Styles) string {
 		b.WriteString("\n")
 	}
 
-	// Clamp the selected index: a profile delete can leave selected pointing
-	// past the end of the list, which would panic on the next render.
-	idx := m.selected[screenLaunch]
-	if idx < 0 {
-		idx = 0
-	}
-	if idx >= len(m.profiles.Profiles) {
-		idx = len(m.profiles.Profiles) - 1
-		m.selected[screenLaunch] = idx
-	}
 	prof := m.profiles.Profiles[idx]
-	prov := m.providers.Find(prof.ProviderSlug)
+	preview := m.launchPreview
 
-	// Resolve the exact same LaunchStrategy that CLI run would execute.
-	var strategy *adapter.LaunchStrategy
-	var resolveErr error
-	if prov != nil {
-		var key *secret.SecretRecord
-		if m.vaultSession != nil && m.vaultSession.vault != nil {
-			key = m.vaultSession.vault.Get(prof.KeyID)
-		}
-		// Show hazards/manual steps for blocked adapters instead of erroring,
-		// but never expose raw secrets.
-		strategy, resolveErr = adapter.ResolveLaunchStrategyCatalog(prof, *prov, key, m.adapterRegistry, m.providers, m.vaultSession.vault, adapter.ResolvePreview)
+	if preview.loading {
+		b.WriteString("\n")
+		b.WriteString(s.Muted.Render("Resolving launch configuration..."))
+		return b.String()
 	}
 
 	// Show resolve errors as blocking red panels.
-	if resolveErr != nil {
+	if preview.err != nil {
 		b.WriteString("\n")
 		b.WriteString(s.SectionHeader.Render("Cannot launch"))
 		b.WriteString("\n")
-		b.WriteString(fmt.Sprintf("  %s %s\n", s.Danger.Render("✗"), s.Warning.Render(resolveErr.Error())))
+		b.WriteString(fmt.Sprintf("  %s %s\n", s.Danger.Render("✗"), s.Warning.Render(preview.err.Error())))
 		b.WriteString("\n")
 		b.WriteString(s.Muted.Render("Fix the profile before launching."))
 		return b.String()
 	}
 
-	if strategy == nil {
+	if preview.strategy == nil || preview.profileName != prof.Name {
 		b.WriteString("\n")
-		b.WriteString(s.Muted.Render("No strategy resolved."))
+		b.WriteString(s.Muted.Render("Launch preview is not ready."))
 		return b.String()
 	}
+	strategy := preview.strategy
 
 	// Command + args from the resolved strategy.
 	b.WriteString("\n")
@@ -879,4 +896,67 @@ func inheritEnvDisplay(names []string) string {
 		return "(empty)  CLI: settings set inherit_env TMUX,DISPLAY"
 	}
 	return strings.Join(names, ",") + "  (CLI)"
+}
+
+// accessView renders a masked list of stable application bindings and grants.
+func (m *model) accessView(s *Styles) string {
+	var b strings.Builder
+	b.WriteString(s.Title.Render("Access / Integrations"))
+	b.WriteString("\n\n")
+	path := config.BrokerPath(m.configDir)
+	meta, err := broker.LoadBrokerFile(path)
+	if err != nil {
+		b.WriteString(s.Danger.Render("Broker metadata unavailable."))
+		b.WriteString("\n")
+		return b.String()
+	}
+	if len(meta.Bindings) == 0 {
+		b.WriteString(s.Muted.Render("No application bindings. Use `aegiskeys access binding add`."))
+		b.WriteString("\n")
+		return b.String()
+	}
+	b.WriteString(s.Muted.Render("BINDING                 ACCESS"))
+	b.WriteString("\n")
+	start, end := visibleWindow(len(meta.Bindings), m.selected[screenAccess], m.screenListRows(1))
+	for i := start; i < end; i++ {
+		binding := meta.Bindings[i]
+		access := "none"
+		var clients []string
+		for _, grant := range meta.Grants {
+			if grant.BindingID != binding.ID || !grant.Enabled {
+				continue
+			}
+			caps := capabilityDisplay(grant.Capabilities)
+			if grant.Client.ExecutablePath != "" {
+				clients = append(clients, filepath.Base(grant.Client.ExecutablePath)+" "+caps)
+			} else {
+				clients = append(clients, "local "+caps)
+			}
+		}
+		if len(clients) > 0 {
+			access = strings.Join(clients, ", ")
+		}
+		marker := m.selMarker(s, i)
+		row := fmt.Sprintf("%-21s %s", truncate(binding.Name, 21), truncate(access, 42))
+		if m.rowSelected(i) {
+			b.WriteString(marker + " " + s.SelectedRow.Render(row) + "\n")
+		} else {
+			b.WriteString(marker + " " + row + "\n")
+		}
+	}
+	b.WriteString("\n")
+	b.WriteString(s.Muted.Render("Masked metadata only · raw credentials never appear here · manage with access CLI"))
+	b.WriteString("\n")
+	return b.String()
+}
+
+func capabilityDisplay(caps []broker.Capability) string {
+	if len(caps) == 0 {
+		return "none"
+	}
+	out := make([]string, 0, len(caps))
+	for _, c := range caps {
+		out = append(out, string(c))
+	}
+	return strings.Join(out, "+")
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/url"
 	"os"
 	"os/exec"
 	"sort"
@@ -14,9 +15,7 @@ import (
 	"syscall"
 
 	"aegiskeys/internal/adapter"
-	"aegiskeys/internal/audit"
 	"aegiskeys/internal/bridge"
-	"aegiskeys/internal/config"
 	"aegiskeys/internal/proxy"
 	"aegiskeys/internal/sensitive"
 )
@@ -57,6 +56,19 @@ var safeBaseEnv = map[string]bool{
 	"LC_CTYPE":        true,
 	"PWD":             true,
 	"XDG_RUNTIME_DIR": true,
+	// Network proxies are routing configuration rather than credentials. Keep
+	// the conventional variants so an app launched with an otherwise-sanitized
+	// environment can still reach a provider through the user's configured
+	// proxy. Proxy URLs containing credentials are rejected by the environment
+	// safety check below.
+	"HTTP_PROXY":  true,
+	"HTTPS_PROXY": true,
+	"ALL_PROXY":   true,
+	"NO_PROXY":    true,
+	"http_proxy":  true,
+	"https_proxy": true,
+	"all_proxy":   true,
+	"no_proxy":    true,
 }
 
 // guiSafeEnv contains additional env vars needed for GUI/IDE apps launched
@@ -181,11 +193,17 @@ func cleanBaseEnv(base []string) []string {
 func cleanBaseEnvWithAllowlist(base []string, allowlist map[string]bool) []string {
 	out := []string{}
 	for _, kv := range base {
-		k, _, ok := strings.Cut(kv, "=")
+		k, v, ok := strings.Cut(kv, "=")
 		if !ok {
 			continue
 		}
 		if !allowlist[k] {
+			continue
+		}
+		// A proxy URL with embedded credentials is a secret. Do not carry it
+		// across the child-process boundary; use a credential-free local proxy
+		// address instead.
+		if strings.Contains(strings.ToLower(k), "proxy") && proxyValueHasCredentials(v) {
 			continue
 		}
 		if looksSecretName(k) {
@@ -194,6 +212,11 @@ func cleanBaseEnvWithAllowlist(base []string, allowlist map[string]bool) []strin
 		out = append(out, kv)
 	}
 	return out
+}
+
+func proxyValueHasCredentials(value string) bool {
+	u, err := url.Parse(value)
+	return err == nil && u.User != nil
 }
 
 // RunLegacy is the legacy entry point using a RunConfig struct.
@@ -403,16 +426,6 @@ func PrepareCommandWithCleanup(ctx context.Context, strategy *adapter.LaunchStra
 			}
 			return restoreErr
 		}
-	}
-
-	// Audit: launch_start (metadata only).
-	if opts.ConfigDir != "" {
-		audit.NewLogger(config.AuditPath(opts.ConfigDir)).Log(audit.Event{
-			Event:    "child_command_launched",
-			Profile:  opts.ProfileName,
-			Provider: strategy.Support.ID,
-			Command:  strategy.Plan.Command,
-		})
 	}
 
 	cmd := exec.CommandContext(ctx, strategy.Plan.Command, append(strategy.Plan.Args, opts.ExtraArgs...)...)

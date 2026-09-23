@@ -32,11 +32,21 @@ const (
 
 // SecretPolicy controls what operations are permitted on a secret.
 type SecretPolicy struct {
+	// Version distinguishes legacy policy records (version 0, which receive
+	// permissive defaults on migration) from explicitly stored deny-all
+	// policies. Without presence, a zero value is ambiguous.
+	Version int `json:"version"`
+
 	AllowReveal       bool `json:"allow_reveal"`
 	AllowClipboard    bool `json:"allow_clipboard"`
 	AllowEnvExport    bool `json:"allow_env_export"`
 	AllowLaunchInject bool `json:"allow_launch_injection"`
 	AllowModelRefresh bool `json:"allow_model_refresh"`
+
+	// Broker access is deliberately denied by default. It must be enabled
+	// separately from launch injection and clipboard/reveal exposure.
+	AllowBrokerResolve bool `json:"allow_broker_resolve"`
+	AllowBrokerRotate  bool `json:"allow_broker_rotate"`
 
 	RequireConfirmForReveal bool `json:"require_confirm_for_reveal"`
 	RequireConfirmForExport bool `json:"require_confirm_for_export"`
@@ -49,6 +59,7 @@ func DefaultSecretPolicy(kind SecretKind) SecretPolicy {
 	switch kind {
 	case SecretServiceAccount:
 		return SecretPolicy{
+			Version:     1,
 			AllowReveal: true, AllowClipboard: true, AllowEnvExport: false, AllowLaunchInject: true,
 			AllowModelRefresh:       true,
 			RequireConfirmForReveal: true, RequireConfirmForExport: true,
@@ -56,6 +67,7 @@ func DefaultSecretPolicy(kind SecretKind) SecretPolicy {
 		}
 	case SecretGeneric:
 		return SecretPolicy{
+			Version:     1,
 			AllowReveal: true, AllowClipboard: true, AllowEnvExport: false, AllowLaunchInject: true,
 			AllowModelRefresh:       true,
 			RequireConfirmForReveal: true, RequireConfirmForExport: true,
@@ -63,6 +75,7 @@ func DefaultSecretPolicy(kind SecretKind) SecretPolicy {
 		}
 	default:
 		return SecretPolicy{
+			Version:     1,
 			AllowReveal: true, AllowClipboard: true, AllowEnvExport: false, AllowLaunchInject: true,
 			AllowModelRefresh:       true,
 			RequireConfirmForReveal: true, RequireConfirmForExport: true,
@@ -79,7 +92,10 @@ const (
 	AccessCopyClipboard AccessMode = "copy_clipboard"
 	AccessRevealStdout  AccessMode = "reveal_stdout"
 	AccessInjectEnv     AccessMode = "inject_env"
+	AccessEnvExport     AccessMode = "env_export"
 	AccessRefreshModels AccessMode = "refresh_models"
+	AccessBrokerResolve AccessMode = "broker_resolve"
+	AccessBrokerRotate  AccessMode = "broker_rotate"
 )
 
 // AccessError is returned when a secret's policy forbids an access mode.
@@ -96,7 +112,7 @@ func (e *AccessError) Error() string {
 // launch injection) so policy is actually enforced, not just stored.
 func (r SecretRecord) AllowAccess(mode AccessMode) error {
 	policy := r.Policy
-	if policy == (SecretPolicy{}) {
+	if policy.Version == 0 {
 		policy = DefaultSecretPolicy(r.Kind)
 	}
 	switch mode {
@@ -114,10 +130,24 @@ func (r SecretRecord) AllowAccess(mode AccessMode) error {
 		if !policy.AllowLaunchInject {
 			return &AccessError{Mode: string(mode)}
 		}
+	case AccessEnvExport:
+		if !policy.AllowEnvExport {
+			return &AccessError{Mode: string(mode)}
+		}
 	case AccessRefreshModels:
 		if !policy.AllowModelRefresh {
 			return &AccessError{Mode: string(mode)}
 		}
+	case AccessBrokerResolve:
+		if !policy.AllowBrokerResolve {
+			return &AccessError{Mode: string(mode)}
+		}
+	case AccessBrokerRotate:
+		if !policy.AllowBrokerRotate {
+			return &AccessError{Mode: string(mode)}
+		}
+	default:
+		return &AccessError{Mode: string(mode)}
 	}
 	return nil
 }
@@ -192,7 +222,7 @@ func migrateSecretV1ToV2(r *SecretRecord) {
 	if r.Kind == "" {
 		r.Kind = SecretAPIKey
 	}
-	if r.Policy == (SecretPolicy{}) {
+	if r.Policy.Version == 0 {
 		r.Policy = DefaultSecretPolicy(r.Kind)
 	}
 	if r.RevealPolicy == "" {

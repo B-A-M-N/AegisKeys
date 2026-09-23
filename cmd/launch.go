@@ -8,6 +8,7 @@ import (
 
 	"aegiskeys/internal/adapter"
 	"aegiskeys/internal/runner"
+	"aegiskeys/internal/secret"
 )
 
 // launchCmd is the short-form launcher. It takes a positional profile name
@@ -20,8 +21,10 @@ import (
 // The first positional arg is always the profile name; everything after it is
 // forwarded as child args, so there is no `--` separator to remember.
 var launchCmd = &cobra.Command{
-	Use:     "launch <profile> [args...]",
-	Aliases: []string{"l", "go", "run"},
+	Use: "launch <profile> [args...]",
+	// Keep `run` reserved for runCmd, whose --profile and -- command-override
+	// contract is distinct from this convenience launcher.
+	Aliases: []string{"l", "go"},
 	Short:   "Launch a profile's target app with secrets injected",
 	Long: "Launches the app configured for a profile with secrets injected.\n" +
 		"The first argument is the profile name; any extra args are forwarded to the child.\n\n" +
@@ -75,8 +78,12 @@ var launchCmd = &cobra.Command{
 			}
 		}
 
-		v.Touch(prof.KeyID)
-		if err := saveVault(pw, v); err != nil {
+		if err := mutateVault(pw, secret.SessionMutation{
+			Mutate: func(latest *secret.Vault) error {
+				latest.Touch(prof.KeyID)
+				return nil
+			},
+		}); err != nil {
 			return err
 		}
 

@@ -120,33 +120,3 @@ func TestMigrateVaultRecords_ScratchPadDefaults(t *testing.T) {
 		t.Error("expected non-nil ScratchPads after migration")
 	}
 }
-
-func TestMergeOnDiskKeys_ScratchPads(t *testing.T) {
-	working := &Vault{
-		Version:     1,
-		Keys:        []SecretRecord{{ID: "k1", Secret: "working"}},
-		ScratchPads: []ScratchPadRecord{{ID: "s1", Body: "working-scratch"}},
-	}
-	onDisk := &Vault{
-		Version: 1,
-		Keys: []SecretRecord{
-			{ID: "k1", Secret: "stale"},
-			{ID: "k2", Secret: "disk-only"},
-		},
-		ScratchPads: []ScratchPadRecord{
-			{ID: "s1", Body: "stale-scratch"},
-			{ID: "s2", Body: "disk-only-scratch"},
-		},
-	}
-	merged := mergeOnDiskKeys(working, onDisk)
-	if len(merged.Keys) != 2 {
-		t.Errorf("expected 2 keys, got %d", len(merged.Keys))
-	}
-	k1 := merged.Get("k1")
-	if k1 == nil || k1.Secret != "working" {
-		t.Error("working version should win for k1")
-	}
-	if len(merged.ScratchPads) != 2 {
-		t.Errorf("expected 2 scratchpads, got %d", len(merged.ScratchPads))
-	}
-}

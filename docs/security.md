@@ -1,7 +1,8 @@
 # Security Model
 
 AegisKeys is built around one rule: raw secrets should only be visible through
-explicit reveal, copy, or child-process injection paths.
+explicit reveal, copy, child-process injection, or explicitly granted local
+broker resolution.
 
 ## Local-First Boundary
 
@@ -25,6 +26,33 @@ Network access is explicit and narrow:
   audit, and temp env files are written `0600`.
 - Temp env files are written under the AegisKeys temp directory and should be
   removed with `aegiskeys shred-envfile`.
+- Optional broker bindings/grants are metadata only in `broker.json` (0600);
+  `broker.json` never stores secret values.
+
+## Credential Broker
+
+`aegiskeys broker serve` is an explicit local Unix-domain socket service. It is
+not TCP-enabled. The protocol, limits, and language-neutral examples are in
+`docs/broker-protocol.md`.
+
+Authorization is dual-gated:
+
+1. an enabled, unexpired grant pinned to the peer's Linux UID and executable
+   path and/or SHA-256 hash, and
+2. the target secret record's independent `broker_resolve` or
+   `broker_rotate` policy.
+
+The broker retains only the derived vault key, not a decrypted vault. Resolve
+decrypts per request and clears the request-local vault afterward; audit
+supplies usage evidence instead of rewriting `LastUsedAt`. Rotation is a
+separate grantable capability and replaces only the binding target's primary
+secret value. Audit events contain binding/grant/operation/result metadata, not
+secret values, prefixes/suffixes, request bodies, or replacement values.
+
+> Once an authorized client receives a raw credential, that client can copy,
+> cache, log, transmit, or misuse it. AegisKeys cannot revoke a credential the
+> client has already learned without rotating that credential at the provider.
+> Executable-path checking is an authorization constraint, not a sandbox.
 
 ## Display And Output
 
@@ -111,8 +139,9 @@ AegisKeys protects against accidental secret leakage into:
 AegisKeys does not fully protect against:
 
 - a compromised OS, kernel, or root account
-- malware running as the same user
-- malicious target tools that exfiltrate injected env vars
+- malware running as the same user, including malware that can call an
+  authorized broker client or misuse a credential after that client receives it
+- malicious target tools that exfiltrate injected env vars or broker responses
 - hardware keyloggers
 - shoulder surfing
 - terminal scrollback from manually pasted secrets

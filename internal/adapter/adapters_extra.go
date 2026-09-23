@@ -396,11 +396,11 @@ func (GeminiCLIAdapter) Render(p profile.Profile, prov provider.Provider, key *s
 	preview := buildPreview(p.Name, prov)
 	if prov.Compatibility == provider.CompatGoogle {
 		if p.ModelID() != "" {
-			env["GOOGLE_MODEL"] = p.ModelID()
+			env["GEMINI_MODEL"] = p.ModelID()
 		}
 	} else {
 		if p.ModelID() != "" {
-			env["GOOGLE_MODEL"] = p.ModelID()
+			env["GEMINI_MODEL"] = p.ModelID()
 		}
 		if key != nil && key.Secret != "" {
 			env["GEMINI_API_KEY"] = key.Secret

@@ -39,8 +39,8 @@ func TestCrushCatalogRender_MultipleProviders(t *testing.T) {
 		EnvVar:        "OPENAI_API_KEY",
 		Compatibility: provider.CompatOpenAI,
 		Models: []provider.ProviderModel{
-			{ID: "gpt-4o", Name: "GPT-4o"},
-			{ID: "gpt-4o-mini", Name: "GPT-4o Mini"},
+			{ID: "gpt-4o", Name: "GPT-4o", ContextSize: 128000},
+			{ID: "gpt-4o-mini", Name: "GPT-4o Mini", ContextSize: 128000},
 		},
 	}
 	openrouter := provider.Provider{
@@ -53,6 +53,7 @@ func TestCrushCatalogRender_MultipleProviders(t *testing.T) {
 		ID: "ollama", Name: "Ollama", Slug: "ollama",
 		BaseURL:       "http://localhost:11434/v1",
 		Compatibility: provider.CompatLocal,
+		Models:        []provider.ProviderModel{{ID: "qwen3:8b", ContextSize: 32768}},
 	}
 	reg.Providers = []provider.Provider{openai, openrouter, ollama}
 
@@ -160,6 +161,10 @@ func TestCrushCatalog_LocalProviderNoCredentialField(t *testing.T) {
 		BaseURL:       "https://api.openai.com/v1",
 		EnvVar:        "OPENAI_API_KEY",
 		Compatibility: provider.CompatOpenAI,
+		Models: []provider.ProviderModel{
+			{ID: "gpt-4o", ContextSize: 128000},
+			{ID: "gpt-4o-mini", ContextSize: 128000},
+		},
 	}
 	ollama := provider.Provider{
 		ID: "ollama", Name: "Ollama", Slug: "ollama",
@@ -231,6 +236,10 @@ func TestQwenCatalog_LocalProviderNoCredentialField(t *testing.T) {
 		BaseURL:       "https://openrouter.ai/api/v1",
 		EnvVar:        "OPENROUTER_API_KEY",
 		Compatibility: provider.CompatOpenAI,
+		Models: []provider.ProviderModel{
+			{ID: "openai/gpt-4o", ContextSize: 128000},
+			{ID: "qwen/qwen3-coder", ContextSize: 262144},
+		},
 	}
 	reg.Providers = []provider.Provider{ollama, openrouter}
 
@@ -273,13 +282,9 @@ func TestQwenCatalog_LocalProviderNoCredentialField(t *testing.T) {
 	if !ok {
 		t.Fatalf("modelProviders not an object: %T", cfg["modelProviders"])
 	}
-	openaiSection, ok := providersObj["openai"].(map[string]any)
+	models, ok := providersObj["openai"].([]any)
 	if !ok {
-		t.Fatalf("openai section not an object: %T", providersObj["openai"])
-	}
-	models, ok := openaiSection["models"].([]any)
-	if !ok {
-		t.Fatalf("models not an array: %T", openaiSection["models"])
+		t.Fatalf("openai section not an array: %T", providersObj["openai"])
 	}
 
 	var openrouterHasEnvKey bool
@@ -289,7 +294,7 @@ func TestQwenCatalog_LocalProviderNoCredentialField(t *testing.T) {
 			continue
 		}
 		id, _ := entry["id"].(string)
-		if id == "ollama" {
+		if id == "qwen3:8b" {
 			// Local provider must not have any credential field.
 			for _, field := range []string{"envKey", "apiKey", "api_key", "base_url"} {
 				if _, exists := entry[field]; exists && field != "base_url" {
@@ -297,7 +302,7 @@ func TestQwenCatalog_LocalProviderNoCredentialField(t *testing.T) {
 				}
 			}
 		}
-		if id == "openrouter" {
+		if id == "openai/gpt-4o" {
 			if envKey, exists := entry["envKey"].(string); exists && envKey == "OPENROUTER_API_KEY" {
 				openrouterHasEnvKey = true
 			}
@@ -458,12 +463,20 @@ func TestQwenCodeCatalogRender_MultipleProviders(t *testing.T) {
 		BaseURL:       "https://api.openai.com/v1",
 		EnvVar:        "OPENAI_API_KEY",
 		Compatibility: provider.CompatOpenAI,
+		Models: []provider.ProviderModel{
+			{ID: "gpt-4o", ContextSize: 128000},
+			{ID: "gpt-4o-mini", ContextSize: 128000},
+		},
 	}
 	openrouter := provider.Provider{
 		ID: "openrouter", Name: "OpenRouter", Slug: "openrouter",
 		BaseURL:       "https://openrouter.ai/api/v1",
 		EnvVar:        "OPENROUTER_API_KEY",
 		Compatibility: provider.CompatOpenAI,
+		Models: []provider.ProviderModel{
+			{ID: "openai/gpt-4o", ContextSize: 128000},
+			{ID: "qwen/qwen3-coder", ContextSize: 262144},
+		},
 	}
 	ollama := provider.Provider{
 		ID: "ollama", Name: "Ollama", Slug: "ollama",
@@ -520,6 +533,17 @@ func TestQwenCodeCatalogRender_MultipleProviders(t *testing.T) {
 	}
 	if !strings.Contains(content, "OPENROUTER_API_KEY") {
 		t.Errorf("config missing OPENROUTER_API_KEY envKey:\n%s", content)
+	}
+	if strings.Contains(content, `"protocol"`) || strings.Contains(content, `"models"`) {
+		t.Errorf("Qwen config must use the current bare modelProviders array shape:\n%s", content)
+	}
+	for _, want := range []string{`"gpt-4o"`, `"gpt-4o-mini"`, `"openai/gpt-4o"`, `"qwen/qwen3-coder"`, `"contextWindowSize": 262144`} {
+		if !strings.Contains(content, want) {
+			t.Errorf("config missing model metadata %q:\n%s", want, content)
+		}
+	}
+	if !strings.Contains(content, `"selectedType": "openai"`) || !strings.Contains(content, `"name": "gpt-4o"`) {
+		t.Errorf("config must select the profile model and auth type:\n%s", content)
 	}
 	for _, key := range vault.Keys {
 		if strings.Contains(content, key.Secret) {

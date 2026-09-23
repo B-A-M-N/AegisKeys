@@ -15,6 +15,9 @@ const (
 	VaultFile     = "vault.enc"
 	AuditFile     = "audit.log"
 	TmpDir        = "tmp"
+	RuntimeDir    = "run"
+	BrokerFile    = "broker.json"
+	BrokerSocket  = "broker.sock"
 )
 
 // DefaultConfigDir returns the OS-appropriate config directory path.
@@ -51,3 +54,14 @@ func AuditPath(dir string) string { return filepath.Join(dir, AuditFile) }
 
 // TmpPath returns the tmp/ directory path inside dir.
 func TmpPath(dir string) string { return filepath.Join(dir, TmpDir) }
+
+// BrokerPath returns the metadata-only broker binding/grant store path.
+func BrokerPath(dir string) string { return filepath.Join(dir, BrokerFile) }
+
+// RuntimePath returns the private runtime directory path inside dir.
+func RuntimePath(dir string) string { return filepath.Join(dir, RuntimeDir) }
+
+// BrokerSocketPath returns the local Unix-domain socket path.
+func BrokerSocketPath(dir string) string {
+	return filepath.Join(RuntimePath(dir), BrokerSocket)
+}

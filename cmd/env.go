@@ -89,6 +89,7 @@ var envCmd = &cobra.Command{
 		}
 
 		envVars := strategy.Plan.Env
+		secretEnv := resolvedSecretEnv(rec, envVars)
 
 		fmt.Printf("Profile: %s\n", prof.Name)
 		fmt.Printf("Provider: %s\n", prov.Name)
@@ -104,10 +105,10 @@ var envCmd = &cobra.Command{
 		if !envExport {
 			if format == formatJSON {
 				// Masked JSON output: no confirmation needed.
-				return writeEnvJSON(os.Stdout, envVars, prov.CanonicalEnvVar(), prov.Name, prof.Name, false)
+				return writeEnvJSON(os.Stdout, envVars, secretEnv, prov.Name, prof.Name, false)
 			}
 			fmt.Println("Injected variables (masked):")
-			printSorted(maskEnv(envVars, prov.CanonicalEnvVar(), prof))
+			printSorted(maskEnv(envVars, secretEnv, nil))
 			fmt.Println("\nNo full secrets printed.")
 			fmt.Println("Use --export with explicit confirmation to print shell exports.")
 			return nil
@@ -123,7 +124,7 @@ var envCmd = &cobra.Command{
 				fmt.Println("Aborted.")
 				return nil
 			}
-			if err := writeEnvJSON(os.Stdout, envVars, prov.CanonicalEnvVar(), prov.Name, prof.Name, true); err != nil {
+			if err := writeEnvJSON(os.Stdout, envVars, secretEnv, prov.Name, prof.Name, true); err != nil {
 				return err
 			}
 		} else {
@@ -147,7 +148,7 @@ var envCmd = &cobra.Command{
 
 // writeEnvJSON writes env vars as a JSON object to w.
 // If full is false, values are masked. Keys are sorted for stable output.
-func writeEnvJSON(w io.Writer, env map[string]string, canonicalSecretVar, provider, profile string, full bool) error {
+func writeEnvJSON(w io.Writer, env map[string]string, secretVars map[string]bool, provider, profile string, full bool) error {
 	keys := make([]string, 0, len(env))
 	for k := range env {
 		keys = append(keys, k)
@@ -167,10 +168,8 @@ func writeEnvJSON(w io.Writer, env map[string]string, canonicalSecretVar, provid
 	}
 	for _, k := range keys {
 		v := env[k]
-		if !full {
-			if k == canonicalSecretVar {
-				v = secret.MaskSecret(v)
-			}
+		if !full && secretVars[k] {
+			v = secret.MaskSecret(v)
 		}
 		out.Env[k] = v
 	}
@@ -182,14 +181,10 @@ func writeEnvJSON(w io.Writer, env map[string]string, canonicalSecretVar, provid
 
 // maskEnv returns a copy of env with credential-like values masked for display.
 // The provider's canonical secret var and any profile-defined env keys are masked.
-func maskEnv(env map[string]string, canonicalSecretVar string, prof *profile.Profile) map[string]string {
+func maskEnv(env map[string]string, secretVars map[string]bool, prof *profile.Profile) map[string]string {
 	out := make(map[string]string, len(env))
 	for k, v := range env {
-		if k == canonicalSecretVar {
-			out[k] = secret.MaskSecret(v)
-			continue
-		}
-		if _, isProfEnv := prof.Env[k]; isProfEnv {
+		if secretVars[k] || prof != nil && hasProfileEnv(prof, k) {
 			out[k] = secret.MaskSecret(v)
 			continue
 		}
@@ -197,6 +192,37 @@ func maskEnv(env map[string]string, canonicalSecretVar string, prof *profile.Pro
 	}
 	return out
 }
+func hasProfileEnv(prof *profile.Profile, key string) bool {
+	if prof == nil {
+		return false
+	}
+	if _, ok := prof.Env[key]; ok {
+		return true
+	}
+	for _, env := range prof.Args {
+		if env == key {
+			return true
+		}
+	}
+	return false
+}
+
+func resolvedSecretEnv(rec *secret.SecretRecord, env map[string]string) map[string]bool {
+	out := make(map[string]bool)
+	if rec == nil {
+		return out
+	}
+	if rec.Secret != "" && rec.EnvVarHint != "" && env[rec.EnvVarHint] == rec.Secret {
+		out[rec.EnvVarHint] = true
+	}
+	for _, component := range rec.ExtraSecrets {
+		if component.Secret != "" && component.EnvVar != "" && env[component.EnvVar] == component.Secret {
+			out[component.EnvVar] = true
+		}
+	}
+	return out
+}
+
 func printSorted(m map[string]string) {
 	keys := make([]string, 0, len(m))
 	for k := range m {

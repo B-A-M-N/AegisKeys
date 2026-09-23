@@ -218,7 +218,10 @@ Suggested layout:
 ├── profiles.json
 ├── vault.enc
 ├── audit.log
+├── broker.json
 └── tmp/
+└── run/
+    └── broker.sock
 ```
 
 File permissions:
@@ -978,6 +981,9 @@ aegiskeys handoff --profile <name>
 aegiskeys settings {show|set|reset}
 aegiskeys adapter verify [--app <id>] [--installed]
 aegiskeys completion {bash|zsh|fish|powershell}
+aegiskeys broker {serve|status}
+aegiskeys access binding {add|list|inspect|rebind|delete}
+aegiskeys access {grant|revoke|list|inspect}
 ```
 
 Command behavior must be useful even before TUI is perfect.

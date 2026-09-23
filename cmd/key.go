@@ -42,10 +42,6 @@ var keyAddCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		v, err := openVault(pw)
-		if err != nil {
-			return err
-		}
 		// Always read secrets through the no-echo prompt. Do not accept secret
 		// values as flags: argv can be captured by shell history and process
 		// inspection.
@@ -120,10 +116,11 @@ var keyAddCmd = &cobra.Command{
 			rec.Tags = splitCSV(keyAddTags)
 		}
 		rec.Policy = secret.DefaultSecretPolicy(rec.Kind)
-		if err := v.Add(rec); err != nil {
-			return err
-		}
-		if err := saveVault(pw, v); err != nil {
+		// The transaction closure owns persistence; v is only used here for
+		// compatibility with the command's earlier authenticated snapshot.
+		if err := mutateVault(pw, secret.SessionMutation{
+			Mutate: func(latest *secret.Vault) error { return latest.Add(rec) },
+		}); err != nil {
 			return err
 		}
 		audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{
@@ -182,8 +179,16 @@ var keyRenameCmd = &cobra.Command{
 		if rec == nil {
 			return fmt.Errorf("no key with id %q", keyID)
 		}
-		rec.Label = keyRenameLabel
-		if err := saveVault(pw, v); err != nil {
+		if err := mutateVault(pw, secret.SessionMutation{
+			Mutate: func(latest *secret.Vault) error {
+				rec := latest.Get(keyID)
+				if rec == nil {
+					return fmt.Errorf("no key with id %q", keyID)
+				}
+				rec.Label = keyRenameLabel
+				return nil
+			},
+		}); err != nil {
 			return err
 		}
 		fmt.Printf("Renamed key %s to %s\n", keyID, keyRenameLabel)
@@ -233,10 +238,9 @@ var keyRotateCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		if err := v.Rotate(keyID, newSecret); err != nil {
-			return err
-		}
-		if err := saveVault(pw, v); err != nil {
+		if err := mutateVault(pw, secret.SessionMutation{
+			Mutate: func(latest *secret.Vault) error { return latest.Rotate(keyID, newSecret) },
+		}); err != nil {
 			return err
 		}
 		audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{
@@ -257,28 +261,30 @@ var keyDeleteCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		v, err := openVault(pw)
-		if err != nil {
+		var providerSlug string
+		if err := precheckVault(pw, func(latest *secret.Vault) error {
+			rec := latest.Get(keyID)
+			if rec == nil {
+				return fmt.Errorf("no key with id %q", keyID)
+			}
+			providerSlug = rec.ProviderSlug
+			fmt.Printf("Deleting key %s (%s / %s)\n", rec.ID, rec.ProviderSlug, rec.Label)
+			return nil
+		}); err != nil {
 			return err
 		}
-		rec := v.Get(keyID)
-		if rec == nil {
-			return fmt.Errorf("no key with id %q", keyID)
-		}
-		fmt.Printf("Deleting key %s (%s / %s)\n", rec.ID, rec.ProviderSlug, rec.Label)
 		if !confirm("This permanently removes the key from the vault.", "DELETE") {
 			fmt.Println("Aborted.")
 			return nil
 		}
-		if err := v.Remove(keyID); err != nil {
-			return err
-		}
-		if err := saveVault(pw, v); err != nil {
+		if err := mutateVault(pw, secret.SessionMutation{
+			Mutate: func(latest *secret.Vault) error { return latest.Remove(keyID) },
+		}); err != nil {
 			return err
 		}
 		audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{
 			Event:    "key_deleted",
-			Provider: rec.ProviderSlug,
+			Provider: providerSlug,
 		})
 		fmt.Printf("Deleted key %s\n", keyID)
 		return nil

@@ -3,10 +3,8 @@ package tui
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -14,7 +12,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"aegiskeys/internal/adapter"
+	"aegiskeys/internal/audit"
 	"aegiskeys/internal/config"
+	"aegiskeys/internal/keychain"
 	"aegiskeys/internal/profile"
 	"aegiskeys/internal/provider"
 	"aegiskeys/internal/runner"
@@ -63,7 +63,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.screenInitCmd(m.active)
 
 	case matrixMsg:
-		if m.matrix != nil {
+		if m.unlocked && m.cfg.EnableAnimations && m.matrix != nil && msg.generation == m.animationGen {
 			return m, m.matrix.Update(msg)
 		}
 		return m, nil
@@ -81,10 +81,26 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.vaultSession = &vaultSession{vault: msg.vault, key: msg.key, envelope: msg.envelope}
 		m.passwordInput.Blur()
 		m.passwordInput.Reset()
-		m.matrix.TriggerSpark(matrixUnlock)
+		if m.cfg.EnableAnimations && m.matrix != nil {
+			m.matrix.TriggerSpark(matrixUnlock)
+		}
 		// Start the periodic idle-check ticker so auto-lock works even without
 		// keypresses. lockVault stops the ticker (via m.quit / re-lock).
-		return m, autoLockTick()
+		cmds := []tea.Cmd{autoLockTick(), m.refreshLaunchPreview()}
+		if m.cfg.EnableAnimations {
+			cmds = append(cmds, m.startAnimation())
+		}
+		return m, tea.Batch(cmds...)
+
+	case launchPreviewResolvedMsg:
+		if msg.requestID != m.launchPreview.requestID {
+			return m, nil
+		}
+		m.launchPreview.loading = false
+		m.launchPreview.profileName = msg.profileName
+		m.launchPreview.strategy = msg.strategy
+		m.launchPreview.err = msg.err
+		return m, nil
 
 	case doctorResultMsg:
 		m.doctorResults = msg.results
@@ -98,26 +114,54 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case launchPreparedMsg:
 		if msg.err != nil {
+			m.launchPhase = launchIdle
 			m.statusMsg = "Launch failed: " + msg.err.Error()
 			return m, nil
 		}
-		m.statusMsg = "Launching " + msg.profile + "..."
-		return m, tea.ExecProcess(msg.cmd, func(err error) tea.Msg {
+		if msg.execCommand == nil {
+			m.launchPhase = launchIdle
+			m.statusMsg = "Launch failed: interactive command was not prepared"
+			return m, nil
+		}
+		m.launchPhase = launchRunning
+		m.statusMsg = "Running " + msg.profile + "..."
+		return m, tea.Exec(msg.execCommand, func(err error) tea.Msg {
 			usageErr := error(nil)
 			cleanupErr := error(nil)
-			if msg.vault != nil && msg.vault.vault != nil && childLikelyStarted(err) {
-				msg.vault.vault.Touch(msg.keyID)
-				if saveErr := secret.SaveVaultWithKey(config.VaultPath(msg.configDir), msg.vault.key, msg.vault.vault); saveErr != nil {
+			result := msg.execCommand.Result()
+			if msg.vault != nil && msg.vault.vault != nil && result.Started {
+				if saveErr := secret.MutateVaultWithKey(config.VaultPath(msg.configDir), msg.vault.key, func(latest *secret.Vault) error {
+					latest.Touch(msg.keyID)
+					return nil
+				}); saveErr != nil {
 					usageErr = fmt.Errorf("save vault usage metadata: %w", saveErr)
 				}
 			}
 			if msg.cleanup != nil {
 				cleanupErr = msg.cleanup()
 			}
-			return launchFinishedMsg{err: err, usageErr: usageErr, cleanupErr: cleanupErr}
+			return launchFinishedMsg{
+				err: err, usageErr: usageErr, cleanupErr: cleanupErr,
+				profile: msg.profile, command: msg.command, workingDir: msg.workingDir,
+				result: result,
+			}
 		})
 
 	case launchFinishedMsg:
+		startupFailure := !msg.result.Started || msg.err != nil || msg.result.Duration < 2*time.Second
+		if startupFailure {
+			m.launchPhase = launchFailed
+			m.launchFailure = &launchFailure{
+				Profile: msg.profile, Command: msg.command, WorkingDir: msg.workingDir,
+				Error: errorText(msg.err), ExitCode: msg.result.ExitCode,
+				Signal: msg.result.Signal, Duration: msg.result.Duration,
+				StdinTTY: msg.result.StdinTTY, StdoutTTY: msg.result.StdoutTTY, StderrTTY: msg.result.StderrTTY,
+				OutputTail: sanitizeLaunchOutput(msg.result.OutputTail),
+			}
+			m.statusMsg = "Application failed during startup."
+			return m, m.refreshLaunchPreview()
+		}
+		m.launchPhase = launchIdle
 		if msg.cleanupErr != nil {
 			// Preserve both child exit status and cleanup failure when both fail.
 			if msg.err != nil {
@@ -125,18 +169,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.statusMsg = "Child finished; config cleanup failed: " + msg.cleanupErr.Error()
 			}
-			return m, nil
+			return m, m.refreshLaunchPreview()
 		}
 		if msg.usageErr != nil {
 			m.statusMsg = "Child finished; usage metadata failed: " + msg.usageErr.Error()
-			return m, nil
+			return m, m.refreshLaunchPreview()
 		}
 		if msg.err != nil {
 			m.statusMsg = "Child exited: " + msg.err.Error()
 		} else {
 			m.statusMsg = "Child process finished."
 		}
-		return m, nil
+		return m, m.refreshLaunchPreview()
 
 	case wizardModelsFetchedMsg:
 		m.wizard.fetchingModels = false
@@ -204,6 +248,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.scratchDirty = false
 		}
 		m.logAudit("scratch.update", "", "")
+		if m.vaultSession != nil && m.vaultSession.key != ([32]byte{}) {
+			if latest, err := secret.LoadVaultByKey(config.VaultPath(m.configDir), m.vaultSession.key); err == nil {
+				m.vaultSession.vault = latest
+			}
+		}
 		if msg.closeEditor && m.scratchEditingID == msg.id {
 			m.scratchEditing = false
 			m.scratchEditingID = ""
@@ -508,6 +557,10 @@ func (m *model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "]":
 		m.nextScreen()
 		return m, m.screenInitCmd(m.active)
+	case "0":
+		m.active = screenAccess
+		m.focus = focusContent
+		return m, nil
 	case "1", "2", "3", "4", "5", "6", "7", "8":
 		m.active = screen(key[0] - '1')
 		m.focus = focusContent
@@ -930,8 +983,20 @@ func (m *model) adjustSetting(dir int) (tea.Model, tea.Cmd) {
 		m.cfg.AdapterVerifyTimeoutSeconds = cycleInt(m.cfg.AdapterVerifyTimeoutSeconds, []int{5, 10, 20, 30, 60, 120}, dir)
 		m.statusMsg = fmt.Sprintf("Adapter verify timeout: %ds", m.cfg.AdapterVerifyTimeoutSeconds)
 	case 5:
-		m.cfg.EnableAnimations = !m.cfg.EnableAnimations
+		wasEnabled := m.cfg.EnableAnimations
+		m.cfg.EnableAnimations = !wasEnabled
 		m.statusMsg = fmt.Sprintf("Animations: %t", m.cfg.EnableAnimations)
+		if err := config.SaveConfig(config.ConfigPath(m.configDir), m.cfg); err != nil {
+			m.statusMsg += " (save failed: " + err.Error() + ")"
+			return m, nil
+		}
+		if !wasEnabled && m.cfg.EnableAnimations {
+			return m, m.startAnimation()
+		}
+		if wasEnabled && !m.cfg.EnableAnimations {
+			m.stopAnimation()
+		}
+		return m, nil
 	case 6:
 		m.cfg.EnableRiskyExport = !m.cfg.EnableRiskyExport
 		m.statusMsg = fmt.Sprintf("Risky export: %t", m.cfg.EnableRiskyExport)
@@ -1141,14 +1206,16 @@ func (m *model) saveScratchPadDraft(closeEditor, autosave bool) tea.Cmd {
 	if m.scratchSaveInFlight {
 		return nil
 	}
-	vault, err := secret.CloneVault(m.vaultSession.vault)
-	if err != nil {
-		return func() tea.Msg { return scratchSavedMsg{err: err} }
-	}
+	// Capture a detached copy of mutable editor input for the asynchronous
+	// transaction; do not persist this model's potentially stale vault.
+	spCopy := *sp
 	m.scratchSaveInFlight = true
 	key, configDir, id, revision := m.vaultSession.key, m.configDir, sp.ID, m.scratchRevision
 	return func() tea.Msg {
-		return scratchSavedMsg{id: id, closeEditor: closeEditor, autosave: autosave, revision: revision, err: secret.SaveVaultWithKey(config.VaultPath(configDir), key, vault)}
+		err := secret.MutateVaultWithKey(config.VaultPath(configDir), key, func(latest *secret.Vault) error {
+			return latest.UpdateScratchPad(spCopy.ID, spCopy)
+		})
+		return scratchSavedMsg{id: id, closeEditor: closeEditor, autosave: autosave, revision: revision, err: err}
 	}
 }
 
@@ -2159,7 +2226,7 @@ func (m *model) commitAdd() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.statusMsg = "Added."
-	return m, nil
+	return m, m.refreshLaunchPreview()
 }
 
 // applyDelete removes the targeted item from the in-memory model.
@@ -2225,13 +2292,14 @@ func (m *model) applyDelete() bool {
 		if rec := m.vaultSession.vault.Get(m.modalTarget); rec != nil {
 			deletedKeyProvider = rec.ProviderSlug
 		}
-		if err := m.vaultSession.vault.Remove(m.modalTarget); err != nil {
-			m.statusMsg = "Delete failed: " + err.Error()
+		if err := secret.MutateVaultWithKey(config.VaultPath(m.configDir), m.vaultSession.key, func(latest *secret.Vault) error {
+			return latest.Remove(m.modalTarget)
+		}); err != nil {
+			m.statusMsg = "Vault delete failed: " + err.Error()
 			return false
 		}
-		if err := secret.SaveVaultWithKey(config.VaultPath(m.configDir), m.vaultSession.key, m.vaultSession.vault); err != nil {
-			m.statusMsg = "Vault save failed: " + err.Error()
-			return false
+		if latest, err := secret.LoadVaultByKey(config.VaultPath(m.configDir), m.vaultSession.key); err == nil {
+			m.vaultSession.vault = latest
 		}
 		m.keys = secret.ToMaskedList(m.vaultSession.vault.Keys)
 		m.logAudit("key.delete", deletedKeyProvider, "")
@@ -2381,14 +2449,28 @@ func (m *model) commitRotate() (tea.Model, tea.Cmd) {
 		if rec := m.vaultSession.vault.Get(m.modalTarget); rec != nil {
 			providerSlug = rec.ProviderSlug
 		}
-		if err := m.vaultSession.vault.Rotate(m.modalTarget, newSecret); err != nil {
-			m.statusMsg = "Rotation failed: " + err.Error()
-			return m, nil
-		}
 	}
-	if err := secret.SaveVaultWithKey(config.VaultPath(m.configDir), m.vaultSession.key, m.vaultSession.vault); err != nil {
-		m.statusMsg = "Vault save failed: " + err.Error()
+	if err := secret.MutateVaultWithKey(config.VaultPath(m.configDir), m.vaultSession.key, func(latest *secret.Vault) error {
+		if profileReplacement {
+			latestRec := latest.Get(m.modalTarget)
+			if latestRec == nil {
+				return latest.Add(secret.SecretRecord{
+					ID:           m.modalTarget,
+					Kind:         secret.SecretAPIKey,
+					ProviderSlug: providerSlug,
+					Label:        profileName + " API key",
+					Secret:       newSecret,
+					Policy:       secret.DefaultSecretPolicy(secret.SecretAPIKey),
+				})
+			}
+		}
+		return latest.Rotate(m.modalTarget, newSecret)
+	}); err != nil {
+		m.statusMsg = "Vault rotation failed: " + err.Error()
 		return m, nil
+	}
+	if latest, err := secret.LoadVaultByKey(config.VaultPath(m.configDir), m.vaultSession.key); err == nil {
+		m.vaultSession.vault = latest
 	}
 	m.keys = secret.ToMaskedList(m.vaultSession.vault.Keys)
 	m.modal = modalNone
@@ -2480,13 +2562,14 @@ func (m *model) commitKeyAdd() (tea.Model, tea.Cmd) {
 			}
 		}
 	}
-	if err := m.vaultSession.vault.Add(rec); err != nil {
+	if err := secret.MutateVaultWithKey(config.VaultPath(m.configDir), m.vaultSession.key, func(latest *secret.Vault) error {
+		return latest.Add(rec)
+	}); err != nil {
 		m.statusMsg = "Key add failed: " + err.Error()
 		return m, nil
 	}
-	if err := secret.SaveVaultWithKey(config.VaultPath(m.configDir), m.vaultSession.key, m.vaultSession.vault); err != nil {
-		m.statusMsg = "Key save failed: " + err.Error()
-		return m, nil
+	if latest, err := secret.LoadVaultByKey(config.VaultPath(m.configDir), m.vaultSession.key); err == nil {
+		m.vaultSession.vault = latest
 	}
 	m.keys = secret.ToMaskedList(m.vaultSession.vault.Keys)
 	m.modal = modalNone
@@ -2502,7 +2585,7 @@ func (m *model) commitKeyAdd() (tea.Model, tea.Cmd) {
 	m.matrix.TriggerSpark(matrixAddKey)
 	m.logAudit("key.add", rec.ProviderSlug, "")
 	m.statusMsg = "Key added and encrypted."
-	return m, nil
+	return m, m.refreshLaunchPreview()
 }
 
 // parseTags splits a comma-separated tag string into a trimmed slice.
@@ -2550,13 +2633,22 @@ func (m *model) commitEdit() (tea.Model, tea.Cmd) {
 		if k != nil && m.vaultSession != nil && m.vaultSession.vault != nil && len(vals) >= 3 {
 			rec := m.vaultSession.vault.Get(k.ID)
 			if rec != nil {
-				rec.Label = vals[0]
-				rec.ProviderSlug = sanitizeSlug(vals[1])
-				rec.Tags = parseTags(vals[2])
-				m.vaultSession.vault.Touch(k.ID)
-				err = secret.SaveVaultWithKey(config.VaultPath(m.configDir), m.vaultSession.key, m.vaultSession.vault)
+				err = secret.MutateVaultWithKey(config.VaultPath(m.configDir), m.vaultSession.key, func(latest *secret.Vault) error {
+					latestRec := latest.Get(k.ID)
+					if latestRec == nil {
+						return fmt.Errorf("key no longer exists")
+					}
+					latestRec.Label = vals[0]
+					latestRec.ProviderSlug = sanitizeSlug(vals[1])
+					latestRec.Tags = parseTags(vals[2])
+					latest.Touch(k.ID)
+					return nil
+				})
 				if err == nil {
-					m.keys = secret.ToMaskedList(m.vaultSession.vault.Keys)
+					if latest, loadErr := secret.LoadVaultByKey(config.VaultPath(m.configDir), m.vaultSession.key); loadErr == nil {
+						m.vaultSession.vault = latest
+						m.keys = secret.ToMaskedList(latest.Keys)
+					}
 					m.logAudit("key.edit", rec.ProviderSlug, "")
 				}
 			}
@@ -2572,7 +2664,7 @@ func (m *model) commitEdit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.statusMsg = "Updated."
-	return m, nil
+	return m, m.refreshLaunchPreview()
 }
 
 // commitProfileEdit snapshots both stores before doing disk I/O. This keeps
@@ -2671,6 +2763,17 @@ type profileEditSavedMsg struct {
 
 // handleLaunchKey routes keys on the Launch screen.
 func (m *model) handleLaunchKey(key string) (tea.Model, tea.Cmd) {
+	if m.launchFailure != nil {
+		if key == "esc" || key == "enter" {
+			m.launchFailure = nil
+			m.launchPhase = launchIdle
+			m.statusMsg = ""
+		}
+		return m, nil
+	}
+	if m.launchPhase != launchIdle {
+		return m, nil
+	}
 	if m.launchMode == launchTypeCommand {
 		return m, nil
 	}
@@ -2680,10 +2783,12 @@ func (m *model) handleLaunchKey(key string) (tea.Model, tea.Cmd) {
 		case "w", "up", "k":
 			if m.selected[screenLaunch] > 0 {
 				m.selected[screenLaunch]--
+				return m, m.refreshLaunchPreview()
 			}
 		case "s", "down", "j":
 			if m.selected[screenLaunch] < len(m.profiles.Profiles)-1 {
 				m.selected[screenLaunch]++
+				return m, m.refreshLaunchPreview()
 			}
 		case "pgdown", "pagedown":
 			rows := m.screenListRows(1)
@@ -2694,6 +2799,7 @@ func (m *model) handleLaunchKey(key string) (tea.Model, tea.Cmd) {
 			if m.selected[screenLaunch] >= len(m.profiles.Profiles) {
 				m.selected[screenLaunch] = len(m.profiles.Profiles) - 1
 			}
+			return m, m.refreshLaunchPreview()
 		case "pgup", "pageup":
 			rows := m.screenListRows(1)
 			if rows > 8 {
@@ -2703,9 +2809,15 @@ func (m *model) handleLaunchKey(key string) (tea.Model, tea.Cmd) {
 			if m.selected[screenLaunch] < 0 {
 				m.selected[screenLaunch] = 0
 			}
+			return m, m.refreshLaunchPreview()
 		case "enter":
 			if len(m.profiles.Profiles) > 0 {
-				m.matrix.TriggerSpark(matrixLaunch)
+				m.launchPhase = launchPreparing
+				m.launchFailure = nil
+				m.statusMsg = "Preparing launch..."
+				if m.cfg.EnableAnimations && m.matrix != nil {
+					m.matrix.TriggerSpark(matrixLaunch)
+				}
 				return m, m.prepareTUILaunch("")
 			}
 		case "d", "right", "l":
@@ -2723,8 +2835,91 @@ func (m *model) handleLaunchKey(key string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *model) clampLaunchSelection() {
+	count := len(m.profiles.Profiles)
+	if count == 0 {
+		m.selected[screenLaunch] = 0
+		return
+	}
+	if m.selected[screenLaunch] < 0 {
+		m.selected[screenLaunch] = 0
+	}
+	if m.selected[screenLaunch] >= count {
+		m.selected[screenLaunch] = count - 1
+	}
+}
+
+func (m *model) launchSelectionIndex() int {
+	count := len(m.profiles.Profiles)
+	if count == 0 {
+		return 0
+	}
+	idx := m.selected[screenLaunch]
+	if idx < 0 {
+		return 0
+	}
+	if idx >= count {
+		return count - 1
+	}
+	return idx
+}
+
+// refreshLaunchPreview resolves the expensive adapter preview outside View.
+// It snapshots mutable registries/vault state before the asynchronous command.
+func (m *model) refreshLaunchPreview() tea.Cmd {
+	if !m.unlocked || m.vaultSession == nil || m.vaultSession.vault == nil || len(m.profiles.Profiles) == 0 {
+		m.launchPreview = launchPreviewState{}
+		return nil
+	}
+
+	m.clampLaunchSelection()
+	prof := m.profiles.Profiles[m.selected[screenLaunch]]
+	prov := m.providers.Find(prof.ProviderSlug)
+	m.launchPreview.requestID++
+	requestID := m.launchPreview.requestID
+	m.launchPreview.profileName = prof.Name
+	m.launchPreview.loading = false
+	m.launchPreview.strategy = nil
+	m.launchPreview.err = nil
+	if prov == nil {
+		m.launchPreview.err = fmt.Errorf("profile %q references missing provider %q", prof.Name, prof.ProviderSlug)
+		return nil
+	}
+
+	vaultSnapshot, err := secret.CloneVault(m.vaultSession.vault)
+	if err != nil {
+		m.launchPreview.err = fmt.Errorf("snapshot vault for launch preview: %w", err)
+		return nil
+	}
+	providersSnapshot := &provider.Registry{Providers: append([]provider.Provider(nil), m.providers.Providers...)}
+	profileSnapshot := prof
+	providerSnapshot := *prov
+	keySnapshot := vaultSnapshot.Get(prof.KeyID)
+	adapterRegistry := m.adapterRegistry
+	m.launchPreview.loading = true
+
+	return func() tea.Msg {
+		strategy, resolveErr := adapter.ResolveLaunchStrategyCatalog(
+			profileSnapshot,
+			providerSnapshot,
+			keySnapshot,
+			adapterRegistry,
+			providersSnapshot,
+			vaultSnapshot,
+			adapter.ResolvePreview,
+		)
+		return launchPreviewResolvedMsg{
+			requestID: requestID, profileName: profileSnapshot.Name,
+			strategy: strategy, err: resolveErr,
+		}
+	}
+}
+
 // screenInitCmd runs setup when switching to a screen.
 func (m *model) screenInitCmd(s screen) tea.Cmd {
+	if s == screenLaunch {
+		return m.refreshLaunchPreview()
+	}
 	if s == screenDoctor && !m.doctorRan {
 		return m.runDoctor()
 	}
@@ -2735,24 +2930,40 @@ func (m *model) screenInitCmd(s screen) tea.Cmd {
 
 func unlockCmd(configDir, password string) tea.Cmd {
 	return func() tea.Msg {
+		// Prefer the explicit keyring session so an empty password remains a
+		// valid authenticated session path and retains its derived vault key.
+		if password == "" {
+			if key, keyErr := keychain.Load(configDir); keyErr == nil {
+				v, loadErr := secret.LoadVaultByKey(config.VaultPath(configDir), key)
+				if loadErr == nil {
+					return unlockResult(configDir, v, key)
+				}
+				// Best-effort cleanup on a failed keyring load/unlock path.
+				secret.ZeroVault(v)
+			}
+		}
 		v, key, err := secret.LoadVaultWithKey(config.VaultPath(configDir), password)
 		if err != nil {
 			return unlockResultMsg{err: err}
 		}
-		// Re-read the envelope to capture KDF metadata for rekey checks.
-		var env *secret.VaultEnvelope
-		if raw, rerr := os.ReadFile(config.VaultPath(configDir)); rerr == nil {
-			var e secret.VaultEnvelope
-			if jerr := json.Unmarshal(raw, &e); jerr == nil {
-				env = &e
-			}
+		return unlockResult(configDir, v, key)
+	}
+}
+
+func unlockResult(configDir string, v *secret.Vault, key [32]byte) unlockResultMsg {
+	// Re-read the envelope to capture KDF metadata for rekey checks.
+	var env *secret.VaultEnvelope
+	if raw, rerr := os.ReadFile(config.VaultPath(configDir)); rerr == nil {
+		var e secret.VaultEnvelope
+		if jerr := json.Unmarshal(raw, &e); jerr == nil {
+			env = &e
 		}
-		return unlockResultMsg{
-			vault:    v,
-			envelope: env,
-			key:      key,
-			keys:     secret.ToMaskedList(v.Keys),
-		}
+	}
+	return unlockResultMsg{
+		vault:    v,
+		envelope: env,
+		key:      key,
+		keys:     secret.ToMaskedList(v.Keys),
 	}
 }
 
@@ -2777,7 +2988,8 @@ func runDoctorCmd(configDir string) tea.Cmd {
 
 // prepareTUILaunch resolves and materializes the selected launch strategy
 // asynchronously. The returned launchPreparedMsg is then executed via
-// tea.ExecProcess so Bubble Tea can release/restore the terminal.
+// tea.Exec so Bubble Tea can release/restore the terminal while the runner
+// records child lifecycle facts.
 func (m *model) prepareTUILaunch(commandLine string) tea.Cmd {
 	idx := m.selected[screenLaunch]
 	if idx < 0 || idx >= len(m.profiles.Profiles) {
@@ -2790,20 +3002,29 @@ func (m *model) prepareTUILaunch(commandLine string) tea.Cmd {
 			return launchPreparedMsg{profile: prof.Name, err: fmt.Errorf("profile %q references missing provider %q", prof.Name, prof.ProviderSlug)}
 		}
 	}
-	var key *secret.SecretRecord
-	if m.vaultSession != nil && m.vaultSession.vault != nil {
-		key = m.vaultSession.vault.Get(prof.KeyID)
+	if m.vaultSession == nil || m.vaultSession.vault == nil {
+		return func() tea.Msg { return launchPreparedMsg{profile: prof.Name, err: fmt.Errorf("vault is locked")} }
 	}
+	vaultSnapshot, snapshotErr := secret.CloneVault(m.vaultSession.vault)
+	if snapshotErr != nil {
+		return func() tea.Msg {
+			return launchPreparedMsg{profile: prof.Name, err: fmt.Errorf("snapshot vault for launch: %w", snapshotErr)}
+		}
+	}
+	key := vaultSnapshot.Get(prof.KeyID)
 	vault := m.vaultSession
 	configDir := m.configDir
 	registry := m.adapterRegistry
+	providersSnapshot := &provider.Registry{Providers: append([]provider.Provider(nil), m.providers.Providers...)}
+	providerSnapshot := *prov
+	inheritEnv := append([]string(nil), m.cfg.InheritEnv...)
 	fields, parseErr := splitCommandLine(commandLine)
 	if parseErr != nil {
 		return func() tea.Msg { return launchPreparedMsg{profile: prof.Name, err: parseErr} }
 	}
 
 	return func() tea.Msg {
-		strategy, err := adapter.ResolveLaunchStrategyCatalog(prof, *prov, key, registry, m.providers, m.vaultSession.vault, adapter.ResolveRun)
+		strategy, err := adapter.ResolveLaunchStrategyCatalog(prof, providerSnapshot, key, registry, providersSnapshot, vaultSnapshot, adapter.ResolveRun)
 		if err != nil {
 			return launchPreparedMsg{profile: prof.Name, err: err}
 		}
@@ -2817,37 +3038,93 @@ func (m *model) prepareTUILaunch(commandLine string) tea.Cmd {
 			}
 			strategy.Plan.Command = fields[0]
 			extraArgs = fields[1:]
-			if err := adapter.ValidateLaunchStrategyForMode(strategy, prof, *prov, key, adapter.DefaultSecurityPolicy(), adapter.ResolveRun); err != nil {
+			if err := adapter.ValidateLaunchStrategyForMode(strategy, prof, providerSnapshot, key, adapter.DefaultSecurityPolicy(), adapter.ResolveRun); err != nil {
 				return launchPreparedMsg{profile: prof.Name, err: err}
 			}
 		}
 		prepared, err := runner.PrepareCommandWithCleanup(context.Background(), strategy, runner.RunOptions{
-			ProfileName:     prof.Name,
-			ConfigDir:       configDir,
-			ExtraArgs:       extraArgs,
-			InheritStdio:    true,
-			ExtraInheritEnv: m.cfg.InheritEnv,
+			ProfileName: prof.Name,
+			ConfigDir:   configDir,
+			ExtraArgs:   extraArgs,
+			// Leave stdio unset for tea.ExecProcess. Bubble Tea must attach the
+			// released terminal handles itself; pre-binding os.Stdin/os.Stdout can
+			// leave interactive children attached to the TUI's old terminal state.
+			InheritStdio:    false,
+			ExtraInheritEnv: inheritEnv,
 		})
 		if err != nil {
 			return launchPreparedMsg{profile: prof.Name, err: err}
 		}
-		return launchPreparedMsg{profile: prof.Name, cmd: prepared.Cmd, cleanup: prepared.Cleanup, vault: vault, configDir: configDir, keyID: prof.KeyID}
+		workingDir := prepared.Cmd.Dir
+		if workingDir == "" {
+			workingDir, _ = os.Getwd()
+		}
+		interactiveExec := runner.NewInteractiveExec(prepared.Cmd)
+		for _, surface := range strategy.Support.LaunchSurfaces {
+			if surface == "cli" {
+				interactiveExec.RequireTTY = true
+				break
+			}
+		}
+		interactiveExec.AuditLogger = audit.NewLogger(config.AuditPath(configDir))
+		interactiveExec.Profile = prof.Name
+		interactiveExec.Provider = strategy.Support.ID
+		return launchPreparedMsg{
+			profile: prof.Name, execCommand: interactiveExec, cleanup: prepared.Cleanup,
+			vault: vault, configDir: configDir, keyID: prof.KeyID,
+			command: prepared.Cmd.Path, workingDir: workingDir,
+		}
 	}
 }
 
-func childLikelyStarted(err error) bool {
+func errorText(err error) string {
 	if err == nil {
-		return true
+		return ""
 	}
-	var execErr *exec.Error
-	if errors.As(err, &execErr) {
-		return false
+	return err.Error()
+}
+
+// sanitizeLaunchOutput preserves printable diagnostic text while removing
+// control sequences that could move the cursor, set terminal titles, or touch
+// the clipboard when the failure report is rendered by the TUI.
+func sanitizeLaunchOutput(s string) string {
+	var b strings.Builder
+	runes := []rune(s)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		if r == '\x1b' && i+1 < len(runes) {
+			i++
+			switch runes[i] {
+			case '[':
+				for i+1 < len(runes) {
+					i++
+					if runes[i] >= 0x40 && runes[i] <= 0x7e {
+						break
+					}
+				}
+			case ']':
+				for i+1 < len(runes) {
+					i++
+					if runes[i] == '\a' || (runes[i] == '\x1b' && i+1 < len(runes) && runes[i+1] == '\\') {
+						if runes[i] == '\x1b' {
+							i++
+						}
+						break
+					}
+				}
+			}
+			continue
+		}
+		if r == '\n' || r == '\t' || r >= 0x20 {
+			b.WriteRune(r)
+		}
 	}
-	var pathErr *os.PathError
-	if errors.As(err, &pathErr) {
-		return false
+	const maxRunes = 8000
+	out := []rune(b.String())
+	if len(out) > maxRunes {
+		return "...\n" + string(out[len(out)-maxRunes:])
 	}
-	return true
+	return string(out)
 }
 
 func splitCommandLine(s string) ([]string, error) {

@@ -8,13 +8,19 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-// matrixMsg advances the animation.
-type matrixMsg struct{}
+// matrixMsg advances one specific animation ticker chain. The generation
+// prevents a queued tick from a disabled chain being revived after a later
+// re-enable.
+type matrixMsg struct {
+	generation uint64
+}
 
-// tickCmd schedules the next animation frame.
-func tickCmd() tea.Cmd {
-	return tea.Tick(85*time.Millisecond, func(_ time.Time) tea.Msg {
-		return matrixMsg{}
+const matrixFrameInterval = 85 * time.Millisecond
+
+// tickCmd schedules the next animation frame for one ticker generation.
+func tickCmd(generation uint64) tea.Cmd {
+	return tea.Tick(matrixFrameInterval, func(_ time.Time) tea.Msg {
+		return matrixMsg{generation: generation}
 	})
 }
 
@@ -246,7 +252,7 @@ func (m *Matrix) TriggerSpark(semantic matrixSemantic) {
 
 // Update advances the animation and precomputes the wave field to save CPU.
 func (m *Matrix) Update(msg tea.Msg) tea.Cmd {
-	switch msg.(type) {
+	switch msg := msg.(type) {
 	case matrixMsg:
 		m.Frame++
 
@@ -254,7 +260,9 @@ func (m *Matrix) Update(msg tea.Msg) tea.Cmd {
 			m.Waves[i].Phase += m.Waves[i].Speed * m.Waves[i].Direction
 		}
 
-		m.updateWaveCache()
+		if m.Frame%3 == 0 {
+			m.updateWaveCache()
+		}
 		m.updateLogoReveals()
 
 		for i := range m.Drops {
@@ -297,7 +305,7 @@ func (m *Matrix) Update(msg tea.Msg) tea.Cmd {
 		}
 		m.semanticEvents = alive
 
-		return tickCmd()
+		return tickCmd(msg.generation)
 	}
 	return nil
 }

@@ -1,13 +1,17 @@
 package adapter
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"time"
 
 	"aegiskeys/internal/profile"
 	"aegiskeys/internal/provider"
@@ -773,33 +777,13 @@ func buildQwenConfig(p profile.Profile, prov provider.Provider) FileWrite {
 	if p.Models.Main != nil {
 		modelID = p.Models.Main.ID
 	}
-	models := []map[string]any{
-		{
-			"id":      modelID,
-			"name":    modelID,
-			"envKey":  prov.CanonicalEnvVar(),
-			"baseUrl": prov.CanonicalBaseURL(),
-			"generationConfig": map[string]any{
-				"timeout":           120000,
-				"maxRetries":        3,
-				"contextWindowSize": 128000,
-				"samplingParams": map[string]any{
-					"temperature": 0.2,
-					"max_tokens":  8192,
-				},
-			},
-		},
-	}
+	models := []map[string]any{qwenModelEntry(prov, modelID, qwenModelContextSize(prov, modelID))}
 	content, _ := json.MarshalIndent(map[string]any{
-		"env": map[string]string{
-			prov.CanonicalEnvVar(): "$" + prov.CanonicalEnvVar(),
-		},
 		"modelProviders": map[string]any{
-			"openai": map[string]any{
-				"protocol": "openai",
-				"models":   models,
-			},
+			qwenAuthType(prov.Compatibility): models,
 		},
+		"security": map[string]any{"auth": map[string]any{"selectedType": qwenAuthType(prov.Compatibility)}},
+		"model":    map[string]any{"name": modelID},
 	}, "", "  ")
 	return FileWrite{
 		Path:         "$HOME/.qwen/settings.json",
@@ -838,7 +822,9 @@ func qwenAuthType(compat provider.CompatibilityMode) string {
 //   - generationConfig is a sealed package per provider — all fields included.
 //   - Auth type keys must be valid Qwen Code values (openai, anthropic, gemini).
 func buildQwenCatalogConfig(ctx ProviderCatalogRenderContext) FileWrite {
-	// Group providers by auth type.
+	// Group concrete models by protocol. Qwen Code's current schema expects a
+	// bare array under each auth type; the former {protocol, models} wrapper is
+	// silently ignored by current Qwen releases.
 	byAuthType := map[string][]provider.Provider{}
 	for _, prov := range ctx.Providers {
 		authType := qwenAuthType(prov.Compatibility)
@@ -847,50 +833,40 @@ func buildQwenCatalogConfig(ctx ProviderCatalogRenderContext) FileWrite {
 
 	modelProviders := map[string]any{}
 	for authType, providers := range byAuthType {
-		// Dedup by id + baseUrl within same auth type (first wins).
+		// Dedup by id + baseUrl within the same auth type (first wins).
 		seen := map[string]bool{}
 		models := []map[string]any{}
 		for _, prov := range providers {
-			// Use slug as the model id (unique per provider in our registry).
-			// Append baseUrl to create uniqueness when multiple providers
-			// share the same slug (unlikely but safe).
-			key := prov.Slug + "|" + prov.CanonicalBaseURL()
-			if seen[key] {
-				continue
+			modelSpecs := append([]provider.ProviderModel(nil), prov.Models...)
+			if prov.Slug == ctx.SelectedProvider.Slug && ctx.Profile.Models.Main != nil {
+				main := ctx.Profile.Models.Main.ID
+				if main != "" && !qwenProviderHasModel(modelSpecs, main) {
+					modelSpecs = append(modelSpecs, provider.ProviderModel{ID: main, Name: main})
+				}
 			}
-			seen[key] = true
-
-			entry := map[string]any{
-				"id":      prov.Slug,
-				"name":    prov.DisplayName(),
-				"baseUrl": prov.CanonicalBaseURL(),
+			for _, spec := range modelSpecs {
+				if spec.ID == "" {
+					continue
+				}
+				key := spec.ID + "|" + prov.CanonicalBaseURL()
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
+				models = append(models, qwenModelEntry(prov, spec.ID, spec.ContextSize))
 			}
-			// Only set envKey for providers that need a credential.
-			// Local/no-auth providers must not carry a fake credential field.
-			if envVar := prov.CanonicalEnvVar(); envVar != "" {
-				entry["envKey"] = envVar
-			}
-			entry["generationConfig"] = map[string]any{
-				"timeout":           120000,
-				"maxRetries":        3,
-				"contextWindowSize": 128000,
-				"samplingParams": map[string]any{
-					"temperature": 0.2,
-					"max_tokens":  8192,
-				},
-			}
-			models = append(models, entry)
 		}
 		if len(models) > 0 {
-			modelProviders[authType] = map[string]any{
-				"protocol": authType,
-				"models":   models,
-			}
+			modelProviders[authType] = models
 		}
 	}
+	selectedType := qwenAuthType(ctx.SelectedProvider.Compatibility)
+	selectedModel := ctx.Profile.ModelID()
 
 	content, _ := json.MarshalIndent(map[string]any{
 		"modelProviders": modelProviders,
+		"security":       map[string]any{"auth": map[string]any{"selectedType": selectedType}},
+		"model":          map[string]any{"name": selectedModel},
 	}, "", "  ")
 	return FileWrite{
 		Path:         "$HOME/.qwen/settings.json",
@@ -902,6 +878,43 @@ func buildQwenCatalogConfig(ctx ProviderCatalogRenderContext) FileWrite {
 		RedactCheck:  true,
 		Description:  "Qwen Code modelProviders catalog; secrets remain env-only",
 	}
+}
+
+func qwenProviderHasModel(models []provider.ProviderModel, id string) bool {
+	for _, model := range models {
+		if model.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func qwenModelContextSize(prov provider.Provider, id string) int {
+	for _, model := range prov.Models {
+		if model.ID == id {
+			return model.ContextSize
+		}
+	}
+	return 0
+}
+
+func qwenModelEntry(prov provider.Provider, id string, contextSize int) map[string]any {
+	entry := map[string]any{
+		"id":      id,
+		"name":    id,
+		"baseUrl": prov.CanonicalBaseURL(),
+		"generationConfig": map[string]any{
+			"timeout":    120000,
+			"maxRetries": 3,
+		},
+	}
+	if envVar := prov.CanonicalEnvVar(); envVar != "" {
+		entry["envKey"] = envVar
+	}
+	if contextSize > 0 {
+		entry["generationConfig"].(map[string]any)["contextWindowSize"] = contextSize
+	}
+	return entry
 }
 
 // ClaudeCodeAdapter renders config for Claude Code.
@@ -1142,14 +1155,60 @@ func resolveFreeCodeCommand(requested string) (ResolvedCommand, error) {
 	return ResolvedCommand{Requested: requested, Executable: executable, ResolvedTarget: resolvedTarget}, nil
 }
 
-func readFreeCodeCapabilities(command ResolvedCommand) (freeCodeCapabilities, error) {
-	output, err := exec.Command(command.Executable, "capabilities", "--json").Output()
+type freeCodeCapabilityCacheKey struct {
+	Path    string
+	Size    int64
+	ModTime int64
+}
+
+var freeCodeCapabilityCache = struct {
+	sync.RWMutex
+	values map[freeCodeCapabilityCacheKey]freeCodeCapabilities
+}{values: make(map[freeCodeCapabilityCacheKey]freeCodeCapabilities)}
+
+func freeCodeCapabilityKey(command ResolvedCommand) (freeCodeCapabilityCacheKey, error) {
+	path := command.ResolvedTarget
+	if path == "" {
+		path = command.Executable
+	}
+	info, err := os.Stat(path)
 	if err != nil {
-		return freeCodeCapabilities{}, err
+		return freeCodeCapabilityCacheKey{}, err
+	}
+	return freeCodeCapabilityCacheKey{
+		Path: path, Size: info.Size(), ModTime: info.ModTime().UnixNano(),
+	}, nil
+}
+
+func readFreeCodeCapabilities(ctx context.Context, command ResolvedCommand) (freeCodeCapabilities, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	key, keyErr := freeCodeCapabilityKey(command)
+	if keyErr == nil {
+		freeCodeCapabilityCache.RLock()
+		cached, ok := freeCodeCapabilityCache.values[key]
+		freeCodeCapabilityCache.RUnlock()
+		if ok {
+			return cached, nil
+		}
+	}
+
+	output, err := exec.CommandContext(ctx, command.Executable, "capabilities", "--json").Output()
+	if err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return freeCodeCapabilities{}, fmt.Errorf("free-code capability probe timed out after 3 seconds")
+		}
+		return freeCodeCapabilities{}, fmt.Errorf("run free-code capability probe: %w", err)
 	}
 	var capabilities freeCodeCapabilities
 	if err := json.Unmarshal(output, &capabilities); err != nil {
-		return freeCodeCapabilities{}, err
+		return freeCodeCapabilities{}, fmt.Errorf("parse free-code capabilities: %w", err)
+	}
+	if keyErr == nil {
+		freeCodeCapabilityCache.Lock()
+		freeCodeCapabilityCache.values[key] = capabilities
+		freeCodeCapabilityCache.Unlock()
 	}
 	return capabilities, nil
 }
@@ -1323,7 +1382,7 @@ func (FreeClaudeAdapter) Render(p profile.Profile, prov provider.Provider, key *
 		if err != nil {
 			return nil, err
 		}
-	} else if loaded, capabilityErr := readFreeCodeCapabilities(command); capabilityErr == nil {
+	} else if loaded, capabilityErr := readFreeCodeCapabilitiesWithTimeout(command); capabilityErr == nil {
 		capabilities = loaded
 	}
 
@@ -1359,11 +1418,17 @@ func (FreeClaudeAdapter) Render(p profile.Profile, prov provider.Provider, key *
 }
 
 func requireFreeCodeOpenAICompatibility(command ResolvedCommand) (freeCodeCapabilities, error) {
-	capabilities, err := readFreeCodeCapabilities(command)
+	capabilities, err := readFreeCodeCapabilitiesWithTimeout(command)
 	if err != nil || !capabilities.OpenAICompatibleChatCompletions {
 		return freeCodeCapabilities{}, fmt.Errorf("selected free-code binary does not support the generic OpenAI-compatible transport; rebuild/install current free-code or set target.command to a compatible binary")
 	}
 	return capabilities, nil
+}
+
+func readFreeCodeCapabilitiesWithTimeout(command ResolvedCommand) (freeCodeCapabilities, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	return readFreeCodeCapabilities(ctx, command)
 }
 
 func freeClaudePreview(p profile.Profile, prov provider.Provider, transport TransportKind, command ResolvedCommand, capabilities freeCodeCapabilities) []string {

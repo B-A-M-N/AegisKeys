@@ -73,10 +73,6 @@ Examples:
 		if err != nil {
 			return err
 		}
-		v, err := openVault(pw)
-		if err != nil {
-			return err
-		}
 		// Always prompt for the secret. A flag would put key material in argv,
 		// which can be captured by shell history and process listings.
 		sec, err := readPassword("Secret value: ")
@@ -118,10 +114,9 @@ Examples:
 			t := timeNow().AddDate(0, 0, vaultAddRotationDays)
 			rec.RotatesAt = &t
 		}
-		if err := v.Add(rec); err != nil {
-			return err
-		}
-		if err := saveVault(pw, v); err != nil {
+		if err := mutateVault(pw, secret.SessionMutation{
+			Mutate: func(latest *secret.Vault) error { return latest.Add(rec) },
+		}); err != nil {
 			return err
 		}
 		audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{
@@ -219,7 +214,7 @@ var vaultCopyCmd = &cobra.Command{
 		if rec == nil {
 			return fmt.Errorf("no vault item with id %q", keyID)
 		}
-		if !rec.Policy.AllowClipboard {
+		if err := rec.AllowAccess(secret.AccessCopyClipboard); err != nil {
 			return fmt.Errorf("clipboard access denied by policy for %s", rec.ID)
 		}
 		fmt.Printf("About to copy secret for %q to clipboard.\n", rec.Label)
@@ -270,6 +265,9 @@ var vaultRevealCmd = &cobra.Command{
 		if rec.RevealPolicy == secret.RevealDeny {
 			return fmt.Errorf("reveal denied by policy for %s", rec.ID)
 		}
+		if err := rec.AllowAccess(secret.AccessRevealStdout); err != nil {
+			return fmt.Errorf("reveal denied by policy for %s", rec.ID)
+		}
 		fmt.Println("WARNING: This will print your raw secret to the terminal.")
 		fmt.Println("Risks: shell history, scrollback, logs, screenshots, terminal capture.")
 		confirmed, err := confirmPrompt("Type the item label to confirm: ", rec.Label)
@@ -299,7 +297,7 @@ var vaultEnvCmd = &cobra.Command{
 		if rec == nil {
 			return fmt.Errorf("no vault item with id %q", keyID)
 		}
-		if !rec.Policy.AllowEnvExport {
+		if err := rec.AllowAccess(secret.AccessEnvExport); err != nil {
 			return fmt.Errorf("env export denied by policy for %s", rec.ID)
 		}
 		keyName := vaultEnvKeyName
@@ -378,10 +376,9 @@ var vaultRotateCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		if err := v.Rotate(keyID, newSecret); err != nil {
-			return err
-		}
-		if err := saveVault(pw, v); err != nil {
+		if err := mutateVault(pw, secret.SessionMutation{
+			Mutate: func(latest *secret.Vault) error { return latest.Rotate(keyID, newSecret) },
+		}); err != nil {
 			return err
 		}
 		audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{
@@ -412,8 +409,16 @@ var vaultRenameCmd = &cobra.Command{
 		if rec == nil {
 			return fmt.Errorf("no vault item with id %q", keyID)
 		}
-		rec.Label = keyRenameLabel
-		if err := saveVault(pw, v); err != nil {
+		if err := mutateVault(pw, secret.SessionMutation{
+			Mutate: func(latest *secret.Vault) error {
+				latestRec := latest.Get(keyID)
+				if latestRec == nil {
+					return fmt.Errorf("no vault item with id %q", keyID)
+				}
+				latestRec.Label = keyRenameLabel
+				return nil
+			},
+		}); err != nil {
 			return err
 		}
 		fmt.Printf("Renamed vault item %s to %s\n", keyID, keyRenameLabel)
@@ -437,8 +442,16 @@ var vaultArchiveCmd = &cobra.Command{
 		if rec == nil {
 			return fmt.Errorf("no vault item with id %q", keyID)
 		}
-		rec.Archived = true
-		if err := saveVault(pw, v); err != nil {
+		if err := mutateVault(pw, secret.SessionMutation{
+			Mutate: func(latest *secret.Vault) error {
+				latestRec := latest.Get(keyID)
+				if latestRec == nil {
+					return fmt.Errorf("no vault item with id %q", keyID)
+				}
+				latestRec.Archived = true
+				return nil
+			},
+		}); err != nil {
 			return err
 		}
 		fmt.Printf("Archived vault item %s\n", keyID)
@@ -472,8 +485,16 @@ var vaultLinkCmd = &cobra.Command{
 		if rec == nil {
 			return fmt.Errorf("no vault item with id %q", keyID)
 		}
-		rec.ProviderSlug = keyLinkProvider
-		if err := saveVault(pw, v); err != nil {
+		if err := mutateVault(pw, secret.SessionMutation{
+			Mutate: func(latest *secret.Vault) error {
+				latestRec := latest.Get(keyID)
+				if latestRec == nil {
+					return fmt.Errorf("no vault item with id %q", keyID)
+				}
+				latestRec.ProviderSlug = keyLinkProvider
+				return nil
+			},
+		}); err != nil {
 			return err
 		}
 		fmt.Printf("Linked %s to provider %s\n", keyID, keyLinkProvider)
@@ -497,8 +518,16 @@ var vaultUnlinkCmd = &cobra.Command{
 		if rec == nil {
 			return fmt.Errorf("no vault item with id %q", keyID)
 		}
-		rec.ProviderSlug = ""
-		if err := saveVault(pw, v); err != nil {
+		if err := mutateVault(pw, secret.SessionMutation{
+			Mutate: func(latest *secret.Vault) error {
+				latestRec := latest.Get(keyID)
+				if latestRec == nil {
+					return fmt.Errorf("no vault item with id %q", keyID)
+				}
+				latestRec.ProviderSlug = ""
+				return nil
+			},
+		}); err != nil {
 			return err
 		}
 		fmt.Printf("Unlinked vault item %s\n", keyID)
@@ -531,10 +560,9 @@ var vaultDeleteCmd = &cobra.Command{
 		if !confirmed {
 			return fmt.Errorf("aborted")
 		}
-		if err := v.Remove(keyID); err != nil {
-			return err
-		}
-		if err := saveVault(pw, v); err != nil {
+		if err := mutateVault(pw, secret.SessionMutation{
+			Mutate: func(latest *secret.Vault) error { return latest.Remove(keyID) },
+		}); err != nil {
 			return err
 		}
 		audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/textinput"
@@ -16,6 +17,7 @@ import (
 	"aegiskeys/internal/logo"
 	"aegiskeys/internal/profile"
 	"aegiskeys/internal/provider"
+	"aegiskeys/internal/runner"
 	"aegiskeys/internal/secret"
 )
 
@@ -467,6 +469,8 @@ func TestHelp_Truthful(t *testing.T) {
 
 func TestMatrix_TickChangesFrame(t *testing.T) {
 	m := newTestModel(t)
+	m.unlocked = true
+	m.cfg.EnableAnimations = true
 	m.matrix = NewMatrix(80, 30)
 	initialFrame := m.matrix.Frame
 	_, cmd := m.Update(matrixMsg{})
@@ -477,6 +481,80 @@ func TestMatrix_TickChangesFrame(t *testing.T) {
 	_, _ = m.Update(msg)
 	if m.matrix.Frame <= initialFrame {
 		t.Errorf("expected frame to advance after tick")
+	}
+}
+
+func TestUnlockedView_RendersMatrixAtStandard80x24(t *testing.T) {
+	m := newTestModel(t)
+	m.unlocked = true
+	m.cfg.EnableAnimations = true
+	m.width, m.height = 80, 24
+	m.matrix = NewMatrix(80, 24)
+	m.matrix.SetLogo("aider")
+	m.matrix.Frame = 100
+	m.matrix.focusLogoFrame = 0
+
+	view := stripANSIForTest(m.View().Content)
+	if strings.Contains(view, "Terminal too small") {
+		t.Fatal("80x24 unlocked terminal should render the normal TUI")
+	}
+	for _, r := range view {
+		if r >= '\u2800' && r <= '\u28ff' {
+			return
+		}
+	}
+	t.Fatal("unlocked view did not expose an animated logo silhouette")
+}
+
+func TestAnimationsDisabledStopsTickChain(t *testing.T) {
+	m := newTestModel(t)
+	m.cfg.EnableAnimations = false
+	initialFrame := m.matrix.Frame
+	_, cmd := m.Update(matrixMsg{})
+	if cmd != nil {
+		t.Fatal("disabled animations scheduled another tick")
+	}
+	if m.matrix.Frame != initialFrame {
+		t.Fatalf("disabled animations advanced frame from %d to %d", initialFrame, m.matrix.Frame)
+	}
+}
+
+func TestAnimationGenerationRejectsQueuedStaleTick(t *testing.T) {
+	m := newTestModel(t)
+	m.unlocked = true
+	m.cfg.EnableAnimations = true
+	m.animationGen = 2
+	initialFrame := m.matrix.Frame
+
+	_, cmd := m.Update(matrixMsg{generation: 1})
+	if cmd != nil {
+		t.Fatal("stale animation tick scheduled a replacement")
+	}
+	if m.matrix.Frame != initialFrame {
+		t.Fatalf("stale animation tick advanced frame from %d to %d", initialFrame, m.matrix.Frame)
+	}
+}
+
+func TestLaunchPreviewRejectsStaleResult(t *testing.T) {
+	m := newTestModel(t)
+	m.launchPreview = launchPreviewState{requestID: 2, profileName: "new", loading: true}
+	newStrategy := &adapter.LaunchStrategy{}
+	_, _ = m.Update(launchPreviewResolvedMsg{requestID: 2, profileName: "new", strategy: newStrategy})
+	_, _ = m.Update(launchPreviewResolvedMsg{requestID: 1, profileName: "old", err: errors.New("stale")})
+	if m.launchPreview.profileName != "new" || m.launchPreview.strategy != newStrategy || m.launchPreview.err != nil {
+		t.Fatal("stale launch preview result overwrote the current selection")
+	}
+}
+
+func TestLaunchIgnoresEnterWhilePreparing(t *testing.T) {
+	m := newTestModel(t)
+	m.launchPhase = launchPreparing
+	_, cmd := m.handleLaunchKey("enter")
+	if cmd != nil {
+		t.Fatal("duplicate Enter scheduled a second launch preparation")
+	}
+	if m.launchPhase != launchPreparing {
+		t.Fatalf("launch phase = %v, want preparing", m.launchPhase)
 	}
 }
 
@@ -1487,6 +1565,11 @@ func TestLaunchView_ShowsMaskedEnvAndSafety(t *testing.T) {
 	vault := &secret.Vault{Version: 1}
 	_ = vault.Add(secret.SecretRecord{ID: "key_1", ProviderSlug: "openai", Label: "test", Secret: "sk-test-val", Policy: secret.DefaultSecretPolicy(secret.SecretAPIKey)})
 	m.vaultSession = &vaultSession{vault: vault, key: [32]byte{}}
+	previewCmd := m.refreshLaunchPreview()
+	if previewCmd == nil {
+		t.Fatal("expected launch preview command")
+	}
+	_, _ = m.Update(previewCmd())
 	// Suppress the background matrix so the view output is deterministic.
 	m.matrix = NewMatrix(0, 0)
 	v := stripANSIForTest(m.View().Content)
@@ -1568,9 +1651,16 @@ func TestLogAudit_RecordsKeyAdd(t *testing.T) {
 	m.configDir = dir
 	m.unlocked = true
 	m.auditLogger = audit.NewLogger(logPath)
+	if err := secret.InitVault(config.VaultPath(dir), "test-password"); err != nil {
+		t.Fatalf("InitVault: %v", err)
+	}
+	_, key, keyErr := secret.LoadVaultWithKey(config.VaultPath(dir), "test-password")
+	if keyErr != nil {
+		t.Fatalf("LoadVaultWithKey: %v", keyErr)
+	}
 	m.vaultSession = &vaultSession{
 		vault: &secret.Vault{Version: 1},
-		key:   [32]byte{},
+		key:   key,
 	}
 
 	// Simulate a filled-out key add form and commit.
@@ -1580,7 +1670,15 @@ func TestLogAudit_RecordsKeyAdd(t *testing.T) {
 		secret:       "sk-should-never-appear-in-audit",
 	}
 	m.keyFormActive = 3
-	_, _ = m.commitKeyAdd()
+	updatedModel, cmd := m.commitKeyAdd()
+	if cmd != nil {
+		if msg := cmd(); msg != nil {
+			updated, _ := m.Update(msg)
+			m = updated.(*model)
+		}
+	} else {
+		m = updatedModel.(*model)
+	}
 
 	// The audit log must contain the key.add event but NEVER the raw secret.
 	events, err := m.auditLogger.Tail(10)
@@ -1617,9 +1715,16 @@ func TestKeyAddModal_EnterSubmitsWhenRequiredFieldsComplete(t *testing.T) {
 	m.active = screenKeys
 	m.focus = focusModal
 	m.modal = modalAddKey
+	if err := secret.InitVault(config.VaultPath(m.configDir), "test-password"); err != nil {
+		t.Fatalf("InitVault: %v", err)
+	}
+	_, key, keyErr := secret.LoadVaultWithKey(config.VaultPath(m.configDir), "test-password")
+	if keyErr != nil {
+		t.Fatalf("LoadVaultWithKey: %v", keyErr)
+	}
 	m.vaultSession = &vaultSession{
 		vault: &secret.Vault{Version: 1},
-		key:   [32]byte{},
+		key:   key,
 	}
 	m.keyForm = keyFormState{
 		providerSlug: "openai",
@@ -1648,12 +1753,33 @@ func TestKeyRename_TUICommit(t *testing.T) {
 	v := &secret.Vault{}
 	rec := secret.SecretRecord{ID: "key_1", ProviderSlug: "openrouter", Label: "old-label", Secret: "sk-testsecretvalue123"}
 	v.Keys = []secret.SecretRecord{rec}
-	m.vaultSession = &vaultSession{vault: v, key: [32]byte{}}
+	m.configDir = t.TempDir()
+	if err := secret.InitVault(config.VaultPath(m.configDir), "test-password"); err != nil {
+		t.Fatalf("InitVault: %v", err)
+	}
+	_, key, err := secret.LoadVaultWithKey(config.VaultPath(m.configDir), "test-password")
+	if err != nil {
+		t.Fatalf("LoadVaultWithKey: %v", err)
+	}
+	m.vaultSession = &vaultSession{vault: v, key: key}
+	if err := secret.MutateVaultWithKey(config.VaultPath(m.configDir), key, func(latest *secret.Vault) error {
+		return latest.Add(rec)
+	}); err != nil {
+		t.Fatalf("seed key: %v", err)
+	}
 	m.keys = secret.ToMaskedList(v.Keys)
 	m.active = screenKeys
 	m.selected[screenKeys] = 0
 	m.addValues = []string{"new-label", "openrouter", "alpha,beta"}
-	m.commitEdit()
+	updatedModel, cmd := m.commitEdit()
+	if cmd != nil {
+		if msg := cmd(); msg != nil {
+			updated, _ := m.Update(msg)
+			m = updated.(*model)
+		}
+	} else {
+		m = updatedModel.(*model)
+	}
 
 	got := m.vaultSession.vault.Get("key_1")
 	if got == nil {
@@ -1701,7 +1827,20 @@ func TestScratchSaveKeepsEditorOpenUntilEncryptedWriteSucceeds(t *testing.T) {
 	m := newTestModel(t)
 	m.scratchTitleInput = textinput.New()
 	m.scratchBodyInput = textarea.New()
-	m.vaultSession = &vaultSession{vault: &secret.Vault{ScratchPads: []secret.ScratchPadRecord{{ID: "note", Title: "Old"}}}}
+	m.configDir = t.TempDir()
+	if err := secret.InitVault(config.VaultPath(m.configDir), "test-password"); err != nil {
+		t.Fatalf("InitVault: %v", err)
+	}
+	_, key, err := secret.LoadVaultWithKey(config.VaultPath(m.configDir), "test-password")
+	if err != nil {
+		t.Fatalf("LoadVaultWithKey: %v", err)
+	}
+	m.vaultSession = &vaultSession{vault: &secret.Vault{ScratchPads: []secret.ScratchPadRecord{{ID: "note", Title: "Old"}}}, key: key}
+	if err := secret.MutateVaultWithKey(config.VaultPath(m.configDir), key, func(latest *secret.Vault) error {
+		return latest.AddScratchPad(secret.ScratchPadRecord{ID: "note", Title: "Old"})
+	}); err != nil {
+		t.Fatalf("seed scratchpad: %v", err)
+	}
 	m.scratchEditing = true
 	m.scratchEditingID = "note"
 	m.scratchTitleInput.SetValue("New")
@@ -1760,7 +1899,7 @@ func TestTUI_LaunchPrepared_ExecutesCleanup(t *testing.T) {
 		t.Fatalf("expected launchPreparedMsg, got %T (%+v)", msg, msg)
 	}
 	if lpMsg.err != nil {
-		t.Fatalf("prepareTUILaunch error: %v (cmd=%v)", lpMsg.err, lpMsg.cmd)
+		t.Fatalf("prepareTUILaunch error: %v", lpMsg.err)
 	}
 	if lpMsg.cleanup == nil {
 		t.Fatal("expected non-nil cleanup func (TUI must use PrepareCommandWithCleanup)")
@@ -1831,8 +1970,13 @@ func TestTUI_LaunchPrepared_HasCleanup(t *testing.T) {
 	if lpMsg.cleanup == nil {
 		t.Fatal("expected non-nil cleanup func (TUI must use PrepareCommandWithCleanup)")
 	}
-	if lpMsg.cmd == nil {
-		t.Fatal("expected non-nil cmd")
+	if lpMsg.execCommand == nil || lpMsg.execCommand.Cmd == nil {
+		t.Fatal("expected non-nil interactive command")
+	}
+	// tea.Exec owns terminal handoff. The prepared command must leave
+	// stdio unset so Bubble Tea can attach its released terminal handles.
+	if lpMsg.execCommand.Cmd.Stdin != nil || lpMsg.execCommand.Cmd.Stdout != nil || lpMsg.execCommand.Cmd.Stderr != nil {
+		t.Fatal("TUI launch pre-bound child stdio; interactive apps may freeze during terminal handoff")
 	}
 }
 
@@ -1845,6 +1989,7 @@ func TestTUI_LaunchFinished_CleanupFailureShown(t *testing.T) {
 	finished := launchFinishedMsg{
 		err:        nil,
 		cleanupErr: cleanupErr,
+		result:     runner.InteractiveExecResult{Started: true, Duration: 3 * time.Second},
 	}
 
 	m2, _ := m.Update(finished)
@@ -1863,7 +2008,7 @@ func TestTUI_LaunchFinished_CleanupFailureShown(t *testing.T) {
 func TestTUI_LaunchFinished_Success(t *testing.T) {
 	m := newTestModel(t)
 
-	finished := launchFinishedMsg{err: nil, cleanupErr: nil, usageErr: nil}
+	finished := launchFinishedMsg{err: nil, cleanupErr: nil, usageErr: nil, result: runner.InteractiveExecResult{Started: true, Duration: 3 * time.Second}}
 	m2, _ := m.Update(finished)
 	result := m2.(*model)
 
@@ -1875,30 +2020,60 @@ func TestTUI_LaunchFinished_Success(t *testing.T) {
 	}
 }
 
-// TestTUI_LaunchFinished_ChildExitAndCleanupFailure verifies that both the
-// child exit status AND cleanup failure are reported when both fail.
+// TestTUI_LaunchFinished_ChildExitAndCleanupFailure verifies that a child
+// error becomes a persistent startup report instead of being hidden by the
+// restored alternate screen.
 func TestTUI_LaunchFinished_ChildExitAndCleanupFailure(t *testing.T) {
 	m := newTestModel(t)
 
 	finished := launchFinishedMsg{
 		err:        errors.New("exited with code 1: signal terminated"),
 		cleanupErr: fmt.Errorf("restore file writes: /tmp/test/settings.json: permission denied"),
+		result:     runner.InteractiveExecResult{Started: true, Duration: 3 * time.Second},
 	}
 
 	m2, _ := m.Update(finished)
 	result := m2.(*model)
 
-	if !strings.Contains(result.statusMsg, "Child exited") {
-		t.Errorf("status should report child exit, got: %q", result.statusMsg)
+	if result.launchFailure == nil {
+		t.Fatal("child error did not retain a startup failure report")
 	}
-	if !strings.Contains(result.statusMsg, "config cleanup failed") {
-		t.Errorf("status should report cleanup failure, got: %q", result.statusMsg)
+	if !strings.Contains(result.launchFailure.Error, "signal terminated") {
+		t.Errorf("failure report should include child error details, got: %q", result.launchFailure.Error)
 	}
-	if !strings.Contains(result.statusMsg, "signal terminated") {
-		t.Errorf("status should include child error details, got: %q", result.statusMsg)
+	if !strings.Contains(result.statusMsg, "failed during startup") {
+		t.Errorf("status should identify the retained startup failure, got: %q", result.statusMsg)
 	}
-	if !strings.Contains(result.statusMsg, "permission denied") {
-		t.Errorf("status should include cleanup error details, got: %q", result.statusMsg)
+}
+
+func TestTUI_LaunchFinished_ImmediateExitRetainsOutput(t *testing.T) {
+	m := newTestModel(t)
+	m.active = screenLaunch
+
+	m2, _ := m.Update(launchFinishedMsg{
+		err:        errors.New("exited with code 3"),
+		profile:    "or-main",
+		command:    "/tmp/test-child",
+		workingDir: "/tmp",
+		result: runner.InteractiveExecResult{
+			Started:    true,
+			ExitCode:   3,
+			Duration:   100 * time.Millisecond,
+			OutputTail: "ordinary diagnostic\n\x1b]52;c;secret\a",
+		},
+	})
+	result := m2.(*model)
+	if result.launchFailure == nil {
+		t.Fatal("immediate exit did not retain failure report")
+	}
+	if strings.Contains(result.launchFailure.OutputTail, "\x1b]") || !strings.Contains(result.launchFailure.OutputTail, "ordinary diagnostic") {
+		t.Fatalf("failure output was not safely retained: %q", result.launchFailure.OutputTail)
+	}
+	view := stripANSIForTest(result.View().Content)
+	for _, want := range []string{"Application failed during startup", "Exit code: 3", "ordinary diagnostic"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("startup failure view missing %q: %s", want, view)
+		}
 	}
 }
 

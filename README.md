@@ -21,8 +21,11 @@ Watch the full end-to-end demo: [`docs/demo/full-flow-launch.mp4`](docs/demo/ful
 - **Run** — launch any command with the profile's secrets injected into the
   child process only. Global shell is never touched; config files are written
   with atomic 0600 writes, backup, and redaction checks.
-- **TUI** — interactive terminal UI with dashboard, providers, keys, profiles,
-  contract-aware launch screen, doctor, audit, settings, and help.
+- **TUI** — interactive terminal UI with dashboard, providers, vault, profiles,
+  contract-aware launch screen, doctor, audit, settings, Access, scratch, and help.
+- **Credential broker** — optional local Unix-socket service lets authorized
+  apps resolve stable binding names, so one vault rotation reaches the next
+  provider-client reconnect without rewriting `.env` files.
 
 ## Why this exists
 

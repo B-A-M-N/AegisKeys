@@ -8,7 +8,6 @@ package tui
 
 import (
 	"os"
-	"os/exec"
 	"time"
 
 	"github.com/charmbracelet/colorprofile"
@@ -22,6 +21,7 @@ import (
 	"aegiskeys/internal/config"
 	"aegiskeys/internal/profile"
 	"aegiskeys/internal/provider"
+	"aegiskeys/internal/runner"
 	"aegiskeys/internal/secret"
 	"aegiskeys/internal/security"
 )
@@ -127,7 +127,9 @@ const (
 	screenAudit
 	screenSettings
 	screenScratch
+	screenAccess
 	screenHelp
+	screenSentinel
 )
 
 var screenDefs = []struct {
@@ -144,10 +146,11 @@ var screenDefs = []struct {
 	{screenAudit, "Audit", "7"},
 	{screenSettings, "Settings", "8"},
 	{screenScratch, "Scratch", "9"},
+	{screenAccess, "Access", "0"},
 	{screenHelp, "Help", "?"},
 }
 
-func screenCount() int { return len(screenDefs) }
+func screenCount() int { return int(screenSentinel) }
 
 // modalKind identifies an active modal.
 type modalKind int
@@ -170,6 +173,23 @@ const (
 	launchTypeCommand
 )
 
+type launchPhase int
+
+const (
+	launchIdle launchPhase = iota
+	launchPreparing
+	launchRunning
+	launchFailed
+)
+
+type launchPreviewState struct {
+	requestID   uint64
+	profileName string
+	loading     bool
+	strategy    *adapter.LaunchStrategy
+	err         error
+}
+
 // model is the single root Bubble Tea model.
 type model struct {
 	configDir   string
@@ -187,7 +207,7 @@ type model struct {
 	quit   bool
 
 	// Per-screen selected row index.
-	selected [9]int
+	selected [screenSentinel]int
 
 	// Vault / unlock state.
 	unlocked      bool
@@ -250,6 +270,10 @@ type model struct {
 	launchMode    launchMode
 	launchCommand string
 	commandInput  textinput.Model
+	launchPreview launchPreviewState
+	launchPhase   launchPhase
+	launchFailure *launchFailure
+	animationGen  uint64
 
 	// Form / input filter for lists.
 	filterText   string
@@ -312,21 +336,15 @@ type keyFormState struct {
 	secretSetup map[string]string
 }
 
-// Zero overwrites the derived key bytes and clears decrypted secrets.
-// Used on lock or quit to reduce the window of secret exposure in memory.
+// Zero overwrites the derived key bytes and clears decrypted secret material
+// through the vault-owned cleanup helper. Go strings are immutable, so this
+// is best-effort reference hygiene rather than guaranteed physical
+// zeroization.
 func (s *vaultSession) Zero() {
 	for i := range s.key {
 		s.key[i] = 0
 	}
-	if s.vault != nil {
-		for i := range s.vault.Keys {
-			s.vault.Keys[i].Secret = ""
-			s.vault.Keys[i].PrivateNote = ""
-		}
-		for i := range s.vault.ScratchPads {
-			s.vault.ScratchPads[i].Body = ""
-		}
-	}
+	secret.ZeroVault(s.vault)
 	s.vault = nil
 }
 
@@ -334,6 +352,11 @@ func (s *vaultSession) Zero() {
 // This is the security-critical teardown: wipe the derived key, drop
 // decrypted secrets, and clear every form field that may have held them.
 func (m *model) lockVault() {
+	// Invalidate outstanding preview work and drop its launch plan because the
+	// plan can contain injected credential values while the vault is unlocked.
+	m.launchPreview = launchPreviewState{requestID: m.launchPreview.requestID + 1}
+	m.launchPhase = launchIdle
+	m.stopAnimation()
 	if m.vaultSession != nil {
 		m.vaultSession.Zero()
 	}
@@ -393,8 +416,20 @@ func (m *model) Init() tea.Cmd {
 	if !m.unlocked && m.vaultExists {
 		cmds = append(cmds, m.passwordInput.Focus())
 	}
-	cmds = append(cmds, tickCmd())
+	// The lock screen remains static. Start the matrix only after a successful
+	// unlock, so the normal unlocked TUI gets the animated background without
+	// visual noise behind the password prompt.
 	return tea.Batch(cmds...)
+}
+
+func (m *model) startAnimation() tea.Cmd {
+	m.animationGen++
+	return tickCmd(m.animationGen)
+}
+
+func (m *model) stopAnimation() {
+	// Invalidate every queued tick from the currently active chain.
+	m.animationGen++
 }
 
 var _ tea.Model = (*model)(nil)
@@ -413,20 +448,47 @@ type doctorResultMsg struct {
 	results []security.CheckResult
 }
 
+type launchPreviewResolvedMsg struct {
+	requestID   uint64
+	profileName string
+	strategy    *adapter.LaunchStrategy
+	err         error
+}
+
 type launchPreparedMsg struct {
-	profile   string
-	cmd       *exec.Cmd
-	cleanup   func() error
-	vault     *vaultSession
-	configDir string
-	keyID     string
-	err       error
+	profile     string
+	execCommand *runner.InteractiveExec
+	cleanup     func() error
+	vault       *vaultSession
+	configDir   string
+	keyID       string
+	command     string
+	workingDir  string
+	err         error
 }
 
 type launchFinishedMsg struct {
 	err        error
 	usageErr   error
 	cleanupErr error
+	profile    string
+	command    string
+	workingDir string
+	result     runner.InteractiveExecResult
+}
+
+type launchFailure struct {
+	Profile    string
+	Command    string
+	WorkingDir string
+	Error      string
+	ExitCode   int
+	Signal     string
+	Duration   time.Duration
+	StdinTTY   bool
+	StdoutTTY  bool
+	StderrTTY  bool
+	OutputTail string
 }
 
 // wizardModelsFetchedMsg carries the result of an async dynamic model catalog

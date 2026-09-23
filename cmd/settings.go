@@ -39,6 +39,7 @@ var settingsShowCmd = &cobra.Command{
 		printSetting("unsafe_allow_real_home_verify", strconv.FormatBool(cfg.UnsafeAllowRealHomeVerify))
 		printSetting("rotation_reminder_days", strconv.Itoa(cfg.RotationReminderDays))
 		printSetting("runtime_policy", cfg.RuntimePolicy)
+		printSetting("broker_auto_lock_minutes", strconv.Itoa(cfg.BrokerAutoLockMinutes))
 		printSetting("inherit_env", strings.Join(cfg.InheritEnv, ","))
 		return nil
 	},
@@ -121,6 +122,12 @@ func applySetting(cfg *config.Config, key, value string) error {
 			return err
 		}
 		cfg.RotationReminderDays = n
+	case "broker_auto_lock_minutes":
+		n, err := parseNonNegativeInt(key, value)
+		if err != nil {
+			return err
+		}
+		cfg.BrokerAutoLockMinutes = n
 	case "runtime_policy":
 		switch value {
 		case config.RuntimePolicyStrict, config.RuntimePolicyStandard, config.RuntimePolicyPermissive:

@@ -3,14 +3,111 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 
 	"aegiskeys/internal/adapter"
 	"aegiskeys/internal/runner"
+	"aegiskeys/internal/secret"
 )
 
 var runProfile string
+
+func applyRunCommandOverride(strategy *adapter.LaunchStrategy, args []string) []string {
+	extraArgs := args
+	if len(args) == 0 {
+		return extraArgs
+	}
+	if args[0] == strategy.Plan.Command {
+		return args[1:]
+	}
+	strategy.Plan.Command = args[0]
+	strategy.Plan.Args = nil
+	return args[1:]
+}
+
+var (
+	withKeys    []string
+	withEnvVars []string
+	withCmd     string
+	withCmdArgs []string
+)
+
+var withCmdRoot = &cobra.Command{
+	Use:   "with --key <label-or-id> --env <VAR> -- <command> [args...]",
+	Short: "Launch a command with selected vault credentials and no profile",
+	Args:  cobra.MinimumNArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if len(withKeys) == 0 || len(withEnvVars) == 0 {
+			return fmt.Errorf("at least one --key and --env are required")
+		}
+		if len(withKeys) != len(withEnvVars) {
+			return fmt.Errorf("--key and --env must be provided in matching pairs")
+		}
+		v, err := loadVault()
+		if err != nil {
+			return err
+		}
+		env := make(map[string]string, len(withKeys))
+		used := make(map[string]bool, len(withKeys))
+		for i, selector := range withKeys {
+			envName := strings.TrimSpace(withEnvVars[i])
+			if !validEnvName(envName) {
+				return fmt.Errorf("invalid environment variable name %q", envName)
+			}
+			rec := findVaultRecordByLabelOrID(v, selector)
+			if rec == nil {
+				return fmt.Errorf("no vault item matches %q", selector)
+			}
+			if used[selector] {
+				return fmt.Errorf("duplicate key selection %q", selector)
+			}
+			used[selector] = true
+			if err := rec.AllowAccess(secret.AccessInjectEnv); err != nil {
+				return fmt.Errorf("key %q cannot be launch-injected: %w", rec.Label, err)
+			}
+			env[envName] = rec.Secret
+		}
+		strategy := &adapter.LaunchStrategy{
+			Plan:    adapter.LaunchPlan{Command: args[0], Args: args[1:], Env: env},
+			Support: adapter.AppSupportContract{ID: "arbitrary", CanLaunchArbitraryCommand: true},
+		}
+		return runner.Run(context.Background(), strategy, runner.RunOptions{InheritStdio: true})
+	},
+}
+
+func validEnvName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		if !(r == '_' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || i > 0 && r >= '0' && r <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func findVaultRecordByLabelOrID(v *secret.Vault, selector string) *secret.SecretRecord {
+	var found *secret.SecretRecord
+	for i := range v.Keys {
+		rec := &v.Keys[i]
+		if rec.ID == selector || rec.Label == selector {
+			if found != nil && found.ID != rec.ID {
+				return nil
+			}
+			found = rec
+		}
+	}
+	return found
+}
+
+func init() {
+	withCmdRoot.Flags().StringSliceVar(&withKeys, "key", nil, "vault key label or ID (repeatable, paired with --env)")
+	withCmdRoot.Flags().StringSliceVar(&withEnvVars, "env", nil, "target environment variable (repeatable, paired with --key)")
+	rootCmd.AddCommand(withCmdRoot)
+}
 
 var runCmd = &cobra.Command{
 	Use:   "run --profile <name> -- <command> [args...]",
@@ -75,25 +172,21 @@ var runCmd = &cobra.Command{
 		}
 
 		// Mark used and persist vault (timestamps only; secret unchanged).
-		v.Touch(prof.KeyID)
-		if err := saveVault(pw, v); err != nil {
+		if err := mutateVault(pw, secret.SessionMutation{
+			Mutate: func(latest *secret.Vault) error {
+				latest.Touch(prof.KeyID)
+				return nil
+			},
+		}); err != nil {
 			return err
 		}
 
-		// The resolved command is the child binary. The user's tokens after
-		// `--` are the child's arguments. Normalize so the binary name is
-		// never duplicated into argv:
-		//   - command unset → use args[0] as the binary, pass args[1:].
-		//   - args[0] repeats the command → drop it, pass args[1:].
-		//   - otherwise → pass the whole args slice as child arguments.
-		extraArgs := args
-		switch {
-		case strategy.Plan.Command == "" && len(args) > 0:
-			strategy.Plan.Command = args[0]
-			extraArgs = args[1:]
-		case len(args) > 0 && args[0] == strategy.Plan.Command:
-			extraArgs = args[1:]
-		}
+		// `run --profile <name> -- <command> [args...]` is the explicit
+		// command-override surface. A launchable profile normally resolves its
+		// own binary, but the documented run form must replace that binary so
+		// callers can execute a diagnostic/helper with the profile-scoped env.
+		// Repeating the resolved command preserves its adapter-provided args.
+		extraArgs := applyRunCommandOverride(strategy, args)
 
 		// Run owns: file writes, child env construction, process execution,
 		// audit events, and cleanup. CLI only resolves the strategy and

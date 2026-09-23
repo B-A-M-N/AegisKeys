@@ -14,7 +14,7 @@ func TestWriteEnvJSON_Masked(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	err := writeEnvJSON(&buf, env, "OPENROUTER_API_KEY", "OpenRouter", "test-prof", false)
+	err := writeEnvJSON(&buf, env, map[string]bool{"OPENROUTER_API_KEY": true}, "OpenRouter", "test-prof", false)
 	if err != nil {
 		t.Fatalf("writeEnvJSON: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestWriteEnvJSON_Full(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	err := writeEnvJSON(&buf, env, "OPENROUTER_API_KEY", "OpenRouter", "test-prof", true)
+	err := writeEnvJSON(&buf, env, map[string]bool{"OPENROUTER_API_KEY": true}, "OpenRouter", "test-prof", true)
 	if err != nil {
 		t.Fatalf("writeEnvJSON: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestWriteEnvJSON_SortedKeys(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	err := writeEnvJSON(&buf, env, "", "Prov", "Prof", true)
+	err := writeEnvJSON(&buf, env, nil, "Prov", "Prof", true)
 	if err != nil {
 		t.Fatalf("writeEnvJSON: %v", err)
 	}

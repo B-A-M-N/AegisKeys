@@ -1068,8 +1068,8 @@ func TestGeminiAdapter_GoogleProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Plan.Env["GOOGLE_MODEL"] != "gemini-3-flash" {
-		t.Errorf("GOOGLE_MODEL = %s", s.Plan.Env["GOOGLE_MODEL"])
+	if s.Plan.Env["GEMINI_MODEL"] != "gemini-3-flash" {
+		t.Errorf("GEMINI_MODEL = %s", s.Plan.Env["GEMINI_MODEL"])
 	}
 	if s.Plan.Env["GOOGLE_GEMINI_BASE_URL"] != "" {
 		t.Errorf("google provider should not force gateway base URL, got %s", s.Plan.Env["GOOGLE_GEMINI_BASE_URL"])
@@ -1094,8 +1094,8 @@ func TestGeminiAdapter_OpenAIProviderUsesGateway(t *testing.T) {
 	if got := s.Plan.Env["GOOGLE_GEMINI_BASE_URL"]; got != "http://127.0.0.1:4000" {
 		t.Fatalf("GOOGLE_GEMINI_BASE_URL = %q", got)
 	}
-	if got := s.Plan.Env["GOOGLE_MODEL"]; got != "openai/gpt-4o:free" {
-		t.Fatalf("GOOGLE_MODEL = %q", got)
+	if got := s.Plan.Env["GEMINI_MODEL"]; got != "openai/gpt-4o:free" {
+		t.Fatalf("GEMINI_MODEL = %q", got)
 	}
 	if got := s.Plan.Env["GEMINI_API_KEY"]; got != "sk-gateway" {
 		t.Fatalf("GEMINI_API_KEY not set for gateway auth")

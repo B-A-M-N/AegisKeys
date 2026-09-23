@@ -63,11 +63,26 @@ Tests are adversarial: they attempt to violate the claim and assert the system r
 | Vault not corrupted | `secret.TestVault_Concurrent_AddSaveLoad` | PASS |
 | No data loss | `runner.TestConcurrentSave_Durability` | PASS |
 
-### 6.1 Dependency vulnerabilities
+### 6.1 Credential broker and transactional vault
 
 | Claim | Test | Result |
 |-------|------|--------|
-| No reachable known vulnerabilities in code or standard library | `go run golang.org/x/vuln/cmd/govulncheck@latest ./...` with Go 1.25.12+ | PASS |
+| Delete persists and is not resurrected | `secret.TestMutateVault_DeletePersists` | PASS |
+| Concurrent independent rotations survive | `secret.TestMutateVault_IndependentExistingRecordUpdatesBothSurvive` | PASS |
+| Concurrent add/delete both survive | `secret.TestMutateVault_ConcurrentAddAndDeleteBothSurvive` | PASS |
+| Zeroization clears extra secret components and scratchpads | `secret.TestZeroVaultClearsAllSecretComponents` | PASS |
+| Unsafe socket path is refused | `broker.TestListenRejectsUnsafePreexistingPath` | PASS |
+| Broker metadata is 0600 and contains no credential representation | `broker.TestBrokerMetadataPermissionsAndNoSecrets` | PASS |
+| Resolve requires both grant and secret policy | `broker.TestResolveAuthorizationAndResponse`, `broker.TestResolveDeniedWithoutSecretPolicy`, `broker.TestResolveDeniedWithoutGrant`, `broker.TestServiceAuthorizationWithoutSocket` | PASS |
+| Rotate requires rotate grant and changes only target | `broker.TestRotateRequiresCapability`, `broker.TestRotateAuthorizedChangesOnlyTarget`, `broker.TestServiceRotationWithoutSocket` | PASS |
+| Unix-socket protocol rejects invalid methods/fields/bodies | `broker.TestProtocolValidation` | PASS |
+| Concurrent broker request handling and related broker suites are race-clean | `go test -race ./internal/broker` | PASS; Unix-bind E2E reports an explicit environment skip in the current sandbox; a recorder-based dual-policy unit test runs without a socket |
+
+### 6.2 Dependency vulnerabilities
+
+| Claim | Test | Result |
+|-------|------|--------|
+| No reachable known vulnerabilities in code or standard library | `go run golang.org/x/vuln/cmd/govulncheck@latest ./...` with Go 1.25.12+ | PASS on network-enabled release host (not run in offline workspace) |
 
 ### 7. Saved profiles resolve before use
 
@@ -106,7 +121,7 @@ Tests are adversarial: they attempt to violate the claim and assert the system r
 | Runner accepted blocked strategies (RunConfig lacked Blocked field) | Added Blocked/BlockReason to RunConfig; Run() refuses |
 | ResolveRunConfig discarded Blocked metadata | Switched to ResolveLaunchStrategy |
 | Runner's Blocked enforcement missing | Added explicit refusal before exec.Command |
-| Concurrent SaveVault lost data | Added cross-process flock and merge-on-disk preservation |
+| Concurrent snapshot saves could resurrect deletes or overwrite existing records | Added flock and `MutateVault*` latest-state transactions |
 | Raw secret argv flags exposed key material | Removed `key add --secret` and `vault add --secret`; prompt only |
 | CLI profile create could save broken profiles | Added central `resolve.ValidateResolution` and render-mode derivation |
 | TOML/XML “merge” could overwrite existing user config | Refuse existing user/project overwrite until parser-backed merge exists |
