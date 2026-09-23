@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -700,6 +701,147 @@ type accessMutationDoneMsg struct {
 	err     error
 }
 
+func (m *model) handleAccessApprovalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	key := normalizedKey(k)
+	steps := []struct{ prompt, placeholder string }{
+		{"Approve executable path for binding", "/absolute/path/to/app"},
+		{"Capability (resolve, rotate, or both)", "resolve"},
+		{"Expiration (future RFC3339)", time.Now().Add(time.Hour).Format(time.RFC3339)},
+	}
+	if key == "esc" {
+		m.modal = modalNone
+		m.focus = focusContent
+		m.addInput.Blur()
+		return m, nil
+	}
+	if key != "enter" {
+		var cmd tea.Cmd
+		m.addInput, cmd = m.addInput.Update(k)
+		return m, cmd
+	}
+	value := strings.TrimSpace(m.addInput.Value())
+	if value == "" {
+		value = steps[m.accessStep].placeholder
+	}
+	m.addValues = append(m.addValues, value)
+	m.accessStep++
+	if m.accessStep < len(steps) {
+		m.addInput.Reset()
+		m.addInput.SetValue("")
+		m.modalPrompt = steps[m.accessStep].prompt
+		return m, m.addInput.Focus()
+	}
+	bindingID := m.modalTarget
+	m.modal = modalNone
+	m.focus = focusContent
+	m.addInput.Blur()
+	return m, approveAccessGrantCmd(m.configDir, bindingID, m.vaultSession.key, m.addValues[0], m.addValues[1], m.addValues[2])
+}
+
+func approveAccessGrantCmd(configDir, bindingID string, vaultKey [32]byte, executable, capabilityText, expiresText string) tea.Cmd {
+	return func() tea.Msg {
+		canonical, err := filepath.EvalSymlinks(executable)
+		if err != nil {
+			return accessMutationDoneMsg{err: fmt.Errorf("resolve executable: %w", err)}
+		}
+		hash, err := broker.HashExecutable(canonical)
+		if err != nil {
+			return accessMutationDoneMsg{err: err}
+		}
+		capabilities, err := parseAccessCapabilities(capabilityText)
+		if err != nil {
+			return accessMutationDoneMsg{err: err}
+		}
+		expiration, err := time.Parse(time.RFC3339, expiresText)
+		if err != nil || !expiration.After(time.Now()) {
+			return accessMutationDoneMsg{err: fmt.Errorf("expiration must be a future RFC3339 timestamp")}
+		}
+		grantID, err := broker.NewGrantID()
+		if err != nil {
+			return accessMutationDoneMsg{err: err}
+		}
+		metaPath := config.BrokerPath(configDir)
+		if err := broker.MutateBrokerFile(metaPath, func(meta *broker.File) error {
+			var binding *broker.CredentialBinding
+			for i := range meta.Bindings {
+				if meta.Bindings[i].ID == bindingID {
+					binding = &meta.Bindings[i]
+				}
+			}
+			if binding == nil {
+				return fmt.Errorf("binding not found")
+			}
+			meta.Grants = append(meta.Grants, broker.AccessGrant{ID: grantID, Name: filepath.Base(canonical), BindingID: binding.ID, Client: broker.ClientConstraint{UID: os.Getuid(), ExecutablePath: canonical, ExecutableHash: hash}, Capabilities: capabilities, Enabled: true, CreatedAt: time.Now(), ExpiresAt: &expiration})
+			return nil
+		}); err != nil {
+			return accessMutationDoneMsg{err: err}
+		}
+		if err := secret.MutateVaultSession(config.VaultPath(configDir), "", vaultKey, secret.SessionMutation{Mutate: func(v *secret.Vault) error {
+			meta, _ := broker.LoadBrokerFile(metaPath)
+			if meta == nil {
+				return fmt.Errorf("broker metadata reload failed")
+			}
+			for _, grant := range meta.Grants {
+				if grant.ID == grantID {
+					rec := v.Get(grant.BindingID)
+					_ = rec
+					for i := range meta.Bindings {
+						if meta.Bindings[i].ID == grant.BindingID {
+							rec = v.Get(meta.Bindings[i].SecretID)
+						}
+					}
+					if rec == nil {
+						return fmt.Errorf("binding target not found")
+					}
+					for _, cap := range capabilities {
+						if cap == broker.CapabilityResolve {
+							rec.Policy.AllowBrokerResolve = true
+						}
+						if cap == broker.CapabilityRotate {
+							rec.Policy.AllowBrokerRotate = true
+						}
+					}
+					rec.Policy.Version = 1
+					return nil
+				}
+			}
+			return fmt.Errorf("grant not found")
+		}}); err != nil {
+			return accessMutationDoneMsg{err: err}
+		}
+		return accessMutationDoneMsg{message: "Access grant approved."}
+	}
+}
+
+func parseAccessCapabilities(text string) ([]broker.Capability, error) {
+	seen := map[broker.Capability]bool{}
+	for _, raw := range strings.Split(strings.ToLower(text), ",") {
+		raw = strings.TrimSpace(raw)
+		if raw == "both" {
+			raw = "resolve,rotate"
+		}
+		if raw == "" {
+			continue
+		}
+		cap := broker.Capability(raw)
+		if !cap.Valid() {
+			return nil, fmt.Errorf("unknown capability %q", raw)
+		}
+		seen[cap] = true
+	}
+	if len(seen) == 0 {
+		return nil, fmt.Errorf("at least one capability is required")
+	}
+	out := make([]broker.Capability, 0, len(seen))
+	if seen[broker.CapabilityResolve] {
+		out = append(out, broker.CapabilityResolve)
+	}
+	if seen[broker.CapabilityRotate] {
+		out = append(out, broker.CapabilityRotate)
+	}
+	return out, nil
+}
+
 func (m *model) handleAccessModalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := normalizedKey(k)
 	switch key {
@@ -809,6 +951,21 @@ func (m *model) handleAccessKey(key string) (tea.Model, tea.Cmd) {
 		m.addInput.EchoMode = textinput.EchoNormal
 		m.addInput.SetValue("")
 		m.modalPrompt = "New binding: stable app/credential name"
+		return m, m.addInput.Focus()
+	case "a":
+		if m.brokerMeta == nil || m.selected[screenAccess] >= len(m.brokerMeta.Bindings) {
+			return m, nil
+		}
+		binding := m.brokerMeta.Bindings[m.selected[screenAccess]]
+		m.modal = modalAccessApprove
+		m.focus = focusModal
+		m.accessStep = 0
+		m.addValues = nil
+		m.addInput.Reset()
+		m.addInput.SetValue("")
+		m.addInput.EchoMode = textinput.EchoNormal
+		m.modalTarget = binding.ID
+		m.modalPrompt = "Approve executable path for " + binding.Name
 		return m, m.addInput.Focus()
 	case "e":
 		if m.brokerMeta == nil || m.selected[screenAccess] >= len(m.brokerMeta.Bindings) {
@@ -2012,6 +2169,9 @@ func (m *model) handleModalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.modal == modalAccess || m.modal == modalAccessRebind {
 		return m.handleAccessModalKey(k)
+	}
+	if m.modal == modalAccessApprove {
+		return m.handleAccessApprovalKey(k)
 	}
 	switch key {
 	case "esc", "n":

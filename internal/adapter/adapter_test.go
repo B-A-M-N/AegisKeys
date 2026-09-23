@@ -945,6 +945,9 @@ func TestClaudeCodeAdapter_LongCatUsesAnthropicEndpoint(t *testing.T) {
 }
 
 func TestFreeClaudeAdapter_RepairsLegacyGoModelPrefix(t *testing.T) {
+	if findFreeCodeBinary() == "" {
+		t.Skip("free-code not installed; environment-dependent integration test")
+	}
 	a := FreeClaudeAdapter{}
 	p := profile.Profile{Name: "go", Target: profile.TargetConfig{}, Models: profile.ModelSlots{Main: &profile.ModelRef{ID: "opencode/minimax-m3"}}}
 	prov := provider.Provider{Slug: "opencode-go", Compatibility: provider.CompatOpenAI}

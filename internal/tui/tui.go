@@ -186,6 +186,7 @@ const (
 	modalReplaceProfileKey
 	modalAccess
 	modalAccessRebind
+	modalAccessApprove
 )
 
 type launchMode int
@@ -290,6 +291,7 @@ type model struct {
 	// brokerMeta is a cached immutable snapshot. View never reads broker.json.
 	brokerMeta *broker.File
 	brokerErr  string
+	accessStep int
 
 	// Launch screen.
 	launchMode    launchMode

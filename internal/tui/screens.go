@@ -929,7 +929,7 @@ func (m *model) accessView(s *Styles) string {
 		}
 	}
 	b.WriteString("\n")
-	b.WriteString(s.Muted.Render("Enter inspect · R refresh · Z add · E rebind · X revoke · No raw credentials appear"))
+	b.WriteString(s.Muted.Render("Enter inspect · R refresh · Z add · A approve · E rebind · X revoke · No raw credentials appear"))
 	b.WriteString("\n")
 	return b.String()
 }
