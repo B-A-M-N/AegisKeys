@@ -1,4 +1,4 @@
-.PHONY: build test vet fmt-check run install clean release demo demo-cli demo-tui demo-full demo-prereqs
+.PHONY: build test vet fmt-check run install clean release demo demo-cli demo-tui demo-full demo-prereqs assets-check cross-build
 
 VERSION ?= dev
 PREFIX ?= /usr/local
@@ -18,6 +18,15 @@ vet:
 
 fmt-check:
 	test -z "$$(gofmt -l .)"
+
+assets-check:
+	go run -buildvcs=false . assets-check
+
+cross-build:
+	GOOS=linux GOARCH=amd64 go build -buildvcs=false -o /tmp/aegiskeys_linux_amd64 .
+	GOOS=linux GOARCH=arm64 go build -buildvcs=false -o /tmp/aegiskeys_linux_arm64 .
+	GOOS=darwin GOARCH=amd64 go build -buildvcs=false -o /tmp/aegiskeys_darwin_amd64 .
+	GOOS=darwin GOARCH=arm64 go build -buildvcs=false -o /tmp/aegiskeys_darwin_arm64 .
 
 run: build
 	./aegiskeys
@@ -47,7 +56,7 @@ demo-full: build demo-prereqs
 	mkdir -p docs/demo tmp
 	"$(VHS)" demos/vhs/full-flow-launch.tape
 
-release: clean
+release: assets-check cross-build clean
 	mkdir -p "$(DIST_DIR)"
 	GOOS=linux GOARCH=amd64 go build -buildvcs=false -ldflags "$(LDFLAGS)" -o "$(DIST_DIR)/aegiskeys_$(VERSION)_linux_amd64" .
 	GOOS=linux GOARCH=arm64 go build -buildvcs=false -ldflags "$(LDFLAGS)" -o "$(DIST_DIR)/aegiskeys_$(VERSION)_linux_arm64" .

@@ -159,6 +159,7 @@ func TestPrepareCommand_AppliesEnvAllowlist(t *testing.T) {
 			LaunchSurfaces: []string{"cli"},
 			CanLaunch:      true,
 		},
+		Validated: true,
 	}
 
 	prepared, err := PrepareCommandWithCleanup(context.Background(), strategy, RunOptions{InheritStdio: false})

@@ -376,6 +376,13 @@ func PrepareCommandWithCleanup(ctx context.Context, strategy *adapter.LaunchStra
 	if strategy == nil {
 		return nil, errors.New("nil launch strategy")
 	}
+	if strategy.Support.ID == "explicit-launch" {
+		if err := adapter.ValidateExplicitLaunch(strategy, nil); err != nil {
+			return nil, err
+		}
+	} else if !strategy.Validated {
+		return nil, errors.New("launch strategy has not passed the mandatory adapter validation gate")
+	}
 	if strategy.Blocked {
 		if strategy.BlockReason != "" {
 			return nil, fmt.Errorf("launch blocked: %s", strategy.BlockReason)

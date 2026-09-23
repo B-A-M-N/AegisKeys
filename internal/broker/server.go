@@ -35,7 +35,8 @@ const (
 // sockets are unnamed and simultaneous clients can share one address.
 type identityListener struct {
 	net.Listener
-	peer PeerResolver
+	peer  PeerResolver
+	audit auditLogger
 }
 
 type identityConn struct {
@@ -44,16 +45,21 @@ type identityConn struct {
 }
 
 func (l *identityListener) Accept() (net.Conn, error) {
-	c, err := l.Listener.Accept()
-	if err != nil {
-		return nil, err
+	for {
+		c, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		id, resolveErr := l.peer.Resolve(c)
+		if resolveErr != nil {
+			_ = c.Close()
+			if l.audit != nil {
+				l.audit.Log("broker_peer_authentication_failed", "denied", nil)
+			}
+			continue
+		}
+		return &identityConn{Conn: c, peer: id}, nil
 	}
-	id, resolveErr := l.peer.Resolve(c)
-	if resolveErr != nil {
-		_ = c.Close()
-		return nil, resolveErr
-	}
-	return &identityConn{Conn: c, peer: id}, nil
 }
 
 type Session struct {
@@ -97,7 +103,12 @@ func Listen(configDir, socketPath string, peer PeerResolver) (net.Listener, erro
 		if !sameOwner(fileUID(info)) {
 			return nil, fmt.Errorf("refusing socket %s: not owned by current user", socketPath)
 		}
-		// A stale socket from a dead prior process is the only removable type.
+		// Refuse a live same-owner socket. Dial only for liveness; a refused
+		// connection is a stale socket that is safe to remove.
+		if conn, dialErr := net.DialTimeout("unix", socketPath, 150*time.Millisecond); dialErr == nil {
+			_ = conn.Close()
+			return nil, fmt.Errorf("refusing to remove live broker socket %s", socketPath)
+		}
 		if err := os.Remove(socketPath); err != nil {
 			return nil, err
 		}
@@ -154,7 +165,7 @@ func NewSession(listener net.Listener, meta *File, vaultPath string, key [32]byt
 		return nil, err
 	}
 	s := &Session{
-		listener: &identityListener{Listener: listener, peer: peer},
+		listener: &identityListener{Listener: listener, peer: peer, audit: audit},
 		peer:     peer,
 		service:  service,
 		audit:    audit,

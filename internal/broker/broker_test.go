@@ -149,6 +149,22 @@ func TestBrokerMetadataPermissionsAndNoSecrets(t *testing.T) {
 	_ = key
 }
 
+func TestListenRejectsLiveSocket(t *testing.T) {
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "run", "broker.sock")
+	if err := os.MkdirAll(filepath.Dir(socket), 0700); err != nil {
+		t.Fatal(err)
+	}
+	live, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Skipf("sandbox denies Unix socket bind: %v", err)
+	}
+	defer live.Close()
+	if _, err := Listen(dir, socket, LocalResolver{}); err == nil {
+		t.Fatal("live same-owner socket was removed")
+	}
+}
+
 func TestRuntimeDirectoryPermission(t *testing.T) {
 	dir := t.TempDir()
 	runtime := filepath.Join(dir, "run")

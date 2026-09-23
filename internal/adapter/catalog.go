@@ -66,6 +66,35 @@ func buildCatalogProviders(
 //
 // If the adapter does NOT implement ProviderCatalogAdapter, it falls back
 // to the standard single-provider ResolveLaunchStrategyForMode.
+func markResolvedSecretEnv(env map[string]string, key *secret.SecretRecord) map[string]string {
+	sensitivity := make(map[string]string, len(env))
+	for name := range env {
+		if name == "" {
+			sensitivity[name] = "unknown"
+		} else {
+			sensitivity[name] = "public"
+		}
+	}
+	if key == nil {
+		return sensitivity
+	}
+	if key.Secret != "" {
+		for name, value := range env {
+			if value == key.Secret {
+				sensitivity[name] = "secret"
+			}
+		}
+	}
+	for _, component := range key.ExtraSecrets {
+		for name, value := range env {
+			if value == component.Secret && component.Secret != "" {
+				sensitivity[name] = "secret"
+			}
+		}
+	}
+	return sensitivity
+}
+
 func ResolveLaunchStrategyCatalog(
 	p profile.Profile,
 	prov provider.Provider,
@@ -128,6 +157,9 @@ func ResolveLaunchStrategyCatalog(
 			strategy.Plan.Env[k] = v
 		}
 
+		// Classify every resolved field from the credential records, not the
+		// spelling of the variable. Unknown fields remain masked in previews.
+		strategy.Plan.EnvSensitivity = markResolvedSecretEnv(strategy.Plan.Env, key)
 		strategy.Support = contract
 		strategy.Hazards = append(strategy.Hazards, contract.Hazards...)
 		strategy.Hazards = dedupeHazards(strategy.Hazards)

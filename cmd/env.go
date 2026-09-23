@@ -114,9 +114,12 @@ var envCmd = &cobra.Command{
 			return nil
 		}
 
-		// Risky path: requires confirmation AND the key must allow reveal/export.
+		// Risky path: requires both reveal and environment-export permission.
 		if err := rec.AllowAccess(secret.AccessRevealStdout); err != nil {
 			return fmt.Errorf("key %q cannot be revealed: %w", rec.Label, err)
+		}
+		if err := rec.AllowAccess(secret.AccessEnvExport); err != nil {
+			return fmt.Errorf("key %q cannot be exported: %w", rec.Label, err)
 		}
 
 		if format == formatJSON {

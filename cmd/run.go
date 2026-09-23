@@ -30,8 +30,6 @@ func applyRunCommandOverride(strategy *adapter.LaunchStrategy, args []string) []
 var (
 	withKeys    []string
 	withEnvVars []string
-	withCmd     string
-	withCmdArgs []string
 )
 
 var withCmdRoot = &cobra.Command{
@@ -50,28 +48,54 @@ var withCmdRoot = &cobra.Command{
 			return err
 		}
 		env := make(map[string]string, len(withKeys))
-		used := make(map[string]bool, len(withKeys))
+		defer func() {
+			for name := range env {
+				env[name] = ""
+				delete(env, name)
+			}
+			secret.ZeroVault(v)
+		}()
+		usedIDs := make(map[string]bool, len(withKeys))
+		usedEnvNames := make(map[string]bool, len(withKeys))
 		for i, selector := range withKeys {
 			envName := strings.TrimSpace(withEnvVars[i])
 			if !validEnvName(envName) {
 				return fmt.Errorf("invalid environment variable name %q", envName)
 			}
+			if usedEnvNames[envName] {
+				return fmt.Errorf("duplicate environment variable %q", envName)
+			}
 			rec := findVaultRecordByLabelOrID(v, selector)
 			if rec == nil {
 				return fmt.Errorf("no vault item matches %q", selector)
 			}
-			if used[selector] {
-				return fmt.Errorf("duplicate key selection %q", selector)
+			if usedIDs[rec.ID] {
+				return fmt.Errorf("duplicate key selection %q", rec.Label)
 			}
-			used[selector] = true
+			if rec.Archived {
+				return fmt.Errorf("key %q is archived", rec.Label)
+			}
+			if rec.Secret == "" {
+				return fmt.Errorf("key %q has no primary secret", rec.Label)
+			}
+			usedIDs[rec.ID] = true
+			usedEnvNames[envName] = true
 			if err := rec.AllowAccess(secret.AccessInjectEnv); err != nil {
 				return fmt.Errorf("key %q cannot be launch-injected: %w", rec.Label, err)
 			}
 			env[envName] = rec.Secret
 		}
 		strategy := &adapter.LaunchStrategy{
-			Plan:    adapter.LaunchPlan{Command: args[0], Args: args[1:], Env: env},
-			Support: adapter.AppSupportContract{ID: "arbitrary", CanLaunchArbitraryCommand: true},
+			Plan:    adapter.LaunchPlan{Command: args[0], Args: args[1:], Env: env, EnvSensitivity: make(map[string]string, len(env))},
+			Support: adapter.AppSupportContract{ID: "explicit-launch", CanLaunchArbitraryCommand: true},
+		}
+		rawSecrets := make([]string, 0, len(withKeys))
+		for name := range env {
+			strategy.Plan.EnvSensitivity[name] = "secret"
+			rawSecrets = append(rawSecrets, env[name])
+		}
+		if err := adapter.ValidateExplicitLaunch(strategy, rawSecrets); err != nil {
+			return err
 		}
 		return runner.Run(context.Background(), strategy, runner.RunOptions{InheritStdio: true})
 	},

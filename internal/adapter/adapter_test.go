@@ -267,6 +267,13 @@ func TestRenderModeForContract_ConfigPatchedIsConfigFile(t *testing.T) {
 	}
 }
 
+func TestExplicitLaunchRejectsUnknownSensitivity(t *testing.T) {
+	strategy := &LaunchStrategy{Plan: LaunchPlan{Command: "true", Env: map[string]string{"ARBITRARY": "value"}}, Support: AppSupportContract{ID: "explicit-launch", CanLaunchArbitraryCommand: true}}
+	if err := ValidateExplicitLaunch(strategy, []string{"value"}); err == nil {
+		t.Fatal("unknown sensitivity accepted")
+	}
+}
+
 func TestValidateContract_MissingFields(t *testing.T) {
 	cases := []struct {
 		name string

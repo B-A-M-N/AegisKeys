@@ -47,6 +47,12 @@ jobs:
       - name: Build
         run: go build -buildvcs=false ./...
 
+      - name: Embedded asset gate
+        run: make assets-check
+
+      - name: Mandatory macOS cross-build
+        run: make cross-build
+
       - name: Test
         run: go test ./...
 

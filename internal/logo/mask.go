@@ -1,6 +1,7 @@
 package logo
 
 import (
+	"bytes"
 	"fmt"
 	"image"
 	"image/color"
@@ -77,6 +78,22 @@ func LoadAssetMask(asset Asset, path string) (Mask, error) {
 	mask := ImageToMask(img, asset.Width, asset.Height)
 	mask.ID = asset.ID
 	return mask, nil
+}
+
+// loadImageCached opens a development override path. Embedded release paths
+// are decoded directly from embeddedAssets by LoadEmbeddedAssetMask.
+// LoadEmbeddedAssetMask decodes a mask directly from the executable's embedded
+// assets, independent of the current working directory.
+func LoadEmbeddedAssetMask(asset Asset) (Mask, error) {
+	raw, err := embeddedAssets.ReadFile(asset.Path)
+	if err != nil {
+		return Mask{}, err
+	}
+	img, _, err := image.Decode(bytes.NewReader(raw))
+	if err != nil {
+		return Mask{}, err
+	}
+	return ImageToMask(img, asset.Width, asset.Height), nil
 }
 
 func loadImageCached(path string) (image.Image, error) {

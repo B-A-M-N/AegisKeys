@@ -72,11 +72,10 @@ type AccessGrant struct {
 
 // File is the metadata-only broker store persisted as broker.json.
 type File struct {
-	Version   int                 `json:"version"`
-	Revision  uint64              `json:"revision"`
-	Integrity []byte              `json:"integrity,omitempty"`
-	Bindings  []CredentialBinding `json:"bindings"`
-	Grants    []AccessGrant       `json:"grants,omitempty"`
+	Version  int                 `json:"version"`
+	Revision uint64              `json:"revision"`
+	Bindings []CredentialBinding `json:"bindings"`
+	Grants   []AccessGrant       `json:"grants,omitempty"`
 }
 
 // NewFile returns an empty current-version broker metadata file.

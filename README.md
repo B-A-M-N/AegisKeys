@@ -241,6 +241,13 @@ aegiskeys provider refresh-models openrouter --key <key-id>
 aegiskeys provider add --slug myllm --name "My LLM" --base-url https://my.api/v1 \
     --env-var MY_API_KEY
 
+# FreeCodex without an AegisKeys profile
+# The vault label/ID is selected at launch; no FreeCodex profile is created and
+# the secret is injected only into the child process environment.
+aegiskeys with --key <vault-key> --env OPENROUTER_API_KEY -- freecodex models
+aegiskeys with --key <vault-key> --env OPENROUTER_API_KEY -- freecodex
+#
+
 # Keys (always masked unless explicitly revealed)
 aegiskeys key list
 aegiskeys key show --id <id>

@@ -5,8 +5,9 @@ import (
 	"math/rand"
 	"strings"
 
-	"aegiskeys/internal/logo"
 	"github.com/charmbracelet/harmonica"
+
+	"aegiskeys/internal/logo"
 )
 
 type matrixLogoReveal struct {
@@ -31,7 +32,7 @@ func (m *Matrix) initLogoReveals() {
 	ids := []string{
 		"aider", "crush", "qwen", "goose", "cline", "claude", "free-claude", "hermes", "vibe", "codex",
 		"mimo", "opencode", "openhands", "gemini", "copilot", "continue", "zed", "intellij",
-		"openai", "anthropic", "deepseek", "mistral", "nvidia", "google", "moonshotai", "z-ai",
+		"anthropic", "mistral", "google",
 	}
 	m.logos = make([]matrixLogoReveal, 0, len(ids))
 	for i, id := range ids {

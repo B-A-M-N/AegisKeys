@@ -51,12 +51,6 @@ func loadBrokerMeta() (*broker.File, string) {
 	return meta, path
 }
 
-func saveBrokerMeta(path string, meta *broker.File) {
-	if err := broker.SaveBrokerFile(path, meta); err != nil {
-		exitWithError(err)
-	}
-}
-
 func exitWithError(err error) {
 	fmt.Fprintln(os.Stderr, "Error:", err)
 	os.Exit(1)
@@ -109,12 +103,13 @@ var brokerServeCmd = &cobra.Command{
 		meta, _ := broker.LoadBrokerFile(config.BrokerPath(dir))
 		key := requireVaultKeyForBroker()
 		socket := config.BrokerSocketPath(dir)
-		listener, err := broker.Listen(dir, socket, broker.LinuxPeerResolver{UID: os.Getuid(), HashExecutables: true})
+		peer := broker.NewPeerResolver()
+		listener, err := broker.Listen(dir, socket, peer)
 		if err != nil {
 			return err
 		}
 		logger := audit.NewLogger(config.AuditPath(dir))
-		session, err := broker.NewSession(listener, meta, config.VaultPath(dir), key, broker.LinuxPeerResolver{UID: os.Getuid(), HashExecutables: true}, brokerAuditLogger{logger})
+		session, err := broker.NewSession(listener, meta, config.VaultPath(dir), key, peer, brokerAuditLogger{logger})
 		if err != nil {
 			_ = listener.Close()
 			return err
@@ -288,11 +283,18 @@ var accessBindingAddCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		meta.Bindings = append(meta.Bindings, broker.CredentialBinding{
-			ID: id, Name: accessBindingName, SecretID: accessBindingSecret, Description: accessBindingDescription, ComponentAllowlist: accessBindingComponents,
-			CreatedAt: now, UpdatedAt: now,
-		})
-		saveBrokerMeta(path, meta)
+		if err := broker.MutateBrokerFile(path, func(latest *broker.File) error {
+			if latest.FindBinding(accessBindingName) != nil {
+				return fmt.Errorf("binding %q already exists", accessBindingName)
+			}
+			latest.Bindings = append(latest.Bindings, broker.CredentialBinding{
+				ID: id, Name: accessBindingName, SecretID: accessBindingSecret, Description: accessBindingDescription, ComponentAllowlist: accessBindingComponents,
+				CreatedAt: now, UpdatedAt: now,
+			})
+			return nil
+		}); err != nil {
+			return err
+		}
 		logAudit("credential_binding_created", "", map[string]string{"binding_id": id})
 		fmt.Printf("Created binding %s (%s)\n", accessBindingName, id)
 		return nil
@@ -354,8 +356,7 @@ var accessBindingRebindCmd = &cobra.Command{
 			return fmt.Errorf("--secret is required")
 		}
 		meta, path := loadBrokerMeta()
-		binding, err := findBinding(meta, accessBindingID)
-		if err != nil {
+		if _, err := findBinding(meta, accessBindingID); err != nil {
 			return err
 		}
 		pw, err := promptPassword()
@@ -370,19 +371,32 @@ var accessBindingRebindCmd = &cobra.Command{
 		}); err != nil {
 			return err
 		}
-		old := binding.SecretID
-		binding.SecretID = accessBindingSecret
-		binding.UpdatedAt = time.Now()
-		// Approval is for one secret target, not a transferable relationship.
-		// Suspend every old grant unless a separate transfer workflow recreates it.
-		for i := range meta.Grants {
-			if meta.Grants[i].BindingID == binding.ID {
-				meta.Grants[i].Enabled = false
+		oldID, newID := "", ""
+		if err := broker.MutateBrokerFile(path, func(latest *broker.File) error {
+			var found *broker.CredentialBinding
+			for i := range latest.Bindings {
+				if latest.Bindings[i].ID == accessBindingID || latest.Bindings[i].Name == accessBindingID {
+					found = &latest.Bindings[i]
+					break
+				}
 			}
+			if found == nil {
+				return fmt.Errorf("binding %q not found", accessBindingID)
+			}
+			oldID, newID = found.SecretID, accessBindingSecret
+			found.SecretID = accessBindingSecret
+			found.UpdatedAt = time.Now()
+			for i := range latest.Grants {
+				if latest.Grants[i].BindingID == found.ID {
+					latest.Grants[i].Enabled = false
+				}
+			}
+			return nil
+		}); err != nil {
+			return err
 		}
-		saveBrokerMeta(path, meta)
-		logAudit("credential_binding_rebound", "", map[string]string{"binding_id": binding.ID, "old_secret_id": old, "new_secret_id": binding.SecretID})
-		fmt.Printf("Rebound %s from %s to %s\n", binding.Name, old, binding.SecretID)
+		logAudit("credential_binding_rebound", "", map[string]string{"binding_id": accessBindingID, "old_secret_id": oldID, "new_secret_id": newID})
+		fmt.Printf("Rebound %s from %s to %s\n", accessBindingID, oldID, newID)
 		return nil
 	},
 }
@@ -393,27 +407,40 @@ var accessBindingDeleteCmd = &cobra.Command{
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		meta, path := loadBrokerMeta()
-		binding, err := findBinding(meta, accessBindingID)
-		if err != nil {
+		if _, err := findBinding(meta, accessBindingID); err != nil {
 			return err
 		}
-		kept := meta.Bindings[:0]
-		for _, b := range meta.Bindings {
-			if b.ID != binding.ID {
-				kept = append(kept, b)
+		if err := broker.MutateBrokerFile(path, func(latest *broker.File) error {
+			var found *broker.CredentialBinding
+			for i := range latest.Bindings {
+				if latest.Bindings[i].ID == accessBindingID || latest.Bindings[i].Name == accessBindingID {
+					found = &latest.Bindings[i]
+					break
+				}
 			}
-		}
-		meta.Bindings = kept
-		grants := meta.Grants[:0]
-		for _, g := range meta.Grants {
-			if g.BindingID != binding.ID {
-				grants = append(grants, g)
+			if found == nil {
+				return fmt.Errorf("binding %q not found", accessBindingID)
 			}
+			kept := latest.Bindings[:0]
+			for _, b := range latest.Bindings {
+				if b.ID != found.ID {
+					kept = append(kept, b)
+				}
+			}
+			latest.Bindings = kept
+			grants := latest.Grants[:0]
+			for _, g := range latest.Grants {
+				if g.BindingID != found.ID {
+					grants = append(grants, g)
+				}
+			}
+			latest.Grants = grants
+			return nil
+		}); err != nil {
+			return err
 		}
-		meta.Grants = grants
-		saveBrokerMeta(path, meta)
-		logAudit("credential_binding_deleted", "", map[string]string{"binding_id": binding.ID})
-		fmt.Printf("Deleted binding %s\n", binding.Name)
+		logAudit("credential_binding_deleted", "", map[string]string{"binding_id": accessBindingID})
+		fmt.Printf("Deleted binding %s\n", accessBindingID)
 		return nil
 	},
 }
@@ -610,7 +637,12 @@ var accessGrantCmd = &cobra.Command{
 			},
 			Capabilities: capabilities, Enabled: true, CreatedAt: now, ExpiresAt: expires,
 		})
-		saveBrokerMeta(path, meta)
+		if err := broker.MutateBrokerFile(path, func(latest *broker.File) error {
+			latest.Grants = append(latest.Grants, meta.Grants[len(meta.Grants)-1])
+			return nil
+		}); err != nil {
+			return err
+		}
 		logAudit("credential_access_granted", "", map[string]string{"binding_id": binding.ID, "grant_id": id})
 		fmt.Printf("Granted access %s\n", id)
 		return nil
@@ -625,20 +657,21 @@ var accessRevokeCmd = &cobra.Command{
 		if accessGrantID == "" {
 			return fmt.Errorf("--grant is required")
 		}
-		meta, path := loadBrokerMeta()
-		found := false
-		for i := range meta.Grants {
-			if meta.Grants[i].ID == accessGrantID {
-				meta.Grants[i].Enabled = false
-				found = true
-				logAudit("credential_access_revoked", "", map[string]string{"binding_id": meta.Grants[i].BindingID, "grant_id": accessGrantID})
-				break
+		_, path := loadBrokerMeta()
+		bindingID := ""
+		if err := broker.MutateBrokerFile(path, func(latest *broker.File) error {
+			for i := range latest.Grants {
+				if latest.Grants[i].ID == accessGrantID {
+					latest.Grants[i].Enabled = false
+					bindingID = latest.Grants[i].BindingID
+					return nil
+				}
 			}
-		}
-		if !found {
 			return fmt.Errorf("grant %q not found", accessGrantID)
+		}); err != nil {
+			return err
 		}
-		saveBrokerMeta(path, meta)
+		logAudit("credential_access_revoked", "", map[string]string{"binding_id": bindingID, "grant_id": accessGrantID})
 		fmt.Printf("Revoked grant %s\n", accessGrantID)
 		return nil
 	},

@@ -1,8 +1,10 @@
 package tui
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -320,6 +322,24 @@ func TestContentWASD_NavigatesList(t *testing.T) {
 
 // TestProviderDelete_BlockedByKey verifies that deleting a provider that has
 // referencing keys is blocked (with a status message visible to the user).
+func TestMalformedProviderFileIsPreserved(t *testing.T) {
+	dir := t.TempDir()
+	path := config.ProvidersPath(dir)
+	raw := []byte(`{"providers":[`) // deliberately damaged
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(path)
+	_, err := provider.LoadRegistry(path)
+	if err == nil {
+		t.Fatal("expected malformed provider error")
+	}
+	after, _ := os.ReadFile(path)
+	if !bytes.Equal(before, after) {
+		t.Fatal("malformed providers file was modified")
+	}
+}
+
 func TestProviderDelete_BlockedByKey(t *testing.T) {
 	m := newTestModel(t)
 	m.focus = focusContent
@@ -1793,6 +1813,23 @@ func TestKeyRename_TUICommit(t *testing.T) {
 	}
 	if m.statusMsg != "Updated." {
 		t.Fatalf("expected Updated. status, got %q", m.statusMsg)
+	}
+}
+
+func TestShortSuccessfulCommandIsNotFailure(t *testing.T) {
+	m := newTestModel(t)
+	m2, _ := m.Update(launchFinishedMsg{result: runner.InteractiveExecResult{Started: true, Duration: 10 * time.Millisecond}})
+	result := m2.(*model)
+	if result.launchPhase != launchIdle || result.launchFailure != nil {
+		t.Fatal("short successful command reported as startup failure")
+	}
+}
+
+func TestScratchShortcutJumpsToScratch(t *testing.T) {
+	m := newTestModel(t)
+	_, _ = m.handleKey(tea.KeyPressMsg{Code: '9', Text: "9"})
+	if m.active != screenScratch {
+		t.Fatalf("9 jumped to %v, want scratch", m.active)
 	}
 }
 

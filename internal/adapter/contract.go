@@ -184,6 +184,9 @@ type LaunchStrategy struct {
 	Hazards     []Hazard
 	Blocked     bool
 	BlockReason string
+	// Validated is set only by the mandatory adapter strategy validator.
+	// Executions must not treat a structurally minimal strategy as validated.
+	Validated bool
 }
 
 // ProtocolBridge describes the one supported wire conversion: Anthropic
@@ -494,6 +497,32 @@ func ValidateLaunchStrategy(
 // intent-aware strictness for blocked strategies. Raw-secret-leak checks and
 // contract honestedness apply in every mode; only the blocked-strategy
 // rejection is deferred to Preview (which displays instead of rejecting).
+// ValidateExplicitLaunch validates profile-free child launches. Every env value
+// must be explicitly classified as secret, and no secret may appear in argv or
+// a config file. Unknown sensitivity fails closed.
+func ValidateExplicitLaunch(strategy *LaunchStrategy, rawSecrets []string) error {
+	if strategy == nil || strategy.Plan.Command == "" {
+		return errors.New("explicit launch requires a command")
+	}
+	if strategy.Support.ID != "explicit-launch" || !strategy.Support.CanLaunchArbitraryCommand {
+		return errors.New("invalid explicit launch contract")
+	}
+	for name := range strategy.Plan.Env {
+		if strategy.Plan.EnvSensitivity[name] != "secret" {
+			return fmt.Errorf("explicit launch env %q is not classified secret", name)
+		}
+	}
+	for _, raw := range rawSecrets {
+		if raw == "" {
+			continue
+		}
+		if containsRawSecretInArgs(strategy.Plan.Args, raw) || containsRawSecretInFiles(strategy.Plan.Files, raw) || containsRawSecretInPreview(strategy.Plan.Preview, raw) {
+			return errors.New("explicit launch would expose raw secret outside child env")
+		}
+	}
+	return nil
+}
+
 func ValidateLaunchStrategyForMode(
 	strategy *LaunchStrategy,
 	prof profile.Profile,
@@ -547,7 +576,9 @@ func ValidateLaunchStrategyForMode(
 	if err := validateTransport(strategy.Plan); err != nil {
 		return err
 	}
-
+	if mode == ResolveRun {
+		strategy.Validated = true
+	}
 	return nil
 }
 

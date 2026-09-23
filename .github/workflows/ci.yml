@@ -26,6 +26,12 @@ jobs:
       - name: Build
         run: go build -buildvcs=false ./...
 
+      - name: Embedded asset gate
+        run: make assets-check
+
+      - name: Mandatory cross-platform build gate
+        run: make cross-build
+
       - name: Test
         run: go test ./...
 

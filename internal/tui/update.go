@@ -13,6 +13,7 @@ import (
 
 	"aegiskeys/internal/adapter"
 	"aegiskeys/internal/audit"
+	"aegiskeys/internal/broker"
 	"aegiskeys/internal/config"
 	"aegiskeys/internal/keychain"
 	"aegiskeys/internal/profile"
@@ -92,6 +93,21 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 
+	case accessMutationDoneMsg:
+		if msg.err != nil {
+			m.statusMsg = msg.err.Error()
+			return m, nil
+		}
+		m.statusMsg = msg.message
+		return m, loadAccessMetadataCmd(m.configDir)
+
+	case accessMetadataMsg:
+		m.brokerMeta, m.brokerErr = msg.meta, ""
+		if msg.err != nil {
+			m.brokerErr = msg.err.Error()
+		}
+		return m, nil
+
 	case launchPreviewResolvedMsg:
 		if msg.requestID != m.launchPreview.requestID {
 			return m, nil
@@ -148,7 +164,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 
 	case launchFinishedMsg:
-		startupFailure := !msg.result.Started || msg.err != nil || msg.result.Duration < 2*time.Second
+		startupFailure := !msg.result.Started || msg.err != nil
 		if startupFailure {
 			m.launchPhase = launchFailed
 			m.launchFailure = &launchFailure{
@@ -561,7 +577,7 @@ func (m *model) handleKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.active = screenAccess
 		m.focus = focusContent
 		return m, nil
-	case "1", "2", "3", "4", "5", "6", "7", "8":
+	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 		m.active = screen(key[0] - '1')
 		m.focus = focusContent
 		return m, m.screenInitCmd(m.active)
@@ -657,8 +673,171 @@ func (m *model) handleContentKey(key string) (tea.Model, tea.Cmd) {
 		return m.handleScratchKey(key, tea.KeyPressMsg{})
 	case screenHelp:
 		return m.handleHelpKey(key)
+	case screenAccess:
+		return m.handleAccessKey(key)
 	}
 	return m, nil
+}
+
+func revokeAccessGrantCmd(configDir, grantID string) tea.Cmd {
+	path := config.BrokerPath(configDir)
+	return func() tea.Msg {
+		err := broker.MutateBrokerFile(path, func(meta *broker.File) error {
+			for i := range meta.Grants {
+				if meta.Grants[i].ID == grantID {
+					meta.Grants[i].Enabled = false
+					return nil
+				}
+			}
+			return fmt.Errorf("grant %s not found", grantID)
+		})
+		return accessMutationDoneMsg{err: err, message: "Access grant revoked."}
+	}
+}
+
+type accessMutationDoneMsg struct {
+	message string
+	err     error
+}
+
+func (m *model) handleAccessModalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	key := normalizedKey(k)
+	switch key {
+	case "esc":
+		m.modal = modalNone
+		m.focus = focusContent
+		m.addInput.Blur()
+		return m, nil
+	case "enter":
+		mode := m.modal
+		value := strings.TrimSpace(m.addInput.Value())
+		m.modal = modalNone
+		m.focus = focusContent
+		m.addInput.Blur()
+		if value == "" {
+			return m, nil
+		}
+		if mode == modalAccess {
+			return m, createAccessBindingCmd(m.configDir, value)
+		}
+		return m, rebindAccessBindingCmd(m.configDir, m.modalTarget, value)
+	default:
+		var cmd tea.Cmd
+		m.addInput, cmd = m.addInput.Update(k)
+		return m, cmd
+	}
+}
+
+func createAccessBindingCmd(configDir, name string) tea.Cmd {
+	return func() tea.Msg {
+		path := config.BrokerPath(configDir)
+		id, err := broker.NewBindingID()
+		if err != nil {
+			return accessMutationDoneMsg{err: err}
+		}
+		now := time.Now()
+		err = broker.MutateBrokerFile(path, func(meta *broker.File) error {
+			if meta.FindBinding(name) != nil || !broker.ValidBindingName(name) {
+				return fmt.Errorf("invalid or duplicate binding %q", name)
+			}
+			meta.Bindings = append(meta.Bindings, broker.CredentialBinding{ID: id, Name: name, SecretID: "unassigned", ComponentAllowlist: []string{"primary"}, CreatedAt: now, UpdatedAt: now})
+			return nil
+		})
+		return accessMutationDoneMsg{err: err, message: "Binding created; rebind it to a vault key."}
+	}
+}
+
+func rebindAccessBindingCmd(configDir, bindingID, secretID string) tea.Cmd {
+	return func() tea.Msg {
+		err := broker.MutateBrokerFile(config.BrokerPath(configDir), func(meta *broker.File) error {
+			for i := range meta.Bindings {
+				if meta.Bindings[i].ID == bindingID {
+					meta.Bindings[i].SecretID = secretID
+					meta.Bindings[i].UpdatedAt = time.Now()
+					for j := range meta.Grants {
+						if meta.Grants[j].BindingID == bindingID {
+							meta.Grants[j].Enabled = false
+						}
+					}
+					return nil
+				}
+			}
+			return fmt.Errorf("binding not found")
+		})
+		return accessMutationDoneMsg{err: err, message: "Binding rebound; prior grants suspended."}
+	}
+}
+
+func (m *model) handleAccessKey(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "s", "down", "j":
+		m.selected[screenAccess] = m.clampSelected(m.selected[screenAccess] + 1)
+	case "w", "up", "k":
+		if m.selected[screenAccess] > 0 {
+			m.selected[screenAccess]--
+		}
+	case "r", "enter":
+		return m, loadAccessMetadataCmd(m.configDir)
+	case "x":
+		if m.brokerMeta == nil || m.selected[screenAccess] >= len(m.brokerMeta.Bindings) {
+			return m, nil
+		}
+		binding := m.brokerMeta.Bindings[m.selected[screenAccess]]
+		grantID := ""
+		for _, grant := range m.brokerMeta.Grants {
+			if grant.BindingID == binding.ID && grant.Enabled {
+				grantID = grant.ID
+				break
+			}
+		}
+		if grantID == "" {
+			m.statusMsg = "No active grant to revoke."
+			return m, nil
+		}
+		m.modal = modalConfirmDelete
+		m.focus = focusModal
+		m.modalTarget = "grant:" + grantID
+		return m, nil
+	case "z", "n":
+		if !m.unlocked || m.vaultSession == nil {
+			return m, nil
+		}
+		m.modal = modalAccess
+		m.focus = focusModal
+		m.addStep = 0
+		m.addInput.Reset()
+		m.addInput.EchoMode = textinput.EchoNormal
+		m.addInput.SetValue("")
+		m.modalPrompt = "New binding: stable app/credential name"
+		return m, m.addInput.Focus()
+	case "e":
+		if m.brokerMeta == nil || m.selected[screenAccess] >= len(m.brokerMeta.Bindings) {
+			return m, nil
+		}
+		binding := m.brokerMeta.Bindings[m.selected[screenAccess]]
+		m.modal = modalAccessRebind
+		m.focus = focusModal
+		m.addStep = 0
+		m.addInput.Reset()
+		m.addInput.EchoMode = textinput.EchoNormal
+		m.addInput.SetValue(binding.SecretID)
+		m.modalTarget = binding.ID
+		m.modalPrompt = "Rebind " + binding.Name + " to secret ID"
+		return m, m.addInput.Focus()
+	}
+	return m, nil
+}
+
+func loadAccessMetadataCmd(configDir string) tea.Cmd {
+	return func() tea.Msg {
+		meta, err := broker.LoadBrokerFile(config.BrokerPath(configDir))
+		return accessMetadataMsg{meta: meta, err: err}
+	}
+}
+
+type accessMetadataMsg struct {
+	meta *broker.File
+	err  error
 }
 
 // dashboardActionCount returns the number of selectable quick actions.
@@ -1493,6 +1672,11 @@ func (m *model) itemCount(s screen) int {
 		return len(m.auditEvents)
 	case screenSettings:
 		return len(settingKeys)
+	case screenAccess:
+		if m.brokerMeta == nil {
+			return 0
+		}
+		return len(m.brokerMeta.Bindings)
 	}
 	return 0
 }
@@ -1826,6 +2010,9 @@ func (m *model) handleModalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.modal == modalRotate || m.modal == modalReplaceProfileKey {
 		return m.handleRotateKey(k)
 	}
+	if m.modal == modalAccess || m.modal == modalAccessRebind {
+		return m.handleAccessModalKey(k)
+	}
 	switch key {
 	case "esc", "n":
 		m.modal = modalNone
@@ -1837,6 +2024,13 @@ func (m *model) handleModalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter", "y":
 		if m.modal == modalConfirmDelete {
+			if strings.HasPrefix(m.modalTarget, "grant:") {
+				grantID := strings.TrimPrefix(m.modalTarget, "grant:")
+				m.modal = modalNone
+				m.focus = focusContent
+				m.modalTarget = ""
+				return m, revokeAccessGrantCmd(m.configDir, grantID)
+			}
 			if m.deleteConfirmWait {
 				// User confirmed the cascade delete of provider + keys.
 				m.deleteConfirmed = true
@@ -2917,6 +3111,9 @@ func (m *model) refreshLaunchPreview() tea.Cmd {
 
 // screenInitCmd runs setup when switching to a screen.
 func (m *model) screenInitCmd(s screen) tea.Cmd {
+	if s == screenAccess {
+		return loadAccessMetadataCmd(m.configDir)
+	}
 	if s == screenLaunch {
 		return m.refreshLaunchPreview()
 	}

@@ -35,6 +35,7 @@ func testStrategy(configPath, content, command string, env map[string]string) *a
 			ID:        "test",
 			CanLaunch: true,
 		},
+		Validated: true,
 	}
 }
 
@@ -198,7 +199,8 @@ func TestPrepareCommandWithCleanup_MissingCommandFailsBeforeConfigWrite(t *testi
 				Mode:        0600,
 			}},
 		},
-		Support: adapter.AppSupportContract{ID: "test", CanLaunch: true},
+		Support:   adapter.AppSupportContract{ID: "test", CanLaunch: true},
+		Validated: true,
 	}
 
 	_, err := PrepareCommandWithCleanup(context.Background(), strategy, RunOptions{})

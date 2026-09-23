@@ -7,6 +7,8 @@
 package tui
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 
 	"aegiskeys/internal/adapter"
 	"aegiskeys/internal/audit"
+	"aegiskeys/internal/broker"
 	"aegiskeys/internal/config"
 	"aegiskeys/internal/profile"
 	"aegiskeys/internal/provider"
@@ -29,22 +32,30 @@ import (
 // Run launches the interactive TUI against the given config directory.
 func Run(configDir, version string) error {
 	reg, err := provider.LoadRegistry(config.ProvidersPath(configDir))
-	if err != nil {
+	providersMissing := errors.Is(err, os.ErrNotExist)
+	if err != nil && !providersMissing {
+		return fmt.Errorf("load providers (file preserved; repair before retrying): %w", err)
+	}
+	if providersMissing {
 		reg = provider.NewRegistry()
 	}
-	// Self-heal: merge missing default providers and backfill structural
-	// fields. A partial or hand-edited providers.json must never strand the
-	// user with only custom providers and no viable profile path.
-	if reg.MergeDefaults(provider.DefaultProviders()) {
-		_ = reg.Save(config.ProvidersPath(configDir))
+	if providersMissing && reg.MergeDefaults(provider.DefaultProviders()) {
+		if err := reg.Save(config.ProvidersPath(configDir)); err != nil {
+			return err
+		}
 	}
 	store, err := profile.LoadStore(config.ProfilesPath(configDir))
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("load profiles (file preserved; repair before retrying): %w", err)
+		}
 		store = profile.NewStore()
 	}
-
-	cfg, cfgErr := config.LoadConfig(config.ConfigPath(configDir))
-	if cfgErr != nil {
+	cfg, err := config.LoadConfig(config.ConfigPath(configDir))
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("load settings (file preserved; repair before retrying): %w", err)
+		}
 		cfg = config.DefaultConfig()
 	}
 	themeName := normalizeTheme(cfg.Theme)
@@ -61,6 +72,7 @@ func Run(configDir, version string) error {
 		auditEvents:     nil,
 		adapterRegistry: adapter.NewRegistry(),
 		autoLockAfter:   time.Duration(cfg.AutoLock) * time.Minute,
+		brokerMeta:      mustLoadBrokerMetadata(configDir),
 	}
 	m.auditLogger = audit.NewLogger(config.AuditPath(configDir))
 	m.auditEvents, _ = m.auditLogger.Tail(10)
@@ -90,6 +102,14 @@ func Run(configDir, version string) error {
 	p := tea.NewProgram(m, opts...)
 	_, err = p.Run()
 	return err
+}
+
+func mustLoadBrokerMetadata(configDir string) *broker.File {
+	meta, err := broker.LoadBrokerFile(config.BrokerPath(configDir))
+	if err != nil {
+		return nil
+	}
+	return meta
 }
 
 func newPasswordInput() textinput.Model {
@@ -164,6 +184,8 @@ const (
 	modalAddKey
 	modalRotate
 	modalReplaceProfileKey
+	modalAccess
+	modalAccessRebind
 )
 
 type launchMode int
@@ -265,6 +287,9 @@ type model struct {
 
 	// Loaded on-disk config (so theme/auto-lock changes can be persisted).
 	cfg config.Config
+	// brokerMeta is a cached immutable snapshot. View never reads broker.json.
+	brokerMeta *broker.File
+	brokerErr  string
 
 	// Launch screen.
 	launchMode    launchMode

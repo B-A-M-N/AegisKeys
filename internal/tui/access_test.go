@@ -22,6 +22,7 @@ func TestAccessScreenShowsMetadataOnly(t *testing.T) {
 	if err := broker.SaveBrokerFile(config.BrokerPath(m.configDir), meta); err != nil {
 		t.Fatal(err)
 	}
+	m.brokerMeta = meta
 	m.unlocked = true
 	m.vaultSession = &vaultSession{vault: &secret.Vault{Keys: []secret.SecretRecord{{ID: "key_1", Label: "Primary", Secret: "raw-never-shown-123456"}}}}
 	m.active = screenAccess

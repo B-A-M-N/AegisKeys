@@ -22,6 +22,11 @@ type LinuxPeerResolver struct {
 	HashExecutables bool
 }
 
+// newPlatformPeerResolver is the Linux implementation of the public factory.
+func newPlatformPeerResolver(uid int, hashExecutables bool) PeerResolver {
+	return LinuxPeerResolver{UID: uid, HashExecutables: hashExecutables}
+}
+
 // Resolve implements PeerResolver for Linux Unix-domain sockets.
 func (r LinuxPeerResolver) Resolve(c net.Conn) (PeerIdentity, error) {
 	syscaller, supported := c.(interface {

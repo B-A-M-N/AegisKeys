@@ -19,8 +19,12 @@ type LaunchPlan struct {
 	Command string
 	Args    []string
 	Env     map[string]string
-	Files   []FileWrite
-	Preview []string // human-readable summary lines
+	// EnvSensitivity is authoritative display metadata. "secret" values must
+	// be masked; "public" may be displayed; an absent entry is unknown and is
+	// also masked fail-closed.
+	EnvSensitivity map[string]string `json:"-"`
+	Files          []FileWrite
+	Preview        []string // human-readable summary lines
 
 	// CommandResolution records both the path selected for execution and its
 	// symlink-resolved target. It lets previews distinguish a user's launcher

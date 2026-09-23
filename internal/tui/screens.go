@@ -435,7 +435,7 @@ func (m *model) launchView(s *Styles) string {
 		sort.Strings(envKeys)
 		for _, k := range envKeys {
 			v := strategy.Plan.Env[k]
-			if looksSecretEnvValue(k) {
+			if strategy.Plan.EnvSensitivity[k] != "public" {
 				b.WriteString(fmt.Sprintf("  %s=%s\n", s.KeyMasked.Render(k), s.Muted.Render("<secret>")))
 			} else {
 				b.WriteString(fmt.Sprintf("  %s=%s\n", s.KeyMasked.Render(k), s.Body.Render(v)))
@@ -505,18 +505,6 @@ func (m *model) launchView(s *Styles) string {
 	}
 
 	return b.String()
-}
-
-// looksSecretEnvValue reports whether an env var name looks like it carries
-// a secret, so the TUI can mask its value in previews.
-func looksSecretEnvValue(k string) bool {
-	upper := strings.ToUpper(k)
-	for _, pat := range []string{"KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "AUTH"} {
-		if strings.Contains(upper, pat) {
-			return true
-		}
-	}
-	return false
 }
 
 // modelEnvVar returns the conventional model env var name for a provider.
@@ -602,10 +590,7 @@ func (m *model) settingsView(s *Styles) string {
 	b.WriteString(s.Title.Render("Settings"))
 	b.WriteString("\n\n")
 
-	cfg, err := config.LoadConfig(config.ConfigPath(m.configDir))
-	if err != nil {
-		cfg = config.DefaultConfig()
-	}
+	cfg := m.cfg
 	theme := m.themeName
 	if theme == "" {
 		theme = "vault"
@@ -671,7 +656,7 @@ func (m *model) helpView(s *Styles) string {
 		{"x", "delete (confirm)"},
 		{"/", "filter"},
 		{"r", "refresh (doctor)"},
-		{fmt.Sprintf("1-%d", screenCount()), "jump to screen"},
+		{"1-9,0", "jump to screen"},
 		{"tab", "focus sidebar/content"},
 		{"[ / ]", "previous / next screen"},
 		{"?", "toggle help"},
@@ -903,9 +888,8 @@ func (m *model) accessView(s *Styles) string {
 	var b strings.Builder
 	b.WriteString(s.Title.Render("Access / Integrations"))
 	b.WriteString("\n\n")
-	path := config.BrokerPath(m.configDir)
-	meta, err := broker.LoadBrokerFile(path)
-	if err != nil {
+	meta := m.brokerMeta
+	if meta == nil {
 		b.WriteString(s.Danger.Render("Broker metadata unavailable."))
 		b.WriteString("\n")
 		return b.String()
@@ -945,7 +929,7 @@ func (m *model) accessView(s *Styles) string {
 		}
 	}
 	b.WriteString("\n")
-	b.WriteString(s.Muted.Render("Masked metadata only · raw credentials never appear here · manage with access CLI"))
+	b.WriteString(s.Muted.Render("Enter inspect · R refresh · Z add · E rebind · X revoke · No raw credentials appear"))
 	b.WriteString("\n")
 	return b.String()
 }
