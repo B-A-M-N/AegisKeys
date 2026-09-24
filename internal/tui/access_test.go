@@ -98,7 +98,8 @@ func TestRecoverPendingApprovalRollsBackIncompleteAndFinalizesCommitted(t *testi
 		return broker.AccessGrant{ID: id, Name: id, BindingID: bid, Client: broker.ClientConstraint{UID: 1, ExecutablePath: "/x"}, Capabilities: []broker.Capability{broker.CapabilityResolve}, Enabled: enabled, CreatedAt: time.Now()}
 	}
 	meta.Grants = []broker.AccessGrant{g("incomplete", "b1", false), g("committed", "b2", true)}
-	meta.PendingApprovals = []broker.ApprovalIntent{{GrantID: "incomplete", BindingID: "b1", SecretID: "k1", CreatedAt: time.Now()}, {GrantID: "committed", BindingID: "b2", SecretID: "k2", PriorAllowResolve: true, CreatedAt: time.Now()}}
+	resolve := []broker.Capability{broker.CapabilityResolve}
+	meta.PendingApprovals = []broker.ApprovalIntent{{GrantID: "incomplete", BindingID: "b1", SecretID: "k1", Capabilities: resolve, CreatedAt: time.Now()}, {GrantID: "committed", BindingID: "b2", SecretID: "k2", Capabilities: resolve, PriorAllowResolve: true, CreatedAt: time.Now()}}
 	if err := broker.SaveBrokerFile(config.BrokerPath(dir), meta); err != nil {
 		t.Fatal(err)
 	}
@@ -119,6 +120,46 @@ func TestRecoverPendingApprovalRollsBackIncompleteAndFinalizesCommitted(t *testi
 	got, _ := broker.LoadBrokerFile(config.BrokerPath(dir))
 	if len(got.Grants) != 1 || got.Grants[0].ID != "committed" || len(got.PendingApprovals) != 0 {
 		t.Fatalf("bad recovery state: %+v", got)
+	}
+}
+
+func TestRecoveryPreservesPolicyRequiredBySurvivingSameSecretGrant(t *testing.T) {
+	dir := t.TempDir()
+	vaultPath := config.VaultPath(dir)
+	if err := secret.InitVault(vaultPath, "pw"); err != nil {
+		t.Fatal(err)
+	}
+	_, key, _ := secret.LoadVaultWithKey(vaultPath, "pw")
+	if err := secret.MutateVaultWithKey(vaultPath, key, func(v *secret.Vault) error {
+		return v.Add(secret.SecretRecord{ID: "k", Label: "Key", Secret: "s", Policy: secret.SecretPolicy{Version: 1, AllowBrokerResolve: true, AllowBrokerRotate: true}})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	meta := broker.NewFile()
+	meta.Bindings = append(meta.Bindings, broker.CredentialBinding{ID: "b", Name: "app/key", SecretID: "k"})
+	meta.Grants = []broker.AccessGrant{
+		{ID: "survivor", Name: "survivor", BindingID: "b", Client: broker.ClientConstraint{UID: 1, ExecutablePath: "/survivor"}, Capabilities: []broker.Capability{broker.CapabilityResolve}, Enabled: true, CreatedAt: time.Now()},
+		{ID: "stale", Name: "stale", BindingID: "b", Client: broker.ClientConstraint{UID: 1, ExecutablePath: "/stale"}, Capabilities: []broker.Capability{broker.CapabilityRotate}, CreatedAt: time.Now()},
+	}
+	meta.PendingApprovals = []broker.ApprovalIntent{{GrantID: "stale", BindingID: "b", SecretID: "k", Capabilities: []broker.Capability{broker.CapabilityRotate}, PriorAllowResolve: true, PriorAllowRotate: false, CreatedAt: time.Now()}}
+	if err := broker.SaveBrokerFile(config.BrokerPath(dir), meta); err != nil {
+		t.Fatal(err)
+	}
+	msg := recoverPendingApprovalsCmd(dir, key)().(accessMutationDoneMsg)
+	if msg.err != nil {
+		t.Fatal(msg.err)
+	}
+	v, _ := secret.LoadVaultByKey(vaultPath, key)
+	rec := v.Get("k")
+	if !rec.Policy.AllowBrokerResolve {
+		t.Fatal("recovery removed policy required by surviving grant")
+	}
+	if rec.Policy.AllowBrokerRotate {
+		t.Fatal("recovery kept policy for removed incomplete grant")
+	}
+	got, _ := broker.LoadBrokerFile(config.BrokerPath(dir))
+	if len(got.Grants) != 1 || got.Grants[0].ID != "survivor" || len(got.PendingApprovals) != 0 {
+		t.Fatalf("bad recovered state: %+v", got)
 	}
 }
 

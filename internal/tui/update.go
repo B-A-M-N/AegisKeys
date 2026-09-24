@@ -733,56 +733,72 @@ func cleanupStaleStagedAccessCmd(configDir string, maxAge time.Duration) tea.Cmd
 
 func recoverPendingApprovalsCmd(configDir string, vaultKey [32]byte) tea.Cmd {
 	return func() tea.Msg {
-		meta, err := broker.LoadBrokerFile(config.BrokerPath(configDir))
-		if err != nil {
-			return accessMutationDoneMsg{err: err}
-		}
-		if len(meta.PendingApprovals) == 0 {
-			return accessMutationDoneMsg{}
-		}
-		terminal := map[string]bool{}
-		rollback := map[string]broker.ApprovalIntent{}
-		processed := map[string]bool{}
-		for _, grant := range meta.Grants {
-			if grant.Enabled {
-				terminal[grant.ID] = true
-			}
-		}
-		for _, intent := range meta.PendingApprovals {
-			processed[intent.GrantID] = true
-			if !terminal[intent.GrantID] {
-				rollback[intent.GrantID] = intent
-			}
-		}
-		for _, intent := range rollback {
-			if err := secret.MutateVaultSession(config.VaultPath(configDir), "", vaultKey, secret.SessionMutation{Mutate: func(v *secret.Vault) error {
-				rec := v.Get(intent.SecretID)
-				if rec == nil {
-					return nil
-				}
-				rec.Policy.AllowBrokerResolve = intent.PriorAllowResolve
-				rec.Policy.AllowBrokerRotate = intent.PriorAllowRotate
+		err := broker.TransactBrokerFile(config.BrokerPath(configDir), func(meta *broker.File) error {
+			if len(meta.PendingApprovals) == 0 {
 				return nil
-			}}); err != nil {
-				return accessMutationDoneMsg{err: err}
 			}
-		}
-		err = broker.MutateBrokerFile(config.BrokerPath(configDir), func(latest *broker.File) error {
-			grants := latest.Grants[:0]
-			for _, grant := range latest.Grants {
-				if intent, pending := rollback[grant.ID]; pending && intent.GrantID == grant.ID {
+			terminal := map[string]bool{}
+			processed := map[string]bool{}
+			for _, grant := range meta.Grants {
+				if grant.Enabled {
+					terminal[grant.ID] = true
+				}
+			}
+			for _, intent := range meta.PendingApprovals {
+				processed[intent.GrantID] = true
+				if terminal[intent.GrantID] {
 					continue
 				}
-				grants = append(grants, grant)
+				neededResolve, neededRotate := intent.PriorAllowResolve, intent.PriorAllowRotate
+				bindingSecrets := map[string]string{}
+				for _, binding := range meta.Bindings {
+					bindingSecrets[binding.ID] = binding.SecretID
+				}
+				for _, grant := range meta.Grants {
+					if !grant.Enabled || bindingSecrets[grant.BindingID] != intent.SecretID {
+						continue
+					}
+					for _, capability := range grant.Capabilities {
+						if capability == broker.CapabilityResolve {
+							neededResolve = true
+						}
+						if capability == broker.CapabilityRotate {
+							neededRotate = true
+						}
+					}
+				}
+				if err := secret.MutateVaultSession(config.VaultPath(configDir), "", vaultKey, secret.SessionMutation{Mutate: func(v *secret.Vault) error {
+					rec := v.Get(intent.SecretID)
+					if rec == nil {
+						return nil
+					}
+					rec.Policy.AllowBrokerResolve = neededResolve
+					rec.Policy.AllowBrokerRotate = neededRotate
+					return nil
+				}}); err != nil {
+					return err
+				}
 			}
-			latest.Grants = grants
-			intents := latest.PendingApprovals[:0]
-			for _, intent := range latest.PendingApprovals {
+			rollbacks := map[string]bool{}
+			for grantID := range processed {
+				if !terminal[grantID] {
+					rollbacks[grantID] = true
+				}
+			}
+			grants := meta.Grants[:0]
+			for _, grant := range meta.Grants {
+				if !rollbacks[grant.ID] {
+					grants = append(grants, grant)
+				}
+			}
+			meta.Grants = grants
+			intents := meta.PendingApprovals[:0]
+			for _, intent := range meta.PendingApprovals {
 				if !processed[intent.GrantID] {
 					intents = append(intents, intent)
 				}
 			}
-			latest.PendingApprovals = intents
+			meta.PendingApprovals = intents
 			return nil
 		})
 		return accessMutationDoneMsg{err: err}
@@ -873,7 +889,7 @@ func prepareAccessApprovalCmd(configDir, bindingID string, vaultKey [32]byte, ex
 		pending := accessApprovalPending{BindingID: binding.ID, SecretID: binding.SecretID, BindingName: binding.Name, Executable: canonical, Hash: hash, Capabilities: capabilities, ExpiresAt: expiration, GrantID: grantID, VaultKey: vaultKey, PriorPolicy: prior}
 		if err := broker.MutateBrokerFile(config.BrokerPath(configDir), func(meta *broker.File) error {
 			meta.Grants = append(meta.Grants, broker.AccessGrant{ID: grantID, Name: filepath.Base(canonical), BindingID: binding.ID, Client: broker.ClientConstraint{UID: os.Getuid(), ExecutablePath: canonical, ExecutableHash: hash}, Capabilities: capabilities, Enabled: false, CreatedAt: now, ExpiresAt: &expiration})
-			meta.PendingApprovals = append(meta.PendingApprovals, broker.ApprovalIntent{GrantID: grantID, BindingID: binding.ID, SecretID: binding.SecretID, PriorAllowResolve: prior.AllowBrokerResolve, PriorAllowRotate: prior.AllowBrokerRotate, CreatedAt: now})
+			meta.PendingApprovals = append(meta.PendingApprovals, broker.ApprovalIntent{GrantID: grantID, BindingID: binding.ID, SecretID: binding.SecretID, Capabilities: capabilities, PriorAllowResolve: prior.AllowBrokerResolve, PriorAllowRotate: prior.AllowBrokerRotate, CreatedAt: now})
 			return nil
 		}); err != nil {
 			return accessMutationDoneMsg{err: err}
@@ -971,60 +987,54 @@ func commitStagedAccessCmd(configDir string, p accessApprovalPending) tea.Cmd {
 	return func() tea.Msg {
 		prior := p.PriorPolicy
 		havePrior := true
-		activate := func() error {
-			return broker.MutateBrokerFile(config.BrokerPath(configDir), func(meta *broker.File) error {
-				var binding *broker.CredentialBinding
-				for i := range meta.Bindings {
-					if meta.Bindings[i].ID == p.BindingID {
-						binding = &meta.Bindings[i]
+		err := broker.TransactBrokerFile(config.BrokerPath(configDir), func(meta *broker.File) error {
+			// The vault mutation is inside the broker lock so another approval or
+			// rebind cannot interleave between policy change and activation.
+			if err := secret.MutateVaultSession(config.VaultPath(configDir), "", p.VaultKey, secret.SessionMutation{Mutate: func(v *secret.Vault) error {
+				rec := v.Get(p.SecretID)
+				if rec == nil || rec.Archived {
+					return fmt.Errorf("binding target not found or archived")
+				}
+				for _, cap := range p.Capabilities {
+					if cap == broker.CapabilityResolve {
+						rec.Policy.AllowBrokerResolve = true
+					}
+					if cap == broker.CapabilityRotate {
+						rec.Policy.AllowBrokerRotate = true
 					}
 				}
-				if binding == nil || binding.SecretID != p.SecretID {
-					return fmt.Errorf("binding changed after approval was staged")
+				rec.Policy.Version = 1
+				return nil
+			}}); err != nil {
+				return err
+			}
+			if approvalCrashPoint != nil {
+				approvalCrashPoint("after-policy")
+			}
+			var binding *broker.CredentialBinding
+			for i := range meta.Bindings {
+				if meta.Bindings[i].ID == p.BindingID {
+					binding = &meta.Bindings[i]
 				}
-				for i := range meta.Grants {
-					if meta.Grants[i].ID == p.GrantID {
-						meta.Grants[i].Enabled = true
-						intents := meta.PendingApprovals[:0]
-						for _, intent := range meta.PendingApprovals {
-							if intent.GrantID != p.GrantID {
-								intents = append(intents, intent)
-							}
+			}
+			if binding == nil || binding.SecretID != p.SecretID {
+				return fmt.Errorf("binding changed after approval was staged")
+			}
+			for i := range meta.Grants {
+				if meta.Grants[i].ID == p.GrantID {
+					meta.Grants[i].Enabled = true
+					intents := meta.PendingApprovals[:0]
+					for _, intent := range meta.PendingApprovals {
+						if intent.GrantID != p.GrantID {
+							intents = append(intents, intent)
 						}
-						meta.PendingApprovals = intents
-						return nil
 					}
-				}
-				return fmt.Errorf("staged grant missing")
-			})
-		}
-		// Policy is changed only after explicit confirmation. If activation
-		// fails, restore the prior policy recorded in the durable intent.
-		err := secret.MutateVaultSession(config.VaultPath(configDir), "", p.VaultKey, secret.SessionMutation{Mutate: func(v *secret.Vault) error {
-			rec := v.Get(p.SecretID)
-			if rec == nil || rec.Archived {
-				return fmt.Errorf("binding target not found or archived")
-			}
-			for _, cap := range p.Capabilities {
-				if cap == broker.CapabilityResolve {
-					rec.Policy.AllowBrokerResolve = true
-				}
-				if cap == broker.CapabilityRotate {
-					rec.Policy.AllowBrokerRotate = true
+					meta.PendingApprovals = intents
+					return nil
 				}
 			}
-			rec.Policy.Version = 1
-			return nil
-		}})
-		if approvalCrashPoint != nil {
-			approvalCrashPoint("after-policy")
-		}
-		if err == nil {
-			err = activate()
-		}
-		if approvalCrashPoint != nil {
-			approvalCrashPoint("after-activate")
-		}
+			return fmt.Errorf("staged grant missing")
+		})
 		if err != nil {
 			if havePrior {
 				_ = secret.MutateVaultSession(config.VaultPath(configDir), "", p.VaultKey, secret.SessionMutation{Mutate: func(v *secret.Vault) error {
@@ -1038,6 +1048,9 @@ func commitStagedAccessCmd(configDir string, p accessApprovalPending) tea.Cmd {
 			}
 			_ = cleanupStagedAccessCmdResult(configDir, p.GrantID)
 			return accessMutationDoneMsg{err: err}
+		}
+		if approvalCrashPoint != nil {
+			approvalCrashPoint("after-activate")
 		}
 		return accessMutationDoneMsg{message: "Access grant approved."}
 	}

@@ -68,6 +68,16 @@ func (f *File) Validate() error {
 			return errors.New("duplicate broker approval intent")
 		}
 		intentIDs[intent.GrantID] = true
+		if len(intent.Capabilities) == 0 {
+			return errors.New("broker approval intent requires capabilities")
+		}
+		seenCaps := map[Capability]bool{}
+		for _, capability := range intent.Capabilities {
+			if !capability.Valid() || seenCaps[capability] {
+				return errors.New("invalid broker approval intent capabilities")
+			}
+			seenCaps[capability] = true
+		}
 	}
 	return nil
 }
@@ -143,6 +153,14 @@ func SaveBrokerFile(path string, f *File) error {
 
 // MutateBrokerFile serializes load/modify/save under a cross-process lock.
 func MutateBrokerFile(path string, mutate func(*File) error) error {
+	return TransactBrokerFile(path, mutate)
+}
+
+// TransactBrokerFile holds the metadata lock while the callback runs. Callbacks
+// that pair broker authorization state with another encrypted file can use the
+// held lock to exclude competing broker transactions until the final metadata
+// write completes. A callback error prevents the save.
+func TransactBrokerFile(path string, mutate func(*File) error) error {
 	if mutate == nil {
 		return errors.New("nil broker mutation")
 	}

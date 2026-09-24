@@ -74,12 +74,13 @@ type AccessGrant struct {
 // broker.json and vault.enc. Recovery rolls it back when its staged grant is
 // absent; an enabled grant is the committed terminal state.
 type ApprovalIntent struct {
-	GrantID           string    `json:"grant_id"`
-	BindingID         string    `json:"binding_id"`
-	SecretID          string    `json:"secret_id"`
-	PriorAllowResolve bool      `json:"prior_allow_resolve"`
-	PriorAllowRotate  bool      `json:"prior_allow_rotate"`
-	CreatedAt         time.Time `json:"created_at"`
+	GrantID           string       `json:"grant_id"`
+	BindingID         string       `json:"binding_id"`
+	SecretID          string       `json:"secret_id"`
+	Capabilities      []Capability `json:"capabilities"`
+	PriorAllowResolve bool         `json:"prior_allow_resolve"`
+	PriorAllowRotate  bool         `json:"prior_allow_rotate"`
+	CreatedAt         time.Time    `json:"created_at"`
 }
 
 // File is the metadata-only broker store persisted as broker.json.
