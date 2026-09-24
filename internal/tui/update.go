@@ -708,6 +708,24 @@ type accessMutationDoneMsg struct {
 	err     error
 }
 
+func cleanupStaleStagedAccessCmd(configDir string, maxAge time.Duration) tea.Cmd {
+	return func() tea.Msg {
+		cutoff := time.Now().Add(-maxAge)
+		err := broker.MutateBrokerFile(config.BrokerPath(configDir), func(meta *broker.File) error {
+			kept := meta.Grants[:0]
+			for _, grant := range meta.Grants {
+				if !grant.Enabled && grant.CreatedAt.Before(cutoff) {
+					continue
+				}
+				kept = append(kept, grant)
+			}
+			meta.Grants = kept
+			return nil
+		})
+		return accessMutationDoneMsg{err: err}
+	}
+}
+
 func (m *model) handleAccessApprovalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := normalizedKey(k)
 	steps := []struct{ prompt, placeholder string }{
@@ -865,8 +883,30 @@ func cleanupStagedAccessCmd(configDir, grantID string) tea.Cmd {
 
 func commitStagedAccessCmd(configDir string, p accessApprovalPending) tea.Cmd {
 	return func() tea.Msg {
+		var prior secret.SecretPolicy
+		var havePrior bool
+		if err := secret.MutateVaultSession(config.VaultPath(configDir), "", p.VaultKey, secret.SessionMutation{Mutate: func(v *secret.Vault) error {
+			rec := v.Get(p.SecretID)
+			if rec == nil || rec.Archived {
+				return fmt.Errorf("binding target not found or archived")
+			}
+			prior, havePrior = rec.Policy, true
+			return nil
+		}}); err != nil {
+			_ = cleanupStagedAccessCmdResult(configDir, p.GrantID)
+			return accessMutationDoneMsg{err: err}
+		}
 		activate := func() error {
 			return broker.MutateBrokerFile(config.BrokerPath(configDir), func(meta *broker.File) error {
+				var binding *broker.CredentialBinding
+				for i := range meta.Bindings {
+					if meta.Bindings[i].ID == p.BindingID {
+						binding = &meta.Bindings[i]
+					}
+				}
+				if binding == nil || binding.SecretID != p.SecretID {
+					return fmt.Errorf("binding changed after approval was staged")
+				}
 				for i := range meta.Grants {
 					if meta.Grants[i].ID == p.GrantID {
 						meta.Grants[i].Enabled = true
@@ -896,6 +936,16 @@ func commitStagedAccessCmd(configDir string, p accessApprovalPending) tea.Cmd {
 			err = activate()
 		}
 		if err != nil {
+			if havePrior {
+				_ = secret.MutateVaultSession(config.VaultPath(configDir), "", p.VaultKey, secret.SessionMutation{Mutate: func(v *secret.Vault) error {
+					rec := v.Get(p.SecretID)
+					if rec == nil {
+						return fmt.Errorf("target disappeared")
+					}
+					rec.Policy = prior
+					return nil
+				}})
+			}
 			_ = cleanupStagedAccessCmdResult(configDir, p.GrantID)
 			return accessMutationDoneMsg{err: err}
 		}
@@ -929,19 +979,24 @@ func (m *model) handleAccessModalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		mode := m.modal
 		value := strings.TrimSpace(m.addInput.Value())
 		if mode == modalAccess {
+			if value == "" {
+				m.statusMsg = "Binding name is required."
+				return m, nil
+			}
 			m.addValues = []string{value}
 			m.modalPrompt = "Vault key label or ID"
 			m.addInput.Reset()
 			return m, m.addInput.Focus()
 		}
+		if value == "" {
+			m.statusMsg = "Vault key label or ID is required."
+			return m, nil
+		}
 		m.modal = modalNone
 		m.focus = focusContent
 		m.addInput.Blur()
-		if value == "" {
-			return m, nil
-		}
 		if mode == modalAccessRebind {
-			return m, rebindAccessBindingCmd(m.configDir, m.modalTarget, value)
+			return m, rebindAccessBindingCmd(m.configDir, m.modalTarget, value, m.vaultSession.vault)
 		}
 		return m, createAccessBindingCmd(m.configDir, m.addValues[0], value, m.vaultSession.vault)
 	default:
@@ -990,12 +1045,16 @@ func createAccessBindingCmd(configDir, name, keySelector string, vault *secret.V
 	}
 }
 
-func rebindAccessBindingCmd(configDir, bindingID, secretID string) tea.Cmd {
+func rebindAccessBindingCmd(configDir, bindingID, keySelector string, vault *secret.Vault) tea.Cmd {
 	return func() tea.Msg {
+		rec := findVaultRecordByLabelOrID(vault, keySelector)
+		if rec == nil || rec.Archived || rec.Secret == "" {
+			return accessMutationDoneMsg{err: fmt.Errorf("select an existing non-archived vault key")}
+		}
 		err := broker.MutateBrokerFile(config.BrokerPath(configDir), func(meta *broker.File) error {
 			for i := range meta.Bindings {
 				if meta.Bindings[i].ID == bindingID {
-					meta.Bindings[i].SecretID = secretID
+					meta.Bindings[i].SecretID = rec.ID
 					meta.Bindings[i].UpdatedAt = time.Now()
 					for j := range meta.Grants {
 						if meta.Grants[j].BindingID == bindingID {
@@ -3376,7 +3435,7 @@ func (m *model) refreshLaunchPreview() tea.Cmd {
 // screenInitCmd runs setup when switching to a screen.
 func (m *model) screenInitCmd(s screen) tea.Cmd {
 	if s == screenAccess {
-		return loadAccessMetadataCmd(m.configDir)
+		return tea.Batch(cleanupStaleStagedAccessCmd(m.configDir, 30*time.Minute), loadAccessMetadataCmd(m.configDir))
 	}
 	if s == screenLaunch {
 		return m.refreshLaunchPreview()

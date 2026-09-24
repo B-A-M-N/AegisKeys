@@ -77,6 +77,67 @@ func TestAccessApprovalMissingKeyRemovesStagedGrant(t *testing.T) {
 	}
 }
 
+func TestStaleStagedGrantCleanupPreservesEnabledAndRecentGrants(t *testing.T) {
+	dir := t.TempDir()
+	meta := broker.NewFile()
+	meta.Bindings = append(meta.Bindings, broker.CredentialBinding{ID: "b", Name: "app/x", SecretID: "k"})
+	old := broker.AccessGrant{ID: "old", Name: "x", BindingID: "b", Client: broker.ClientConstraint{UID: 1, ExecutablePath: "/x"}, Capabilities: []broker.Capability{broker.CapabilityResolve}, CreatedAt: time.Now().Add(-time.Hour)}
+	recent := old
+	recent.ID = "recent"
+	recent.CreatedAt = time.Now()
+	enabled := old
+	enabled.ID = "enabled"
+	enabled.Enabled = true
+	enabled.CreatedAt = time.Now().Add(-time.Hour)
+	meta.Grants = []broker.AccessGrant{old, recent, enabled}
+	_ = broker.SaveBrokerFile(config.BrokerPath(dir), meta)
+	msg := cleanupStaleStagedAccessCmd(dir, 30*time.Minute)().(accessMutationDoneMsg)
+	if msg.err != nil {
+		t.Fatal(msg.err)
+	}
+	got, _ := broker.LoadBrokerFile(config.BrokerPath(dir))
+	if len(got.Grants) != 2 || got.Grants[0].ID != "recent" || got.Grants[1].ID != "enabled" {
+		t.Fatalf("unexpected cleanup result: %+v", got.Grants)
+	}
+}
+
+func TestAccessApprovalRebindAfterStagingFailsAndRollsBackPolicy(t *testing.T) {
+	dir := t.TempDir()
+	vaultPath := config.VaultPath(dir)
+	if err := secret.InitVault(vaultPath, "pw"); err != nil {
+		t.Fatal(err)
+	}
+	_, key, _ := secret.LoadVaultWithKey(vaultPath, "pw")
+	if err := secret.MutateVaultWithKey(vaultPath, key, func(v *secret.Vault) error {
+		if err := v.Add(secret.SecretRecord{ID: "key_1", Label: "One", Secret: "s1", Policy: secret.SecretPolicy{Version: 1}}); err != nil {
+			return err
+		}
+		return v.Add(secret.SecretRecord{ID: "key_2", Label: "Two", Secret: "s2", Policy: secret.SecretPolicy{Version: 1}})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	meta := broker.NewFile()
+	meta.Bindings = append(meta.Bindings, broker.CredentialBinding{ID: "binding_1", Name: "app/main", SecretID: "key_1"})
+	_ = broker.SaveBrokerFile(config.BrokerPath(dir), meta)
+	exe := filepath.Join(dir, "app")
+	_ = os.WriteFile(exe, []byte("#!/bin/sh\n"), 0700)
+	prepared := prepareAccessApprovalCmd(dir, "binding_1", key, exe, "resolve", time.Now().Add(time.Hour).Format(time.RFC3339))().(accessApprovalPreparedMsg)
+	_ = broker.MutateBrokerFile(config.BrokerPath(dir), func(m *broker.File) error { m.Bindings[0].SecretID = "key_2"; return nil })
+	done := commitStagedAccessCmd(dir, prepared.pending)().(accessMutationDoneMsg)
+	if done.err == nil {
+		t.Fatal("rebound binding accepted")
+	}
+	v, _ := secret.LoadVaultByKey(vaultPath, key)
+	rec := v.Get("key_1")
+	if rec.Policy.AllowBrokerResolve {
+		t.Fatal("failed activation left policy enabled")
+	}
+	final, _ := broker.LoadBrokerFile(config.BrokerPath(dir))
+	if len(final.Grants) != 0 {
+		t.Fatal("failed activation left staged grant")
+	}
+}
+
 func TestAccessScreenShowsMetadataOnly(t *testing.T) {
 	m := newTestModel(t)
 	meta := broker.NewFile()

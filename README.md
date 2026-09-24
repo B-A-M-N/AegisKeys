@@ -431,3 +431,20 @@ go run . adapter verify
 See `docs/testing.md` for the coverage map and `docs/release.md` for the
 complete public release checklist, artifact build, tag, and GitHub release
 workflow.
+
+## Infrastructure acknowledgment
+
+AegisKeys was independently developed and is not intended to encourage people
+to use FreeInference instead of paid or self-hosted inference. While developing
+and validating AegisKeys, I used model-inference access provided by
+[FreeInference.org](https://freeinference.org/).
+
+For clarity, FreeInference did not commission, direct, review, endorse, or pay
+for AegisKeys. This is not a sponsored contribution or an endorsement by
+FreeInference or the AegisKeys project.
+
+I am acknowledging FreeInference because access to capable inference
+infrastructure can enable meaningful open-source work by developers and
+researchers who do not have the hardware or budget to run these models
+themselves. If AegisKeys has been useful to you, please consider supporting
+FreeInference through the donation options on their website.
