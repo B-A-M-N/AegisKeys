@@ -1825,6 +1825,20 @@ func TestShortSuccessfulCommandIsNotFailure(t *testing.T) {
 	}
 }
 
+func TestAdvertisedScreenShortcuts(t *testing.T) {
+	cases := []struct {
+		key  rune
+		want screen
+	}{{'1', screenDashboard}, {'2', screenProviders}, {'3', screenKeys}, {'4', screenProfiles}, {'5', screenLaunch}, {'6', screenDoctor}, {'7', screenAudit}, {'8', screenSettings}, {'9', screenScratch}, {'0', screenAccess}, {'?', screenHelp}}
+	for _, tc := range cases {
+		m := newTestModel(t)
+		_, _ = m.handleKey(tea.KeyPressMsg{Code: tc.key, Text: string(tc.key)})
+		if m.active != tc.want {
+			t.Errorf("shortcut %q -> %v, want %v", tc.key, m.active, tc.want)
+		}
+	}
+}
+
 func TestScratchShortcutJumpsToScratch(t *testing.T) {
 	m := newTestModel(t)
 	_, _ = m.handleKey(tea.KeyPressMsg{Code: '9', Text: "9"})

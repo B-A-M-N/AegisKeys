@@ -94,6 +94,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 
+	case accessApprovalPreparedMsg:
+		m.accessApproval = &msg.pending
+		m.modal = modalAccessConfirm
+		m.focus = focusModal
+		m.modalPrompt = fmt.Sprintf("Approve %s\nSHA-256: %s\nBinding: %s\nCapabilities: %s\nExpires: %s\n[y] approve  [n] cancel", msg.pending.Executable, msg.pending.Hash, msg.pending.BindingName, capabilityDisplay(msg.pending.Capabilities), msg.pending.ExpiresAt.Format(time.RFC3339))
+		return m, nil
+
 	case accessMutationDoneMsg:
 		if msg.err != nil {
 			m.statusMsg = msg.err.Error()
@@ -732,13 +739,10 @@ func (m *model) handleAccessApprovalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		return m, m.addInput.Focus()
 	}
 	bindingID := m.modalTarget
-	m.modal = modalNone
-	m.focus = focusContent
-	m.addInput.Blur()
-	return m, approveAccessGrantCmd(m.configDir, bindingID, m.vaultSession.key, m.addValues[0], m.addValues[1], m.addValues[2])
+	return m, prepareAccessApprovalCmd(m.configDir, bindingID, m.vaultSession.key, m.addValues[0], m.addValues[1], m.addValues[2])
 }
 
-func approveAccessGrantCmd(configDir, bindingID string, vaultKey [32]byte, executable, capabilityText, expiresText string) tea.Cmd {
+func prepareAccessApprovalCmd(configDir, bindingID string, vaultKey [32]byte, executable, capabilityText, expiresText string) tea.Cmd {
 	return func() tea.Msg {
 		canonical, err := filepath.EvalSymlinks(executable)
 		if err != nil {
@@ -756,60 +760,31 @@ func approveAccessGrantCmd(configDir, bindingID string, vaultKey [32]byte, execu
 		if err != nil || !expiration.After(time.Now()) {
 			return accessMutationDoneMsg{err: fmt.Errorf("expiration must be a future RFC3339 timestamp")}
 		}
+		meta, err := broker.LoadBrokerFile(config.BrokerPath(configDir))
+		if err != nil {
+			return accessMutationDoneMsg{err: err}
+		}
+		var binding *broker.CredentialBinding
+		for i := range meta.Bindings {
+			if meta.Bindings[i].ID == bindingID {
+				binding = &meta.Bindings[i]
+			}
+		}
+		if binding == nil {
+			return accessMutationDoneMsg{err: fmt.Errorf("binding not found")}
+		}
 		grantID, err := broker.NewGrantID()
 		if err != nil {
 			return accessMutationDoneMsg{err: err}
 		}
-		metaPath := config.BrokerPath(configDir)
-		if err := broker.MutateBrokerFile(metaPath, func(meta *broker.File) error {
-			var binding *broker.CredentialBinding
-			for i := range meta.Bindings {
-				if meta.Bindings[i].ID == bindingID {
-					binding = &meta.Bindings[i]
-				}
-			}
-			if binding == nil {
-				return fmt.Errorf("binding not found")
-			}
-			meta.Grants = append(meta.Grants, broker.AccessGrant{ID: grantID, Name: filepath.Base(canonical), BindingID: binding.ID, Client: broker.ClientConstraint{UID: os.Getuid(), ExecutablePath: canonical, ExecutableHash: hash}, Capabilities: capabilities, Enabled: true, CreatedAt: time.Now(), ExpiresAt: &expiration})
+		pending := accessApprovalPending{BindingID: binding.ID, SecretID: binding.SecretID, BindingName: binding.Name, Executable: canonical, Hash: hash, Capabilities: capabilities, ExpiresAt: expiration, GrantID: grantID, VaultKey: vaultKey}
+		if err := broker.MutateBrokerFile(config.BrokerPath(configDir), func(meta *broker.File) error {
+			meta.Grants = append(meta.Grants, broker.AccessGrant{ID: grantID, Name: filepath.Base(canonical), BindingID: binding.ID, Client: broker.ClientConstraint{UID: os.Getuid(), ExecutablePath: canonical, ExecutableHash: hash}, Capabilities: capabilities, Enabled: false, CreatedAt: time.Now(), ExpiresAt: &expiration})
 			return nil
 		}); err != nil {
 			return accessMutationDoneMsg{err: err}
 		}
-		if err := secret.MutateVaultSession(config.VaultPath(configDir), "", vaultKey, secret.SessionMutation{Mutate: func(v *secret.Vault) error {
-			meta, _ := broker.LoadBrokerFile(metaPath)
-			if meta == nil {
-				return fmt.Errorf("broker metadata reload failed")
-			}
-			for _, grant := range meta.Grants {
-				if grant.ID == grantID {
-					rec := v.Get(grant.BindingID)
-					_ = rec
-					for i := range meta.Bindings {
-						if meta.Bindings[i].ID == grant.BindingID {
-							rec = v.Get(meta.Bindings[i].SecretID)
-						}
-					}
-					if rec == nil {
-						return fmt.Errorf("binding target not found")
-					}
-					for _, cap := range capabilities {
-						if cap == broker.CapabilityResolve {
-							rec.Policy.AllowBrokerResolve = true
-						}
-						if cap == broker.CapabilityRotate {
-							rec.Policy.AllowBrokerRotate = true
-						}
-					}
-					rec.Policy.Version = 1
-					return nil
-				}
-			}
-			return fmt.Errorf("grant not found")
-		}}); err != nil {
-			return accessMutationDoneMsg{err: err}
-		}
-		return accessMutationDoneMsg{message: "Access grant approved."}
+		return accessApprovalPreparedMsg{pending: pending}
 	}
 }
 
@@ -842,6 +817,106 @@ func parseAccessCapabilities(text string) ([]broker.Capability, error) {
 	return out, nil
 }
 
+type accessApprovalPreparedMsg struct{ pending accessApprovalPending }
+
+func (m *model) handleAccessConfirmKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch normalizedKey(k) {
+	case "esc", "n":
+		grantID := ""
+		if m.accessApproval != nil {
+			grantID = m.accessApproval.GrantID
+		}
+		m.modal = modalNone
+		m.focus = focusContent
+		m.accessApproval = nil
+		return m, cleanupStagedAccessCmd(m.configDir, grantID)
+	case "enter", "y", "a":
+		p := m.accessApproval
+		m.modal = modalNone
+		m.focus = focusContent
+		m.accessApproval = nil
+		if p == nil {
+			return m, nil
+		}
+		return m, commitStagedAccessCmd(m.configDir, *p)
+	default:
+		return m, nil
+	}
+}
+
+func cleanupStagedAccessCmd(configDir, grantID string) tea.Cmd {
+	return func() tea.Msg {
+		if grantID == "" {
+			return accessMutationDoneMsg{}
+		}
+		err := broker.MutateBrokerFile(config.BrokerPath(configDir), func(meta *broker.File) error {
+			kept := meta.Grants[:0]
+			for _, g := range meta.Grants {
+				if g.ID != grantID {
+					kept = append(kept, g)
+				}
+			}
+			meta.Grants = kept
+			return nil
+		})
+		return accessMutationDoneMsg{err: err}
+	}
+}
+
+func commitStagedAccessCmd(configDir string, p accessApprovalPending) tea.Cmd {
+	return func() tea.Msg {
+		activate := func() error {
+			return broker.MutateBrokerFile(config.BrokerPath(configDir), func(meta *broker.File) error {
+				for i := range meta.Grants {
+					if meta.Grants[i].ID == p.GrantID {
+						meta.Grants[i].Enabled = true
+						return nil
+					}
+				}
+				return fmt.Errorf("staged grant missing")
+			})
+		}
+		err := secret.MutateVaultSession(config.VaultPath(configDir), "", p.VaultKey, secret.SessionMutation{Mutate: func(v *secret.Vault) error {
+			rec := v.Get(p.SecretID)
+			if rec == nil || rec.Archived {
+				return fmt.Errorf("binding target not found or archived")
+			}
+			for _, cap := range p.Capabilities {
+				if cap == broker.CapabilityResolve {
+					rec.Policy.AllowBrokerResolve = true
+				}
+				if cap == broker.CapabilityRotate {
+					rec.Policy.AllowBrokerRotate = true
+				}
+			}
+			rec.Policy.Version = 1
+			return nil
+		}})
+		if err == nil {
+			err = activate()
+		}
+		if err != nil {
+			_ = cleanupStagedAccessCmdResult(configDir, p.GrantID)
+			return accessMutationDoneMsg{err: err}
+		}
+		return accessMutationDoneMsg{message: "Access grant approved."}
+	}
+}
+
+func cleanupStagedAccessCmdResult(configDir, grantID string) error {
+	err := broker.MutateBrokerFile(config.BrokerPath(configDir), func(meta *broker.File) error {
+		kept := meta.Grants[:0]
+		for _, g := range meta.Grants {
+			if g.ID != grantID {
+				kept = append(kept, g)
+			}
+		}
+		meta.Grants = kept
+		return nil
+	})
+	return err
+}
+
 func (m *model) handleAccessModalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := normalizedKey(k)
 	switch key {
@@ -853,16 +928,22 @@ func (m *model) handleAccessModalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		mode := m.modal
 		value := strings.TrimSpace(m.addInput.Value())
+		if mode == modalAccess {
+			m.addValues = []string{value}
+			m.modalPrompt = "Vault key label or ID"
+			m.addInput.Reset()
+			return m, m.addInput.Focus()
+		}
 		m.modal = modalNone
 		m.focus = focusContent
 		m.addInput.Blur()
 		if value == "" {
 			return m, nil
 		}
-		if mode == modalAccess {
-			return m, createAccessBindingCmd(m.configDir, value)
+		if mode == modalAccessRebind {
+			return m, rebindAccessBindingCmd(m.configDir, m.modalTarget, value)
 		}
-		return m, rebindAccessBindingCmd(m.configDir, m.modalTarget, value)
+		return m, createAccessBindingCmd(m.configDir, m.addValues[0], value, m.vaultSession.vault)
 	default:
 		var cmd tea.Cmd
 		m.addInput, cmd = m.addInput.Update(k)
@@ -870,8 +951,28 @@ func (m *model) handleAccessModalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
-func createAccessBindingCmd(configDir, name string) tea.Cmd {
+func findVaultRecordByLabelOrID(v *secret.Vault, selector string) *secret.SecretRecord {
+	if v == nil {
+		return nil
+	}
+	var found *secret.SecretRecord
+	for i := range v.Keys {
+		if v.Keys[i].ID == selector || v.Keys[i].Label == selector {
+			if found != nil {
+				return nil
+			}
+			found = &v.Keys[i]
+		}
+	}
+	return found
+}
+
+func createAccessBindingCmd(configDir, name, keySelector string, vault *secret.Vault) tea.Cmd {
 	return func() tea.Msg {
+		rec := findVaultRecordByLabelOrID(vault, keySelector)
+		if rec == nil || rec.Archived || rec.Secret == "" {
+			return accessMutationDoneMsg{err: fmt.Errorf("select an existing non-archived vault key")}
+		}
 		path := config.BrokerPath(configDir)
 		id, err := broker.NewBindingID()
 		if err != nil {
@@ -882,10 +983,10 @@ func createAccessBindingCmd(configDir, name string) tea.Cmd {
 			if meta.FindBinding(name) != nil || !broker.ValidBindingName(name) {
 				return fmt.Errorf("invalid or duplicate binding %q", name)
 			}
-			meta.Bindings = append(meta.Bindings, broker.CredentialBinding{ID: id, Name: name, SecretID: "unassigned", ComponentAllowlist: []string{"primary"}, CreatedAt: now, UpdatedAt: now})
+			meta.Bindings = append(meta.Bindings, broker.CredentialBinding{ID: id, Name: name, SecretID: rec.ID, ComponentAllowlist: []string{"primary"}, CreatedAt: now, UpdatedAt: now})
 			return nil
 		})
-		return accessMutationDoneMsg{err: err, message: "Binding created; rebind it to a vault key."}
+		return accessMutationDoneMsg{err: err, message: "Binding created for selected vault key."}
 	}
 }
 
@@ -2172,6 +2273,9 @@ func (m *model) handleModalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.modal == modalAccessApprove {
 		return m.handleAccessApprovalKey(k)
+	}
+	if m.modal == modalAccessConfirm {
+		return m.handleAccessConfirmKey(k)
 	}
 	switch key {
 	case "esc", "n":

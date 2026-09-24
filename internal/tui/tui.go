@@ -187,6 +187,7 @@ const (
 	modalAccess
 	modalAccessRebind
 	modalAccessApprove
+	modalAccessConfirm
 )
 
 type launchMode int
@@ -289,9 +290,10 @@ type model struct {
 	// Loaded on-disk config (so theme/auto-lock changes can be persisted).
 	cfg config.Config
 	// brokerMeta is a cached immutable snapshot. View never reads broker.json.
-	brokerMeta *broker.File
-	brokerErr  string
-	accessStep int
+	brokerMeta     *broker.File
+	brokerErr      string
+	accessStep     int
+	accessApproval *accessApprovalPending
 
 	// Launch screen.
 	launchMode    launchMode
@@ -346,6 +348,18 @@ type vaultSession struct {
 	vault    *secret.Vault
 	envelope *secret.VaultEnvelope
 	key      [32]byte
+}
+
+type accessApprovalPending struct {
+	BindingID    string
+	SecretID     string
+	BindingName  string
+	Executable   string
+	Hash         string
+	Capabilities []broker.Capability
+	ExpiresAt    time.Time
+	GrantID      string
+	VaultKey     [32]byte
 }
 
 // keyFormState captures the fields for adding a new API key.

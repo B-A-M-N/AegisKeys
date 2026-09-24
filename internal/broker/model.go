@@ -71,6 +71,8 @@ type AccessGrant struct {
 }
 
 // File is the metadata-only broker store persisted as broker.json.
+// Revision is a transactional mutation counter only. broker.json is neither
+// cryptographically authenticated nor protected against rollback by this build.
 type File struct {
 	Version  int                 `json:"version"`
 	Revision uint64              `json:"revision"`
