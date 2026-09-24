@@ -500,6 +500,19 @@ func ValidateLaunchStrategy(
 // ValidateExplicitLaunch validates profile-free child launches. Every env value
 // must be explicitly classified as secret, and no secret may appear in argv or
 // a config file. Unknown sensitivity fails closed.
+func validLaunchEnvName(name string) bool {
+	if name == "" || strings.ContainsAny(name, "=\x00\r\n") {
+		return false
+	}
+	for i, r := range name {
+		if r == '_' || r >= 'A' && r <= 'Z' || i > 0 && r >= 'a' && r <= 'z' || i > 0 && r >= '0' && r <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func ValidateExplicitLaunch(strategy *LaunchStrategy, rawSecrets []string) error {
 	if strategy == nil || strategy.Plan.Command == "" {
 		return errors.New("explicit launch requires a command")
@@ -508,6 +521,9 @@ func ValidateExplicitLaunch(strategy *LaunchStrategy, rawSecrets []string) error
 		return errors.New("invalid explicit launch contract")
 	}
 	for name := range strategy.Plan.Env {
+		if !validLaunchEnvName(name) {
+			return fmt.Errorf("explicit launch env name %q is invalid", name)
+		}
 		if strategy.Plan.EnvSensitivity[name] != "secret" {
 			return fmt.Errorf("explicit launch env %q is not classified secret", name)
 		}
@@ -555,17 +571,26 @@ func ValidateLaunchStrategyForMode(
 	}
 
 	if key != nil {
-		if containsRawSecretInArgs(strategy.Plan.Args, key.Secret) {
-			return errors.New("launch plan would expose raw secret in argv")
+		rawSecrets := []string{key.Secret}
+		for _, component := range key.ExtraSecrets {
+			rawSecrets = append(rawSecrets, component.Secret)
 		}
-		if containsRawSecretInPreview(strategy.Plan.Preview, key.Secret) {
-			return errors.New("launch preview contains raw secret")
-		}
-		if containsRawSecretInFiles(strategy.Plan.Files, key.Secret) {
-			return errors.New("launch plan would write raw secret to config file")
-		}
-		if !c.CanInjectSecrets && containsRawSecretInEnv(strategy.Plan.Env, key.Secret) {
-			return fmt.Errorf("adapter %s cannot inject secrets but env contains raw secret", c.ID)
+		for _, raw := range rawSecrets {
+			if raw == "" {
+				continue
+			}
+			if containsRawSecretInArgs(strategy.Plan.Args, raw) {
+				return errors.New("launch plan would expose raw secret in argv")
+			}
+			if containsRawSecretInPreview(strategy.Plan.Preview, raw) {
+				return errors.New("launch preview contains raw secret")
+			}
+			if containsRawSecretInFiles(strategy.Plan.Files, raw) {
+				return errors.New("launch plan would write raw secret to config file")
+			}
+			if !c.CanInjectSecrets && containsRawSecretInEnv(strategy.Plan.Env, raw) {
+				return fmt.Errorf("adapter %s cannot inject secrets but env contains raw secret", c.ID)
+			}
 		}
 	}
 

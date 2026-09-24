@@ -160,6 +160,29 @@ func MutateBrokerFile(path string, mutate func(*File) error) error {
 // that pair broker authorization state with another encrypted file can use the
 // held lock to exclude competing broker transactions until the final metadata
 // write completes. A callback error prevents the save.
+// WithBrokerFileLocked holds the metadata lock while fn reads or coordinates a
+// related encrypted-store operation. It does not rewrite metadata.
+func WithBrokerFileLocked(path string, fn func(*File) error) error {
+	if fn == nil {
+		return errors.New("nil broker lock operation")
+	}
+	lockPath := path + ".lock"
+	lf, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return err
+	}
+	defer lf.Close()
+	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("acquire broker metadata lock: %w", err)
+	}
+	defer syscall.Flock(int(lf.Fd()), syscall.LOCK_UN)
+	f, err := LoadBrokerFile(path)
+	if err != nil {
+		return err
+	}
+	return fn(f)
+}
+
 func TransactBrokerFile(path string, mutate func(*File) error) error {
 	if mutate == nil {
 		return errors.New("nil broker mutation")

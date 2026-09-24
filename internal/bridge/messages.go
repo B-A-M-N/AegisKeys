@@ -37,8 +37,18 @@ func Start(cfg Config) (*Server, error) {
 	if strings.TrimSpace(cfg.TargetBaseURL) == "" || strings.TrimSpace(cfg.APIKey) == "" {
 		return nil, fmt.Errorf("bridge requires target URL and API key")
 	}
-	if _, err := url.ParseRequestURI(cfg.TargetBaseURL); err != nil {
-		return nil, fmt.Errorf("invalid bridge target URL: %w", err)
+	if cfg.ClientToken == "" {
+		return nil, fmt.Errorf("bridge requires a client token")
+	}
+	targetURL, err := url.ParseRequestURI(cfg.TargetBaseURL)
+	if err != nil || targetURL.Host == "" || (targetURL.Scheme != "https" && targetURL.Scheme != "http") {
+		return nil, fmt.Errorf("invalid bridge target URL")
+	}
+	if targetURL.Scheme != "https" {
+		host := targetURL.Hostname()
+		if host != "127.0.0.1" && host != "::1" && host != "localhost" {
+			return nil, fmt.Errorf("bridge target must use https unless loopback")
+		}
 	}
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -46,7 +56,7 @@ func Start(cfg Config) (*Server, error) {
 	}
 	b := &Server{listener: l, url: "http://" + l.Addr().String()}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/messages", b.handleMessages(cfg))
+	mux.HandleFunc("/v1/messages", b.handleMessages(cfg, targetURL))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	b.http = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = b.http.Serve(l) }()
@@ -61,7 +71,7 @@ func (s *Server) Close() error {
 	return err
 }
 
-func (s *Server) handleMessages(cfg Config) http.HandlerFunc {
+func (s *Server) handleMessages(cfg Config, targetURL *url.URL) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -97,7 +107,7 @@ func (s *Server) handleMessages(cfg Config) http.HandlerFunc {
 		}
 		u.Header.Set("Content-Type", "application/json")
 		u.Header.Set("Authorization", "Bearer "+cfg.APIKey)
-		resp, err := http.DefaultClient.Do(u)
+		resp, err := bridgeClient{targetHost: targetURL.Host}.Do(u)
 		if err != nil {
 			writeAnthropicError(w, http.StatusBadGateway, err.Error())
 			return
@@ -120,6 +130,18 @@ func (s *Server) handleMessages(cfg Config) http.HandlerFunc {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(fromOpenAI(upstream, req.Model))
 	}
+}
+
+type bridgeClient struct{ targetHost string }
+
+func (c bridgeClient) Do(req *http.Request) (*http.Response, error) {
+	client := &http.Client{CheckRedirect: func(next *http.Request, via []*http.Request) error {
+		if len(via) >= 5 || next.URL.Host != c.targetHost {
+			return fmt.Errorf("bridge blocked upstream redirect")
+		}
+		return nil
+	}}
+	return client.Do(req)
 }
 
 type anthropicRequest struct {

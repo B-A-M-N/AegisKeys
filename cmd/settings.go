@@ -50,15 +50,8 @@ var settingsSetCmd = &cobra.Command{
 	Short: "Set one preference",
 	Args:  cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg := loadAppConfig()
 		key, value := strings.TrimSpace(args[0]), strings.TrimSpace(args[1])
-		if err := applySetting(&cfg, key, value); err != nil {
-			return err
-		}
-		if err := config.EnsureDir(resolvedConfigDir()); err != nil {
-			return err
-		}
-		if err := config.SaveConfig(config.ConfigPath(resolvedConfigDir()), cfg); err != nil {
+		if err := config.MutateConfigFile(config.ConfigPath(resolvedConfigDir()), func(latest *config.Config) error { return applySetting(latest, key, value) }); err != nil {
 			return err
 		}
 		fmt.Printf("Set %s=%s\n", key, value)
@@ -70,12 +63,12 @@ var settingsResetCmd = &cobra.Command{
 	Use:   "reset",
 	Short: "Reset preferences to defaults",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg := config.DefaultConfig()
-		cfg.Initialized = loadAppConfig().Initialized
-		if err := config.EnsureDir(resolvedConfigDir()); err != nil {
-			return err
-		}
-		if err := config.SaveConfig(config.ConfigPath(resolvedConfigDir()), cfg); err != nil {
+		if err := config.MutateConfigFile(config.ConfigPath(resolvedConfigDir()), func(latest *config.Config) error {
+			d := config.DefaultConfig()
+			d.Initialized = latest.Initialized
+			*latest = d
+			return nil
+		}); err != nil {
 			return err
 		}
 		fmt.Println("Settings reset to defaults.")

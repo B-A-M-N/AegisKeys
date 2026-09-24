@@ -89,10 +89,22 @@ func (s *Service) Resolve(name string, peer PeerIdentity) (ResolvedCredential, e
 	if name == "" {
 		return ResolvedCredential{}, ErrRequestInvalid
 	}
-	meta, err := s.currentMeta()
-	if err != nil {
-		return ResolvedCredential{}, ErrAccessDenied
+	if s.metaPath == "" {
+		return s.resolveSnapshot(s.meta, name, peer)
 	}
+	var out ResolvedCredential
+	err := WithBrokerFileLocked(s.metaPath, func(meta *File) error {
+		var err error
+		out, err = s.resolveSnapshot(meta, name, peer)
+		return err
+	})
+	if err != nil {
+		return ResolvedCredential{}, err
+	}
+	return out, nil
+}
+
+func (s *Service) resolveSnapshot(meta *File, name string, peer PeerIdentity) (ResolvedCredential, error) {
 	binding := meta.FindBinding(name)
 	if binding == nil {
 		return ResolvedCredential{}, ErrBindingUnavailable
@@ -143,10 +155,13 @@ func (s *Service) Rotate(req Request, peer PeerIdentity) error {
 	if req.Binding == "" || req.Value == "" {
 		return ErrRequestInvalid
 	}
-	meta, err := s.currentMeta()
-	if err != nil {
-		return ErrAccessDenied
+	if s.metaPath == "" {
+		return s.rotateSnapshot(s.meta, req, peer)
 	}
+	return WithBrokerFileLocked(s.metaPath, func(meta *File) error { return s.rotateSnapshot(meta, req, peer) })
+}
+
+func (s *Service) rotateSnapshot(meta *File, req Request, peer PeerIdentity) error {
 	binding := meta.FindBinding(req.Binding)
 	if binding == nil {
 		return ErrBindingUnavailable

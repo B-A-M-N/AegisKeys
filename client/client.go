@@ -91,5 +91,9 @@ func (c *Client) Resolve(ctx context.Context, binding string) (Credential, error
 	if err := dec.Decode(&credential); err != nil {
 		return Credential{}, fmt.Errorf("decode broker response: %w", err)
 	}
+	var trailing json.RawMessage
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return Credential{}, fmt.Errorf("broker response contains trailing data")
+	}
 	return credential, nil
 }

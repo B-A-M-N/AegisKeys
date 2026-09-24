@@ -52,6 +52,12 @@ func newTestModel(t *testing.T) *model {
 	m.addInput = textinput.New()
 	m.addInput.Placeholder = "name"
 	m.addInput.SetWidth(40)
+	if err := reg.Save(config.ProvidersPath(m.configDir)); err != nil {
+		t.Fatalf("persist test providers: %v", err)
+	}
+	if err := profile.SaveStore(config.ProfilesPath(m.configDir), store); err != nil {
+		t.Fatalf("persist test profiles: %v", err)
+	}
 	return m
 }
 
@@ -80,7 +86,7 @@ func unlockTestVault(t *testing.T, m *model, records ...secret.SecretRecord) str
 	return password
 }
 
-func TestProfileReplaceKeyRepairsMissingVaultRecord(t *testing.T) {
+func TestProfileReplaceRefusesMissingVaultRecord(t *testing.T) {
 	m := newTestModel(t)
 	password := unlockTestVault(t, m)
 	m.active = screenProfiles
@@ -105,28 +111,21 @@ func TestProfileReplaceKeyRepairsMissingVaultRecord(t *testing.T) {
 	m.addInput.SetValue(replacement)
 	_, _ = m.commitRotate()
 
-	if m.modal != modalNone {
-		t.Fatal("expected replacement modal to close")
+	if m.modal == modalNone {
+		t.Fatal("missing referenced key must not silently complete replacement")
 	}
-	if got := m.vaultSession.vault.Get("key_1"); got == nil || got.Secret != replacement {
-		t.Fatal("expected missing profile key to be recreated")
+	if !strings.Contains(m.statusMsg, "missing") {
+		t.Fatalf("unexpected status: %q", m.statusMsg)
 	}
-	if got := m.vaultSession.vault.Get("key_1"); got.ProviderSlug != "openrouter" {
-		t.Fatalf("expected recreated key provider openrouter, got %q", got.ProviderSlug)
-	}
-	if !strings.Contains(m.statusMsg, "or-main") || strings.Contains(m.statusMsg, replacement) {
-		t.Fatal("replacement status did not identify the profile safely")
-	}
-	if m.addInput.Value() != "" {
-		t.Fatal("replacement secret remained in input buffer")
-	}
-
 	persisted, err := secret.LoadVault(config.VaultPath(m.configDir), password)
 	if err != nil {
 		t.Fatalf("reload saved vault: %v", err)
 	}
-	if got := persisted.Get("key_1"); got == nil || got.Secret != replacement {
-		t.Fatal("recreated profile key was not persisted")
+	if got := persisted.Get("key_1"); got != nil {
+		t.Fatal("missing referenced key must not be recreated implicitly")
+	}
+	if m.addInput.Value() != "" {
+		t.Fatal("replacement secret remained in input buffer")
 	}
 	if strings.Contains(stripANSIForTest(m.View().Content), replacement) {
 		t.Fatal("replacement secret leaked into the TUI view")
@@ -342,15 +341,13 @@ func TestMalformedProviderFileIsPreserved(t *testing.T) {
 
 func TestProviderDelete_BlockedByKey(t *testing.T) {
 	m := newTestModel(t)
+	if err := m.providers.Save(config.ProvidersPath(m.configDir)); err != nil {
+		t.Fatal(err)
+	}
 	m.focus = focusContent
 	m.active = screenProviders
 	m.unlocked = true
-	// Simulate a vault session with a key referencing openai.
-	m.vaultSession = &vaultSession{
-		vault: &secret.Vault{
-			Keys: []secret.SecretRecord{{ID: "k1", ProviderSlug: "openai", Label: "main"}},
-		},
-	}
+	unlockTestVault(t, m, secret.SecretRecord{ID: "k1", ProviderSlug: "openai", Label: "main", Secret: "test"})
 	// Select the openai provider (index 0 in defaults).
 	m.selected[screenProviders] = 0
 	if m.providers.Providers[0].Slug != "openai" {
@@ -362,8 +359,8 @@ func TestProviderDelete_BlockedByKey(t *testing.T) {
 	if m.modal != modalConfirmDelete {
 		t.Fatal("expected delete modal")
 	}
-	if !m.deleteConfirmWait {
-		t.Fatal("expected deleteConfirmWait prompt when provider has keys")
+	if m.deleteBlockReason == "" || !strings.Contains(m.deleteBlockReason, "reassign") {
+		t.Fatalf("expected provider dependency warning, got %q", m.deleteBlockReason)
 	}
 	if m.deleteBlockReason == "" {
 		t.Fatal("expected a warning naming the key count")
@@ -371,17 +368,14 @@ func TestProviderDelete_BlockedByKey(t *testing.T) {
 	if m.providers.Find("openai") == nil {
 		t.Fatal("provider should NOT be deleted before confirmation")
 	}
-	// Now confirm "yes" → provider AND its key are removed.
-	sendKey(t, m, "y")
-	if m.modal != modalNone {
-		t.Errorf("expected modal closed after confirm, got %d", m.modal)
+	if !strings.Contains(m.deleteBlockReason, "reassign") {
+		t.Fatalf("unexpected block reason: %q", m.deleteBlockReason)
 	}
-	if m.providers.Find("openai") != nil {
-		t.Fatal("provider should be deleted after 'yes'")
+	if m.providers.Find("openai") == nil {
+		t.Fatal("provider should be blocked while referenced")
 	}
-	// The referencing key must be cascade-deleted too.
-	if m.vaultSession.vault.Get("k1") != nil {
-		t.Fatal("referencing key should be cascade-deleted")
+	if m.vaultSession.vault.Get("k1") == nil {
+		t.Fatal("referencing key should remain")
 	}
 }
 
@@ -402,10 +396,9 @@ func TestProviderDelete_DeclineCascade(t *testing.T) {
 		t.Skip("expected openai at index 0")
 	}
 	sendKey(t, m, "x")
-	if !m.deleteConfirmWait {
-		t.Fatal("expected cascade confirmation prompt")
+	if !strings.Contains(m.deleteBlockReason, "reassign") {
+		t.Fatal("expected provider dependency warning")
 	}
-	// Decline with "n".
 	sendKey(t, m, "n")
 	if m.modal != modalNone {
 		t.Errorf("expected modal closed after decline, got %d", m.modal)
@@ -425,10 +418,16 @@ func TestProviderDelete_Succeeds(t *testing.T) {
 	m.focus = focusContent
 	m.active = screenProviders
 	m.unlocked = true
-	m.vaultSession = &vaultSession{vault: &secret.Vault{}}
+	m.vaultSession = nil
+	if err := m.providers.Save(config.ProvidersPath(m.configDir)); err != nil {
+		t.Fatal(err)
+	}
 	// Add a throwaway provider with no key/profile refs.
 	custom := provider.Provider{Name: "zcustom", Slug: "zcustom", EnvVar: "ZCUSTOM_KEY", BaseURL: "https://example.com/v1", Compatibility: provider.CompatOpenAI, Protocol: provider.ProtocolOpenAI, Auth: provider.AuthSpec{Type: "bearer", EnvVar: "ZCUSTOM_KEY"}}
 	if err := m.providers.Add(custom); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.providers.Save(config.ProvidersPath(m.configDir)); err != nil {
 		t.Fatal(err)
 	}
 	idx := -1
@@ -1669,6 +1668,9 @@ func TestLogAudit_RecordsKeyAdd(t *testing.T) {
 
 	m := newTestModel(t)
 	m.configDir = dir
+	if err := m.providers.Save(config.ProvidersPath(dir)); err != nil {
+		t.Fatal(err)
+	}
 	m.unlocked = true
 	m.auditLogger = audit.NewLogger(logPath)
 	if err := secret.InitVault(config.VaultPath(dir), "test-password"); err != nil {
@@ -1731,6 +1733,9 @@ func TestLogAudit_RecordsKeyAdd(t *testing.T) {
 func TestKeyAddModal_EnterSubmitsWhenRequiredFieldsComplete(t *testing.T) {
 	m := newTestModel(t)
 	m.configDir = t.TempDir()
+	if err := m.providers.Save(config.ProvidersPath(m.configDir)); err != nil {
+		t.Fatal(err)
+	}
 	m.unlocked = true
 	m.active = screenKeys
 	m.focus = focusModal
@@ -1822,6 +1827,45 @@ func TestShortSuccessfulCommandIsNotFailure(t *testing.T) {
 	result := m2.(*model)
 	if result.launchPhase != launchIdle || result.launchFailure != nil {
 		t.Fatal("short successful command reported as startup failure")
+	}
+}
+
+func TestLockRejectsStalePreparedLaunchAndCleansUp(t *testing.T) {
+	m := newTestModel(t)
+	m.unlocked = true
+	m.vaultSession = &vaultSession{vault: &secret.Vault{Version: 1}}
+	cleaned := false
+	m.sessionGen = 3
+	m.Update(launchPreparedMsg{sessionGen: 2, execCommand: runner.NewInteractiveExec(nil), cleanup: func() error { cleaned = true; return nil }})
+	if !cleaned || !m.unlocked || m.launchPhase == launchRunning {
+		t.Fatal("stale launch cleanup/session fence missing")
+	}
+}
+
+func TestAccessConfirmModalRendersAuthorization(t *testing.T) {
+	m := newTestModel(t)
+	m.modal = modalAccessConfirm
+	m.modalPrompt = "SHA-256: abc\nBinding: b\nCapabilities: resolve\nExpires: future"
+	v := stripANSIForTest(m.View().Content)
+	for _, want := range []string{"Confirm Access Grant", "SHA-256:", "Binding:", "activate", "cancel"} {
+		if !strings.Contains(v, want) {
+			t.Fatalf("access confirmation missing %q", want)
+		}
+	}
+}
+
+func TestFilteredProfileSelectionTargetsVisibleRow(t *testing.T) {
+	m := newTestModel(t)
+	_ = m.profiles.Add(profile.Profile{Name: "visible-special", ProviderSlug: "openai", KeyID: "k2"})
+	m.filterText = "visible-special"
+	m.active = screenProfiles
+	m.selected[screenProfiles] = 0
+	if m.itemCount(screenProfiles) != 1 || m.selectedItemKey() != "visible-special" {
+		t.Fatal("filter did not target visible profile")
+	}
+	view := stripANSIForTest(m.profilesView(m.styles))
+	if !strings.Contains(view, "visible-special") || strings.Contains(view, "or-main") {
+		t.Fatalf("profile filter view wrong: %s", view)
 	}
 }
 

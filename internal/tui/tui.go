@@ -249,6 +249,7 @@ type model struct {
 
 	// Vault session for encrypted key operations.
 	vaultSession *vaultSession
+	sessionGen   uint64
 
 	// Auto-lock session management (P0-9).
 	lastActivity  time.Time
@@ -397,6 +398,7 @@ func (m *model) lockVault() {
 	// Invalidate outstanding preview work and drop its launch plan because the
 	// plan can contain injected credential values while the vault is unlocked.
 	m.launchPreview = launchPreviewState{requestID: m.launchPreview.requestID + 1}
+	m.sessionGen++
 	m.launchPhase = launchIdle
 	m.stopAnimation()
 	if m.vaultSession != nil {
@@ -415,6 +417,7 @@ func (m *model) lockVault() {
 	m.filterInput.Reset()
 	m.modal = modalNone
 	m.modalTarget = ""
+	m.accessApproval = nil
 	m.wizard = wizardState{}
 	m.modelCatalog = modelCatalogState{}
 	m.scratchEditing = false
@@ -487,7 +490,8 @@ type unlockResultMsg struct {
 }
 
 type doctorResultMsg struct {
-	results []security.CheckResult
+	sessionGen uint64
+	results    []security.CheckResult
 }
 
 type launchPreviewResolvedMsg struct {
@@ -498,6 +502,8 @@ type launchPreviewResolvedMsg struct {
 }
 
 type launchPreparedMsg struct {
+	sessionGen  uint64
+	secrets     []string
 	profile     string
 	execCommand *runner.InteractiveExec
 	cleanup     func() error

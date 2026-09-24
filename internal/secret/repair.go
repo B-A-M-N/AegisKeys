@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"time"
+
+	"aegiskeys/internal/fsutil"
 )
 
 // RepairMode controls how RepairVault re-seals after detecting a mismatch.
@@ -117,6 +119,12 @@ func DiagnoseUnlock(path, password string) (canUnlock, legacyWorks bool, env *Va
 // The password is never changed. If no mismatch is found (the password unlocks
 // normally) it returns Repaired=false and does not touch the file.
 func RepairVault(path, password string, mode RepairMode) (*RepairResult, error) {
+	var result *RepairResult
+	err := withVaultWriteLock(path, func() error { var err error; result, err = repairVaultLocked(path, password, mode); return err })
+	return result, err
+}
+
+func repairVaultLocked(path, password string, mode RepairMode) (*RepairResult, error) {
 	result := &RepairResult{Mode: mode}
 
 	canUnlock, legacyWorks, env, err := DiagnoseUnlock(path, password)
@@ -138,17 +146,13 @@ func RepairVault(path, password string, mode RepairMode) (*RepairResult, error) 
 	result.LegacyDerived = true
 	result.PrevTime = env.KDFParams.Time
 
-	// Decrypt with the legacy Argon2i key.
-	var legacyKey [32]byte
-	raw, derr := argon2iKeyLegacy(password, env.Salt)
-	if derr != nil {
-		return nil, fmt.Errorf("legacy derive failed: %w", derr)
+	// Use the exact successful recovery candidate, not an assumed Argon2i path.
+	plaintext, recoveredKey, candidate, _, rerr := OpenEnvelopeWithRecovery(password, env)
+	if rerr != nil {
+		return nil, rerr
 	}
-	copy(legacyKey[:], raw)
-	plaintext, derr := OpenWithKey(legacyKey, env)
-	if derr != nil {
-		return nil, fmt.Errorf("decrypt for repair failed: %w", derr)
-	}
+	recoveredParams := recoveryCandidates(env)[candidate]
+	result.LegacyDerived = recoveredParams.Time == 0
 
 	// Write a backup before re-sealing.
 	if err := writeBackup(path); err != nil {
@@ -157,9 +161,8 @@ func RepairVault(path, password string, mode RepairMode) (*RepairResult, error) 
 
 	switch mode {
 	case RepairPreserve:
-		// Re-seal with the SAME key and SAME salt, but fix the metadata to
-		// Time==0 so the loader falls back to Argon2i on next unlock.
-		newEnv, serr := SealWithKey(legacyKey, plaintext, env.Salt, KDFParams{Time: 0})
+		// Preserve the exact successful derivation shape and salt.
+		newEnv, serr := SealWithKey(recoveredKey, plaintext, env.Salt, recoveredParams)
 		if serr != nil {
 			return nil, fmt.Errorf("reseal (preserve) failed: %w", serr)
 		}
@@ -197,12 +200,8 @@ func RepairVault(path, password string, mode RepairMode) (*RepairResult, error) 
 
 // writeBackup copies the vault file to <path>.bak.<utc-timestamp>.
 func writeBackup(path string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	ts := time.Now().UTC().Format("20060102-150405")
-	return os.WriteFile(path+".bak."+ts, data, 0600)
+	_, err := WriteVaultBackup(path)
+	return err
 }
 
 // WriteVaultBackup is the exported entry point: copies the vault file to
@@ -212,9 +211,8 @@ func WriteVaultBackup(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	ts := time.Now().UTC().Format("20060102-150405")
-	backupPath := path + ".bak." + ts
-	if err := os.WriteFile(backupPath, data, 0600); err != nil {
+	backupPath := fmt.Sprintf("%s.bak.%s", path, time.Now().UTC().Format("20060102-150405.000000000Z"))
+	if err := fsutil.AtomicWriteFile(backupPath, data); err != nil {
 		return "", err
 	}
 	return backupPath, nil
@@ -226,13 +224,5 @@ func writeEnvelope(path string, env *VaultEnvelope) error {
 	if err != nil {
 		return err
 	}
-	tmpPath := path + ".repair"
-	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
-		return err
-	}
-	return nil
+	return fsutil.AtomicWriteFile(path, data)
 }

@@ -274,6 +274,21 @@ func TestExplicitLaunchRejectsUnknownSensitivity(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsSecondarySecretLeak(t *testing.T) {
+	strategy := &LaunchStrategy{Plan: LaunchPlan{Command: "true", Args: []string{"SECONDARY_SENTINEL_VALUE_123"}, Env: map[string]string{}}, Support: AppSupportContract{ID: "test", CanLaunch: true, CanInjectSecrets: true}}
+	key := &secret.SecretRecord{Secret: "PRIMARY_SENTINEL_VALUE_123", ExtraSecrets: []secret.NamedSecret{{Secret: "SECONDARY_SENTINEL_VALUE_123"}}}
+	if err := ValidateLaunchStrategyForMode(strategy, profile.Profile{}, provider.Provider{}, key, DefaultSecurityPolicy(), ResolveRun); err == nil {
+		t.Fatal("secondary secret leak accepted")
+	}
+}
+
+func TestValidateExplicitLaunchRejectsMalformedEnvName(t *testing.T) {
+	strategy := &LaunchStrategy{Plan: LaunchPlan{Command: "true", Env: map[string]string{"BAD\nNAME": "secret-value"}, EnvSensitivity: map[string]string{"BAD\nNAME": "secret"}}, Support: AppSupportContract{ID: "explicit-launch", CanLaunchArbitraryCommand: true}}
+	if err := ValidateExplicitLaunch(strategy, []string{"secret-value"}); err == nil {
+		t.Fatal("malformed env name accepted")
+	}
+}
+
 func TestValidateContract_MissingFields(t *testing.T) {
 	cases := []struct {
 		name string

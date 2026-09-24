@@ -186,7 +186,66 @@ func TestDiagnoseUnlock_LegacyMismatch(t *testing.T) {
 	}
 }
 
+func TestWriteVaultBackupsDoNotOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "vault.enc")
+	if err := os.WriteFile(path, []byte("first"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a, err := WriteVaultBackup(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("second"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	b, err := WriteVaultBackup(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == b {
+		t.Fatalf("backup path collision: %s", a)
+	}
+	first, _ := os.ReadFile(a)
+	second, _ := os.ReadFile(b)
+	if string(first) != "first" || string(second) != "second" {
+		t.Fatalf("backup content wrong: %q %q", first, second)
+	}
+}
+
 // TestRepairVault_Preserve fixes the brick state with preserve mode.
+func TestRepairVault_HistoricalArgon2idCandidate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "vault.enc")
+	pw := "historical-password"
+	salt, err := generateSalt()
+	if err != nil {
+		t.Fatal(err)
+	}
+	historical := KDFParams{Time: 1, MemoryKiB: 64 * 1024, Threads: 2, KeyLen: 32}
+	raw, err := argon2idKey(pw, salt, historical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var key [32]byte
+	copy(key[:], raw)
+	env, err := SealWithKey(key, `{"keys":[{"id":"historical","secret":"value"}],"version":1}`, salt, historical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.KDFParams = DefaultArgon2Params
+	data, _ := json.Marshal(env)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RepairVault(path, pw, RepairPreserve); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LoadVaultWithKey(path, pw); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRepairVault_Preserve(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "vault.enc")

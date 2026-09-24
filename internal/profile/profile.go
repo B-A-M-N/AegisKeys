@@ -3,9 +3,11 @@ package profile
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"aegiskeys/internal/fsutil"
@@ -322,6 +324,9 @@ func LoadStore(path string) (*Store, error) {
 		return nil, err
 	}
 	migrateStore(&s)
+	if err := s.Validate(); err != nil {
+		return nil, err
+	}
 	return &s, nil
 }
 
@@ -354,6 +359,63 @@ func migrateStore(s *Store) {
 		}
 		s.Version = 3
 	}
+}
+
+func (s *Store) Validate() error {
+	if s.Version != StoreVersion {
+		return fmt.Errorf("unsupported profile store version %d", s.Version)
+	}
+	seen := map[string]bool{}
+	for _, p := range s.Profiles {
+		name := strings.TrimSpace(p.Name)
+		if name == "" || seen[name] {
+			return fmt.Errorf("profile name is empty or duplicate: %q", p.Name)
+		}
+		seen[name] = true
+		if strings.TrimSpace(p.ProviderSlug) == "" || strings.TrimSpace(p.KeyID) == "" {
+			return fmt.Errorf("profile %q requires provider_slug and key_id", name)
+		}
+		if strings.ContainsAny(p.Target.Command, "\x00\r\n") {
+			return fmt.Errorf("profile %q command contains control characters", name)
+		}
+		for env := range p.Env {
+			if env == "" || strings.ContainsAny(env, "=\x00\r\n") {
+				return fmt.Errorf("profile %q has invalid env name %q", name, env)
+			}
+		}
+		for _, a := range p.Aliases {
+			if a == "" || seen[a] {
+				return fmt.Errorf("profile alias is empty or duplicate: %q", a)
+			}
+			seen[a] = true
+		}
+	}
+	return nil
+}
+
+func MutateStoreFile(path string, mutate func(*Store) error) error {
+	if mutate == nil {
+		return errors.New("nil profile mutation")
+	}
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return err
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	store, err := LoadStore(path)
+	if os.IsNotExist(err) {
+		store = NewStore()
+	} else if err != nil {
+		return err
+	}
+	if err := mutate(store); err != nil {
+		return err
+	}
+	return SaveStore(path, store)
 }
 
 func SaveStore(path string, s *Store) error {

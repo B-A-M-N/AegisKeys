@@ -2,6 +2,7 @@ package secret
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -449,6 +450,59 @@ func TestRekeyVault(t *testing.T) {
 	}
 	if got := v2.Get(v.Keys[0].ID); got == nil || got.Secret != "sk-test-abcdefghijklmnop" {
 		t.Errorf("secret did not survive rekey")
+	}
+}
+
+func TestRekeyVaultPreservesConcurrentMutation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "vault.enc")
+	if err := InitVault(path, "pw"); err != nil {
+		t.Fatal(err)
+	}
+	_, key, _ := LoadVaultWithKey(path, "pw")
+	mutated := false
+	rekeyLockAcquired = func() {
+		v, err := loadVaultByKey(path, key)
+		if err != nil {
+			panic(err)
+		}
+		if err := v.Add(SecretRecord{ID: "concurrent", Label: "concurrent"}); err != nil {
+			panic(err)
+		}
+		raw, err := v.Serialize()
+		if err != nil {
+			panic(err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			panic(err)
+		}
+		var env VaultEnvelope
+		if err := json.Unmarshal(data, &env); err != nil {
+			panic(err)
+		}
+		newEnv, err := SealWithKey(key, string(raw), env.Salt, env.KDFParams)
+		if err != nil {
+			panic(err)
+		}
+		if err := writeEnvelope(path, newEnv); err != nil {
+			panic(err)
+		}
+		mutated = true
+	}
+	defer func() { rekeyLockAcquired = nil }()
+	if _, err := RekeyVault(path, "pw", KDFParams{Time: 3}); err != nil {
+		t.Fatal(err)
+	}
+	if !mutated {
+		t.Fatal("fault injection did not run")
+	}
+	v, _, err := LoadVaultWithKey(path, "pw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Get("concurrent") == nil {
+		t.Fatal("rekey overwrote concurrent mutation")
 	}
 }
 

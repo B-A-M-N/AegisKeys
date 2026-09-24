@@ -41,9 +41,7 @@ var keyringEnableCmd = &cobra.Command{
 		if err := keychain.Store(resolvedConfigDir(), key); err != nil {
 			return err
 		}
-		cfg := loadAppConfig()
-		cfg.KeyringEnabled = true
-		if err := config.SaveConfig(config.ConfigPath(resolvedConfigDir()), cfg); err != nil {
+		if err := config.MutateConfigFile(config.ConfigPath(resolvedConfigDir()), func(latest *config.Config) error { latest.KeyringEnabled = true; return nil }); err != nil {
 			_ = keychain.Delete(resolvedConfigDir())
 			return err
 		}
@@ -91,14 +89,15 @@ var keyringRequiredCmd = &cobra.Command{
 			_ = keychain.Delete(resolvedConfigDir())
 			return err
 		}
-		cfg := loadAppConfig()
-		cfg.KeyringEnabled = true
-		if err := config.SaveConfig(config.ConfigPath(resolvedConfigDir()), cfg); err != nil {
+		if err := config.MutateConfigFile(config.ConfigPath(resolvedConfigDir()), func(latest *config.Config) error { latest.KeyringEnabled = true; return nil }); err != nil {
 			_ = keychain.Delete(resolvedConfigDir())
 			return err
 		}
 		if err := secret.MigrateToKeyringRequiredWithKey(path, pw, key); err != nil {
-			return fmt.Errorf("keyring enabled but password migration did not complete; the vault remains password-recoverable: %w", err)
+			_ = keychain.Delete(resolvedConfigDir())
+			_ = os.Remove(keyringRecoveryFile)
+			_ = config.MutateConfigFile(config.ConfigPath(resolvedConfigDir()), func(latest *config.Config) error { latest.KeyringEnabled = false; return nil })
+			return fmt.Errorf("keyring migration failed and partial state was rolled back: %w", err)
 		}
 		fmt.Println("Vault migrated to OS-keyring-only unlock. Password recovery is disabled.")
 		return nil
@@ -150,9 +149,7 @@ var keyringRecoverCmd = &cobra.Command{
 		if err := keychain.Store(resolvedConfigDir(), key); err != nil {
 			return err
 		}
-		cfg := loadAppConfig()
-		cfg.KeyringEnabled = true
-		if err := config.SaveConfig(config.ConfigPath(resolvedConfigDir()), cfg); err != nil {
+		if err := config.MutateConfigFile(config.ConfigPath(resolvedConfigDir()), func(latest *config.Config) error { latest.KeyringEnabled = true; return nil }); err != nil {
 			_ = keychain.Delete(resolvedConfigDir())
 			return err
 		}

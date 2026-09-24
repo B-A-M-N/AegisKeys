@@ -209,7 +209,7 @@ func (m *model) saveModelCatalog() tea.Cmd {
 	}
 
 	var count int
-	var err error
+	var mutateErr error
 	if m.modelCatalog.source == provider.ModelSourceDynamic {
 		models := make([]provider.ProviderModel, 0, len(selected))
 		for _, mod := range selected {
@@ -217,7 +217,7 @@ func (m *model) saveModelCatalog() tea.Cmd {
 			models = append(models, mod)
 		}
 		count = len(models)
-		err = m.providers.SetDynamicModels(slug, models)
+		mutateErr = provider.MutateRegistryFileWithFallback(config.ProvidersPath(m.configDir), m.providers, func(latest *provider.Registry) error { return latest.SetDynamicModels(slug, models) })
 	} else {
 		staticModels := make([]provider.ProviderModel, 0, len(selected))
 		for _, mod := range selected {
@@ -225,14 +225,10 @@ func (m *model) saveModelCatalog() tea.Cmd {
 			staticModels = append(staticModels, mod)
 		}
 		count = len(staticModels)
-		err = m.providers.SetStaticModels(slug, staticModels)
+		mutateErr = provider.MutateRegistryFileWithFallback(config.ProvidersPath(m.configDir), m.providers, func(latest *provider.Registry) error { return latest.SetStaticModels(slug, staticModels) })
 	}
-	if err != nil {
-		m.statusMsg = "Save failed: " + err.Error()
-		return nil
-	}
-	if err := m.providers.Save(config.ProvidersPath(m.configDir)); err != nil {
-		m.statusMsg = "Write failed: " + err.Error()
+	if mutateErr != nil {
+		m.statusMsg = "Write failed: " + mutateErr.Error()
 		return nil
 	}
 

@@ -116,7 +116,7 @@ func loadStores() (*provider.Registry, *profile.Store, error) {
 		reg = provider.NewRegistry()
 	}
 	if reg.MergeDefaults(provider.DefaultProviders()) {
-		_ = reg.Save(config.ProvidersPath(dir))
+		_ = provider.MutateRegistryFile(config.ProvidersPath(dir), func(latest *provider.Registry) error { latest.MergeDefaults(provider.DefaultProviders()); return nil })
 	}
 	store, err := profile.LoadStore(config.ProfilesPath(dir))
 	if err != nil && !os.IsNotExist(err) {

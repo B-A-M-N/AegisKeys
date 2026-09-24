@@ -359,6 +359,8 @@ func ClampKDFParams(p KDFParams) KDFParams {
 }
 
 // RekeyResult summarizes the outcome of a rekey operation for audit logging.
+var rekeyLockAcquired func()
+
 type RekeyResult struct {
 	Reason       string // why the rekey was requested
 	OldTime      uint32 // previous Argon2 time (0 if legacy)
@@ -380,6 +382,19 @@ type RekeyResult struct {
 // If the password does not match, it returns a decryption error without
 // touching the file. The caller is responsible for audit logging.
 func RekeyVault(path, password string, newParams KDFParams) (RekeyResult, error) {
+	var result RekeyResult
+	err := withVaultWriteLock(path, func() error {
+		if rekeyLockAcquired != nil {
+			rekeyLockAcquired()
+		}
+		var err error
+		result, err = rekeyVaultLocked(path, password, newParams)
+		return err
+	})
+	return result, err
+}
+
+func rekeyVaultLocked(path, password string, newParams KDFParams) (RekeyResult, error) {
 	result := RekeyResult{
 		NewTime:      newParams.Time,
 		NewMemoryKiB: newParams.MemoryKiB,

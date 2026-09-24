@@ -54,7 +54,7 @@ var profileCreateCmd = &cobra.Command{
 		if profCreateKey == "" {
 			return fmt.Errorf("--key is required")
 		}
-		reg, store, err := loadStores()
+		reg, _, err := loadStores()
 		if err != nil {
 			return err
 		}
@@ -151,10 +151,7 @@ var profileCreateCmd = &cobra.Command{
 			}
 		}
 
-		if err := store.Add(p); err != nil {
-			return err
-		}
-		if err := profile.SaveStore(config.ProfilesPath(resolvedConfigDir()), store); err != nil {
+		if err := profile.MutateStoreFile(config.ProfilesPath(resolvedConfigDir()), func(latest *profile.Store) error { return latest.Add(p) }); err != nil {
 			return err
 		}
 		audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{
@@ -278,17 +275,11 @@ var profileDeleteCmd = &cobra.Command{
 	Short:   "Delete a profile",
 	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		_, store, err := loadStores()
+		_, _, err := loadStores()
 		if err != nil {
 			return err
 		}
-		if store.Find(args[0]) == nil {
-			return fmt.Errorf("no profile named %q", args[0])
-		}
-		if err := store.Remove(args[0]); err != nil {
-			return err
-		}
-		if err := profile.SaveStore(config.ProfilesPath(resolvedConfigDir()), store); err != nil {
+		if err := profile.MutateStoreFile(config.ProfilesPath(resolvedConfigDir()), func(latest *profile.Store) error { return latest.Remove(args[0]) }); err != nil {
 			return err
 		}
 		audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{Event: "profile_deleted", Profile: args[0]})

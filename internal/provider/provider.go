@@ -1149,5 +1149,12 @@ var defaultProviders = []Provider{
 
 // DefaultProviders returns the curated list of known providers.
 func DefaultProviders() []Provider {
-	return defaultProviders
+	out := make([]Provider, len(defaultProviders))
+	for i, p := range defaultProviders {
+		out[i] = p
+		out[i].Setup = append([]SetupParam(nil), p.Setup...)
+		out[i].Tags = append([]string(nil), p.Tags...)
+		out[i].Models = append([]ProviderModel(nil), p.Models...)
+	}
+	return out
 }

@@ -10,9 +10,12 @@ import (
 
 	"aegiskeys/internal/audit"
 	"aegiskeys/internal/config"
+	"aegiskeys/internal/coordination"
 	"aegiskeys/internal/interactive"
+	"aegiskeys/internal/profile"
 	"aegiskeys/internal/provider"
 	"aegiskeys/internal/redact"
+	"aegiskeys/internal/secret"
 )
 
 var providerCmd = &cobra.Command{
@@ -169,10 +172,7 @@ var providerRefreshModelsCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		p.Models = models
-		p.Catalog.Source = "dynamic"
-		p.ModelPolicy.Source = provider.ModelSourceDynamic
-		if err := reg.Save(config.ProvidersPath(resolvedConfigDir())); err != nil {
+		if err := provider.MutateRegistryFile(config.ProvidersPath(resolvedConfigDir()), func(latest *provider.Registry) error { return latest.SetDynamicModels(p.Slug, models) }); err != nil {
 			return err
 		}
 		fmt.Printf("Refreshed %d model(s) for %s\n", len(models), p.Slug)
@@ -197,7 +197,7 @@ var providerAddCmd = &cobra.Command{
 			return fmt.Errorf("refusing to add provider: name or notes looks like a secret")
 		}
 
-		reg, _, err := loadStores()
+		_, _, err := loadStores()
 		if err != nil {
 			return err
 		}
@@ -217,11 +217,8 @@ var providerAddCmd = &cobra.Command{
 		if err := p.ValidateStrict(); err != nil {
 			return redactProviderError(err)
 		}
-		if err := reg.Add(p); err != nil {
-			return redactProviderError(err)
-		}
 		dir := resolvedConfigDir()
-		if err := reg.Save(config.ProvidersPath(dir)); err != nil {
+		if err := provider.MutateRegistryFile(config.ProvidersPath(dir), func(latest *provider.Registry) error { return latest.Add(p) }); err != nil {
 			return fmt.Errorf("save providers: %w", err)
 		}
 		audit.NewLogger(config.AuditPath(dir)).Log(audit.Event{Event: "provider_added", Provider: addSlug})
@@ -236,18 +233,35 @@ var providerRemoveCmd = &cobra.Command{
 	Short:   "Remove a provider",
 	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		reg, _, err := loadStores()
+		_, _, err := loadStores()
 		if err != nil {
 			return err
 		}
-		if err := reg.Remove(args[0]); err != nil {
-			return err
-		}
-		dir := resolvedConfigDir()
-		if err := reg.Save(config.ProvidersPath(dir)); err != nil {
+		err = coordination.WithConfigLock(resolvedConfigDir(), func() error {
+			v, err := loadVault()
+			if err != nil {
+				return err
+			}
+			defer secret.ZeroVault(v)
+			for _, k := range v.Keys {
+				if k.ProviderSlug == args[0] {
+					return fmt.Errorf("provider %q is used by key %q; delete or reassign it first", args[0], k.ID)
+				}
+			}
+			if s, e := profile.LoadStore(config.ProfilesPath(resolvedConfigDir())); e == nil {
+				for _, p := range s.Profiles {
+					if p.ProviderSlug == args[0] {
+						return fmt.Errorf("provider %q is used by profile %q; delete or reassign it first", args[0], p.Name)
+					}
+				}
+			}
+			dir := resolvedConfigDir()
+			return provider.MutateRegistryFile(config.ProvidersPath(dir), func(latest *provider.Registry) error { return latest.Remove(args[0]) })
+		})
+		if err != nil {
 			return fmt.Errorf("save providers: %w", err)
 		}
-		audit.NewLogger(config.AuditPath(dir)).Log(audit.Event{Event: "provider_removed", Provider: args[0]})
+		audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{Event: "provider_removed", Provider: args[0]})
 		fmt.Printf("Removed provider %s\n", args[0])
 		return nil
 	},
@@ -279,6 +293,8 @@ var providerEditCmd = &cobra.Command{
 		p.Name = firstNonEmpty(form.Name, p.Name)
 		p.BaseURL = firstNonEmpty(form.BaseURL, p.BaseURL)
 		p.EnvVar = firstNonEmpty(form.EnvVar, p.EnvVar)
+		p.Endpoints.BaseURL = p.BaseURL
+		p.Auth.EnvVar = p.EnvVar
 		p.AuthHeader = firstNonEmpty(form.AuthHeader, p.AuthHeader)
 		p.Notes = firstNonEmpty(form.Notes, p.Notes)
 		if form.Tags != "" {
@@ -289,7 +305,7 @@ var providerEditCmd = &cobra.Command{
 			return redactProviderError(err)
 		}
 		dir := resolvedConfigDir()
-		if err := reg.Save(config.ProvidersPath(dir)); err != nil {
+		if err := provider.MutateRegistryFile(config.ProvidersPath(dir), func(latest *provider.Registry) error { return latest.Update(args[0], *p) }); err != nil {
 			return fmt.Errorf("save providers: %w", err)
 		}
 		audit.NewLogger(config.AuditPath(dir)).Log(audit.Event{Event: "provider_edited", Provider: args[0]})

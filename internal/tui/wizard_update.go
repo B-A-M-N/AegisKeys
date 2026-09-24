@@ -123,7 +123,7 @@ func (m *model) repairProviderAsOpenAI(slug string) bool {
 		m.statusMsg = "Repair failed: " + err.Error()
 		return false
 	}
-	if err := m.providers.Save(config.ProvidersPath(m.configDir)); err != nil {
+	if err := provider.MutateRegistryFileWithFallback(config.ProvidersPath(m.configDir), m.providers, func(latest *provider.Registry) error { return latest.Update(slug, *p) }); err != nil {
 		m.statusMsg = "Save failed: " + err.Error()
 		return false
 	}
@@ -134,20 +134,16 @@ func (m *model) repairProviderAsOpenAI(slug string) bool {
 // restoreDefaultProviders merges the curated default provider list into the
 // registry, rescuing a user stranded with only custom/incompatible providers.
 func (m *model) restoreDefaultProviders() (tea.Model, tea.Cmd) {
-	changed := m.providers.MergeDefaults(provider.DefaultProviders())
-	if !changed {
-		m.statusMsg = "Default providers already present."
+	changed := false
+	if err := provider.MutateRegistryFileWithFallback(config.ProvidersPath(m.configDir), m.providers, func(latest *provider.Registry) error {
+		changed = latest.MergeDefaults(provider.DefaultProviders())
+		return nil
+	}); err != nil {
+		m.statusMsg = "Could not save providers: " + err.Error()
 		return m, nil
 	}
-	m.providers.NormalizeAll()
-	for i := range m.providers.Providers {
-		if err := m.providers.Providers[i].ValidateStrict(); err != nil {
-			m.statusMsg = "Provider validation failed: " + err.Error()
-			return m, nil
-		}
-	}
-	if err := m.providers.Save(config.ProvidersPath(m.configDir)); err != nil {
-		m.statusMsg = "Could not save providers: " + err.Error()
+	if !changed {
+		m.statusMsg = "Default providers already present."
 		return m, nil
 	}
 	m.statusMsg = "Restored missing default providers."
@@ -682,12 +678,7 @@ func (m *model) wizardSave() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if err := m.profiles.Add(p); err != nil {
-		m.wizard.errMsg = err.Error()
-		return m, nil
-	}
-
-	if err := profile.SaveStore(config.ProfilesPath(m.configDir), m.profiles); err != nil {
+	if err := profile.MutateStoreFile(config.ProfilesPath(m.configDir), func(latest *profile.Store) error { return latest.Add(p) }); err != nil {
 		m.wizard.errMsg = "save failed: " + err.Error()
 		return m, nil
 	}

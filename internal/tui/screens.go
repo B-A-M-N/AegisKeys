@@ -162,10 +162,12 @@ func (m *model) providersView(s *Styles) string {
 	b.WriteString(s.Muted.Render(fmtRow("NAME", "SLUG", "ENV VAR")))
 	b.WriteString("\n")
 
-	start, end := visibleWindow(len(m.providers.Providers), m.selected[screenProviders], m.screenListRows(1))
-	for i := start; i < end; i++ {
+	indices := m.filteredProviderIndices()
+	start, end := visibleWindow(len(indices), m.selected[screenProviders], m.screenListRows(1))
+	for row := start; row < end; row++ {
+		i := indices[row]
 		p := m.providers.Providers[i]
-		marker := m.selMarker(s, i)
+		marker := m.selMarker(s, row)
 		catalogBadge := ""
 		switch providerModelSource(p) {
 		case provider.ModelSourceDynamic:
@@ -177,7 +179,7 @@ func (m *model) providersView(s *Styles) string {
 		case provider.ModelSourceManual:
 			catalogBadge = s.Muted.Render(" [manual]")
 		}
-		if m.rowSelected(i) {
+		if m.rowSelected(row) {
 			b.WriteString(marker + " " + s.SelectedRow.Render(fmtRow(p.Name, p.Slug, p.CanonicalEnvVar())) + catalogBadge)
 		} else {
 			b.WriteString(marker + " " + s.Body.Render(truncate(p.Name, 22)) + " " +
@@ -186,7 +188,7 @@ func (m *model) providersView(s *Styles) string {
 		}
 		b.WriteString("\n")
 	}
-	if status := scrollStatus(start, end, len(m.providers.Providers)); status != "" {
+	if status := scrollStatus(start, end, len(indices)); status != "" {
 		b.WriteString(s.Muted.Render(status + " · ↑/↓ scroll · PgUp/PgDn jump"))
 		b.WriteString("\n")
 	}
@@ -208,15 +210,16 @@ func (m *model) keysView(s *Styles) string {
 		b.WriteString(s.Muted.Render("No keys. Press `z` to add one."))
 		return b.String()
 	}
-	start, end := visibleWindow(len(m.keys), m.selected[screenKeys], m.screenListRows(1))
-	for i := start; i < end; i++ {
-		k := m.keys[i]
-		marker := m.selMarker(s, i)
+	indices := m.filteredKeyIndices()
+	start, end := visibleWindow(len(indices), m.selected[screenKeys], m.screenListRows(1))
+	for row := start; row < end; row++ {
+		k := m.keys[indices[row]]
+		marker := m.selMarker(s, row)
 		rotBadge := ""
 		if m.keyNeedsRotation(k) {
 			rotBadge = " " + s.Warning.Render("⚠ rotate")
 		}
-		if m.rowSelected(i) {
+		if m.rowSelected(row) {
 			b.WriteString(fmt.Sprintf("%s %s%s\n", marker, s.SelectedRow.Render(fmt.Sprintf("%-20s %s  %s",
 				truncate(k.Label, 20), k.MaskedSecret, truncate(k.ProviderSlug, 16))), rotBadge))
 		} else {
@@ -226,7 +229,7 @@ func (m *model) keysView(s *Styles) string {
 				s.Muted.Render(truncate(k.ProviderSlug, 16)), rotBadge))
 		}
 	}
-	if status := scrollStatus(start, end, len(m.keys)); status != "" {
+	if status := scrollStatus(start, end, len(indices)); status != "" {
 		b.WriteString("\n")
 		b.WriteString(s.Muted.Render(status + " · ↑/↓ scroll · PgUp/PgDn jump"))
 	}
@@ -266,15 +269,20 @@ func (m *model) profilesView(s *Styles) string {
 		b.WriteString(s.Muted.Render("No profiles. Press `z` to create one."))
 		return b.String()
 	}
-	start, end := visibleWindow(len(m.profiles.Profiles), m.selected[screenProfiles], m.screenListRows(2))
-	for i := start; i < end; i++ {
-		p := m.profiles.Profiles[i]
-		marker := m.selMarker(s, i)
+	indices := m.filteredProfileIndices()
+	if len(indices) == 0 {
+		b.WriteString(s.Muted.Render("No profiles match the filter."))
+		return b.String()
+	}
+	start, end := visibleWindow(len(indices), m.selected[screenProfiles], m.screenListRows(2))
+	for row := start; row < end; row++ {
+		p := m.profiles.Profiles[indices[row]]
+		marker := m.selMarker(s, row)
 		provName := p.ProviderSlug
 		if pr := m.providers.Find(p.ProviderSlug); pr != nil {
 			provName = pr.Name
 		}
-		if m.rowSelected(i) {
+		if m.rowSelected(row) {
 			b.WriteString(fmt.Sprintf("%s %s\n", marker, s.SelectedRow.Render(truncate(p.Name, 24))))
 			b.WriteString(fmt.Sprintf("     %s  key: %s\n", s.Muted.Render(truncate(provName, 18)), s.KeyMasked.Render(p.KeyID)))
 		} else {
@@ -282,7 +290,7 @@ func (m *model) profilesView(s *Styles) string {
 			b.WriteString(fmt.Sprintf("     %s  key: %s\n", s.Muted.Render(truncate(provName, 18)), s.KeyMasked.Render(p.KeyID)))
 		}
 	}
-	if status := scrollStatus(start, end, len(m.profiles.Profiles)); status != "" {
+	if status := scrollStatus(start, end, len(indices)); status != "" {
 		b.WriteString("\n")
 		b.WriteString(s.Muted.Render(status + " · ↑/↓ scroll · PgUp/PgDn jump"))
 	}

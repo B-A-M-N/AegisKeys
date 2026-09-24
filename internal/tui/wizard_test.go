@@ -7,6 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"aegiskeys/internal/adapter"
+	"aegiskeys/internal/config"
 	"aegiskeys/internal/provider"
 	"aegiskeys/internal/secret"
 )
@@ -244,6 +245,9 @@ func TestWizard_RepairProviderAsOpenAI(t *testing.T) {
 		Name: "beepboop", Slug: "beepboop",
 		EnvVar: "BEEPBOOP_API_KEY", BaseURL: "https://api.beepboop.com/v1",
 	})
+	if err := m.providers.Save(config.ProvidersPath(m.configDir)); err != nil {
+		t.Fatal(err)
+	}
 
 	if ok := m.repairProviderAsOpenAI("beepboop"); !ok {
 		t.Fatalf("repair should succeed, status: %s", m.statusMsg)

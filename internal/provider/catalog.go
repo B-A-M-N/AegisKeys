@@ -5,14 +5,29 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	urlpkg "net/url"
 	"strings"
+	"time"
 )
 
 // RefreshModels fetches a provider's dynamic model catalog. It supports
 // OpenAI-compatible /models responses and the common Gemini models response.
 func RefreshModels(ctx context.Context, p Provider, apiKey string) ([]ProviderModel, error) {
 	p.Normalize()
-	url := p.Endpoints.ModelsURL
+	if err := p.ValidateStrict(); err != nil {
+		return nil, fmt.Errorf("provider metadata invalid: %w", err)
+	}
+	url := p.ModelRefreshURL()
+	if url == "" {
+		return nil, fmt.Errorf("provider %s has no models endpoint", p.Slug)
+	}
+	parsed, err := urlpkg.Parse(url)
+	if err != nil || parsed.Host == "" {
+		return nil, fmt.Errorf("invalid models endpoint")
+	}
+	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && isLoopbackModelHost(parsed.Hostname())) {
+		return nil, fmt.Errorf("models endpoint must use https unless loopback")
+	}
 	if url == "" {
 		url = p.Catalog.RefreshURL
 	}
@@ -36,7 +51,13 @@ func RefreshModels(ctx context.Context, p Provider, apiKey string) ([]ProviderMo
 	}
 	applyAuth(req, p, apiKey)
 
-	res, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(next *http.Request, via []*http.Request) error {
+		if len(via) >= 3 || next.URL.Host != parsed.Host {
+			return fmt.Errorf("blocked cross-origin models redirect")
+		}
+		return nil
+	}}
+	res, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -81,6 +102,10 @@ func RefreshModels(ctx context.Context, p Provider, apiKey string) ([]ProviderMo
 		return nil, fmt.Errorf("models endpoint returned no usable models")
 	}
 	return models, nil
+}
+
+func isLoopbackModelHost(host string) bool {
+	return host == "127.0.0.1" || host == "::1" || host == "localhost"
 }
 
 func applyAuth(req *http.Request, p Provider, apiKey string) {

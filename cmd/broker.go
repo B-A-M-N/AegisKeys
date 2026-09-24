@@ -630,17 +630,47 @@ var accessGrantCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		meta.Grants = append(meta.Grants, broker.AccessGrant{
-			ID: id, Name: accessGrantName, BindingID: binding.ID,
-			Client: broker.ClientConstraint{
-				UID: os.Getuid(), ExecutablePath: canonical, ExecutableHash: hash,
-			},
-			Capabilities: capabilities, Enabled: true, CreatedAt: now, ExpiresAt: expires,
+		grant := broker.AccessGrant{ID: id, Name: accessGrantName, BindingID: binding.ID, Client: broker.ClientConstraint{UID: os.Getuid(), ExecutablePath: canonical, ExecutableHash: hash}, Capabilities: capabilities, Enabled: false, CreatedAt: now, ExpiresAt: expires}
+		prior := rec.Policy
+		err = broker.TransactBrokerFile(path, func(latest *broker.File) error {
+			current := latest.FindBinding(binding.ID)
+			if current == nil || current.SecretID != binding.SecretID {
+				return fmt.Errorf("binding changed during grant setup")
+			}
+			latest.Grants = append(latest.Grants, grant)
+			if err := mutateVault(pw, secret.SessionMutation{Mutate: func(v *secret.Vault) error {
+				r := v.Get(binding.SecretID)
+				if r == nil {
+					return fmt.Errorf("binding target not found")
+				}
+				for _, c := range capabilities {
+					if c == broker.CapabilityResolve {
+						r.Policy.AllowBrokerResolve = true
+					}
+					if c == broker.CapabilityRotate {
+						r.Policy.AllowBrokerRotate = true
+					}
+				}
+				r.Policy.Version = 1
+				return nil
+			}}); err != nil {
+				return err
+			}
+			for i := range latest.Grants {
+				if latest.Grants[i].ID == id {
+					latest.Grants[i].Enabled = true
+					return nil
+				}
+			}
+			return fmt.Errorf("staged grant missing")
 		})
-		if err := broker.MutateBrokerFile(path, func(latest *broker.File) error {
-			latest.Grants = append(latest.Grants, meta.Grants[len(meta.Grants)-1])
-			return nil
-		}); err != nil {
+		if err != nil {
+			_ = mutateVault(pw, secret.SessionMutation{Mutate: func(v *secret.Vault) error {
+				if r := v.Get(binding.SecretID); r != nil {
+					r.Policy = prior
+				}
+				return nil
+			}})
 			return err
 		}
 		logAudit("credential_access_granted", "", map[string]string{"binding_id": binding.ID, "grant_id": id})

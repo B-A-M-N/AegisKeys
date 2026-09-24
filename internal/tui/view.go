@@ -491,6 +491,18 @@ func (m *model) drawModal(grid [][]gridCell, priority [][]int, r Rect, s *Styles
 	if m.modal == modalReplaceProfileKey {
 		title = "Replace API Key"
 	}
+	if m.modal == modalAccess {
+		title = "Add Access Binding"
+	}
+	if m.modal == modalAccessRebind {
+		title = "Rebind Access Binding"
+	}
+	if m.modal == modalAccessApprove {
+		title = "Approve Application Access"
+	}
+	if m.modal == modalAccessConfirm {
+		title = "Confirm Access Grant"
+	}
 	writeLine(grid, priority, r.X+2, r.Y+1, title, 22, contentLayer, w, h, false)
 
 	// Body.
@@ -500,6 +512,10 @@ func (m *model) drawModal(grid [][]gridCell, priority [][]int, r Rect, s *Styles
 		body = m.renderDetailModal()
 	case modalConfirmDelete:
 		body = m.renderDeleteModal()
+	case modalAccess, modalAccessRebind, modalAccessApprove:
+		body = m.modalPrompt + "\n" + m.addInput.View() + "\n\nEnter next/save | Esc cancel"
+	case modalAccessConfirm:
+		body = m.modalPrompt + "\n\nType y or Enter to activate. n/Esc cancels."
 	}
 	bodyLines := strings.Split(body, "\n")
 	for i, line := range bodyLines {
@@ -524,6 +540,10 @@ func (m *model) drawModal(grid [][]gridCell, priority [][]int, r Rect, s *Styles
 		inputView := stripANSI(m.addInput.View())
 		writeLine(grid, priority, r.X+2, r.Y+5, inputView, 23, contentLayer+1, w, h, false)
 		writeLine(grid, priority, r.X+2, r.Y+7, "Enter next/save  |  Esc cancel", 23, contentLayer, w, h, false)
+	}
+
+	if m.modal == modalAccessConfirm {
+		writeLine(grid, priority, r.X+2, r.Y+r.H-2, "y / Enter = activate     n / Esc = cancel", 23, contentLayer, w, h, false)
 	}
 
 	// Render the key add form with all fields visible.

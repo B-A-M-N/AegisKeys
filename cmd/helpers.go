@@ -12,6 +12,7 @@ import (
 	"golang.org/x/term"
 
 	"aegiskeys/internal/config"
+	"aegiskeys/internal/coordination"
 	"aegiskeys/internal/keychain"
 	"aegiskeys/internal/secret"
 )
@@ -134,12 +135,14 @@ func openVault(password string) (*secret.Vault, error) {
 // deletions or overwriting concurrent edits.
 func mutateVault(password string, mutation secret.SessionMutation) error {
 	vaultPath := config.VaultPath(resolvedConfigDir())
-	if cfg := loadAppConfig(); cfg.KeyringEnabled {
-		if key, err := keychain.Load(resolvedConfigDir()); err == nil {
-			return secret.MutateVaultSession(vaultPath, "", key, mutation)
+	return coordination.WithConfigLock(resolvedConfigDir(), func() error {
+		if cfg := loadAppConfig(); cfg.KeyringEnabled {
+			if key, err := keychain.Load(resolvedConfigDir()); err == nil {
+				return secret.MutateVaultSession(vaultPath, "", key, mutation)
+			}
 		}
-	}
-	return secret.MutateVaultSession(vaultPath, password, [32]byte{}, mutation)
+		return secret.MutateVaultSession(vaultPath, password, [32]byte{}, mutation)
+	})
 }
 
 // precheckVault authenticates and checks the latest state without writing.

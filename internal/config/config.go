@@ -2,7 +2,10 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"path/filepath"
+	"syscall"
 	"time"
 
 	"aegiskeys/internal/fsutil"
@@ -114,6 +117,34 @@ func LoadConfig(path string) (Config, error) {
 		return DefaultConfig(), err
 	}
 	return c.WithDefaults(), nil
+}
+
+func MutateConfigFile(path string, mutate func(*Config) error) error {
+	if mutate == nil {
+		return fmt.Errorf("nil config mutation")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return err
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	cfg, err := LoadConfig(path)
+	if os.IsNotExist(err) {
+		cfg = DefaultConfig()
+	} else if err != nil {
+		return err
+	}
+	if err := mutate(&cfg); err != nil {
+		return err
+	}
+	return SaveConfig(path, cfg)
 }
 
 func SaveConfig(path string, c Config) error {

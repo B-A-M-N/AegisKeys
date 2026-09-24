@@ -3,8 +3,10 @@ package provider
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"aegiskeys/internal/fsutil"
@@ -37,6 +39,17 @@ func LoadRegistry(path string) (*Registry, error) {
 	// or older TUI-created providers) get their structured fields and
 	// compatibility derived before any adapter filter sees them.
 	r.NormalizeAll()
+	seen := map[string]bool{}
+	for i := range r.Providers {
+		p := &r.Providers[i]
+		if err := p.ValidateStrict(); err != nil {
+			return nil, err
+		}
+		if seen[p.Slug] {
+			return nil, fmt.Errorf("duplicate provider slug %q", p.Slug)
+		}
+		seen[p.Slug] = true
+	}
 	return &r, nil
 }
 
@@ -98,6 +111,38 @@ func (r *Registry) Find(slug string) *Provider {
 }
 
 // SaveRegistry persists the registry to disk. Returns an error if the write fails.
+func lockFile(f *os.File) error { return syscall.Flock(int(f.Fd()), syscall.LOCK_EX) }
+func unlockFile(f *os.File)     { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }
+
+func MutateRegistryFile(path string, mutate func(*Registry) error) error {
+	return MutateRegistryFileWithFallback(path, NewRegistry(), mutate)
+}
+
+func MutateRegistryFileWithFallback(path string, fallback *Registry, mutate func(*Registry) error) error {
+	if mutate == nil {
+		return errors.New("nil provider mutation")
+	}
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err := lockFile(lock); err != nil {
+		return err
+	}
+	defer unlockFile(lock)
+	reg, err := LoadRegistry(path)
+	if os.IsNotExist(err) {
+		reg = fallback
+	} else if err != nil {
+		return err
+	}
+	if err := mutate(reg); err != nil {
+		return err
+	}
+	return reg.Save(path)
+}
+
 func SaveRegistry(path string, r *Registry) error {
 	return r.Save(path)
 }

@@ -16,6 +16,7 @@ import (
 	"aegiskeys/internal/audit"
 	"aegiskeys/internal/broker"
 	"aegiskeys/internal/config"
+	"aegiskeys/internal/coordination"
 	"aegiskeys/internal/keychain"
 	"aegiskeys/internal/profile"
 	"aegiskeys/internal/provider"
@@ -95,6 +96,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case accessApprovalPreparedMsg:
+		if msg.sessionGen != 0 && (msg.sessionGen != m.sessionGen || !m.unlocked || m.vaultSession == nil) {
+			return m, cleanupStagedAccessCmd(m.configDir, msg.pending.GrantID)
+		}
 		m.accessApproval = &msg.pending
 		m.modal = modalAccessConfirm
 		m.focus = focusModal
@@ -127,6 +131,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case doctorResultMsg:
+		if msg.sessionGen != m.sessionGen {
+			return m, nil
+		}
 		m.doctorResults = msg.results
 		m.doctorRan = true
 		if hasDoctorFailures(msg.results) {
@@ -137,6 +144,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case launchPreparedMsg:
+		if msg.sessionGen != m.sessionGen || !m.unlocked || m.vaultSession == nil {
+			if msg.cleanup != nil {
+				_ = msg.cleanup()
+			}
+			m.launchPhase = launchIdle
+			m.statusMsg = "Launch cancelled because the vault session changed."
+			return m, nil
+		}
 		if msg.err != nil {
 			m.launchPhase = launchIdle
 			m.statusMsg = "Launch failed: " + msg.err.Error()
@@ -153,6 +168,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			usageErr := error(nil)
 			cleanupErr := error(nil)
 			result := msg.execCommand.Result()
+			redactedResult := result
+			redactedResult.OutputTail = security.RedactWithSecrets(result.OutputTail, msg.secrets)
 			if msg.vault != nil && msg.vault.vault != nil && result.Started {
 				if saveErr := secret.MutateVaultWithKey(config.VaultPath(msg.configDir), msg.vault.key, func(latest *secret.Vault) error {
 					latest.Touch(msg.keyID)
@@ -167,7 +184,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return launchFinishedMsg{
 				err: err, usageErr: usageErr, cleanupErr: cleanupErr,
 				profile: msg.profile, command: msg.command, workingDir: msg.workingDir,
-				result: result,
+				result: redactedResult,
 			}
 		})
 
@@ -260,6 +277,26 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.logAudit("profile.edit", "", msg.name)
 		m.statusMsg = "Updated."
+		return m, nil
+
+	case scratchDeletedMsg:
+		if msg.err != nil {
+			m.statusMsg = "Scratchpad delete failed: " + msg.err.Error()
+			return m, nil
+		}
+		latest, err := secret.LoadVaultByKey(config.VaultPath(m.configDir), m.vaultSession.key)
+		if err != nil {
+			m.statusMsg = "Scratchpad deleted; vault refresh failed: " + err.Error()
+			return m, nil
+		}
+		m.vaultSession.vault = latest
+		m.keys = secret.ToMaskedList(latest.Keys)
+		if m.scratchListSelected > 0 {
+			m.scratchListSelected--
+		}
+		m.resetScratchSelection()
+		m.logAudit("scratch.delete", "", "")
+		m.statusMsg = "Scratchpad deleted."
 		return m, nil
 
 	case scratchSavedMsg:
@@ -717,14 +754,27 @@ func cleanupStaleStagedAccessCmd(configDir string, maxAge time.Duration) tea.Cmd
 	return func() tea.Msg {
 		cutoff := time.Now().Add(-maxAge)
 		err := broker.MutateBrokerFile(config.BrokerPath(configDir), func(meta *broker.File) error {
-			kept := meta.Grants[:0]
+			stale := make(map[string]bool)
 			for _, grant := range meta.Grants {
 				if !grant.Enabled && grant.CreatedAt.Before(cutoff) {
+					stale[grant.ID] = true
+				}
+			}
+			kept := meta.Grants[:0]
+			for _, grant := range meta.Grants {
+				if stale[grant.ID] {
 					continue
 				}
 				kept = append(kept, grant)
 			}
 			meta.Grants = kept
+			intents := meta.PendingApprovals[:0]
+			for _, intent := range meta.PendingApprovals {
+				if !stale[intent.GrantID] {
+					intents = append(intents, intent)
+				}
+			}
+			meta.PendingApprovals = intents
 			return nil
 		})
 		return accessMutationDoneMsg{err: err}
@@ -836,10 +886,13 @@ func (m *model) handleAccessApprovalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		return m, m.addInput.Focus()
 	}
 	bindingID := m.modalTarget
-	return m, prepareAccessApprovalCmd(m.configDir, bindingID, m.vaultSession.key, m.addValues[0], m.addValues[1], m.addValues[2])
+	return m, prepareAccessApprovalGenCmd(m.configDir, bindingID, m.sessionGen, m.vaultSession.key, m.addValues[0], m.addValues[1], m.addValues[2])
 }
 
 func prepareAccessApprovalCmd(configDir, bindingID string, vaultKey [32]byte, executable, capabilityText, expiresText string) tea.Cmd {
+	return prepareAccessApprovalGenCmd(configDir, bindingID, 0, vaultKey, executable, capabilityText, expiresText)
+}
+func prepareAccessApprovalGenCmd(configDir, bindingID string, sessionGen uint64, vaultKey [32]byte, executable, capabilityText, expiresText string) tea.Cmd {
 	return func() tea.Msg {
 		canonical, err := filepath.EvalSymlinks(executable)
 		if err != nil {
@@ -897,7 +950,7 @@ func prepareAccessApprovalCmd(configDir, bindingID string, vaultKey [32]byte, ex
 		if approvalCrashPoint != nil {
 			approvalCrashPoint("after-stage")
 		}
-		return accessApprovalPreparedMsg{pending: pending}
+		return accessApprovalPreparedMsg{pending: pending, sessionGen: sessionGen}
 	}
 }
 
@@ -930,7 +983,10 @@ func parseAccessCapabilities(text string) ([]broker.Capability, error) {
 	return out, nil
 }
 
-type accessApprovalPreparedMsg struct{ pending accessApprovalPending }
+type accessApprovalPreparedMsg struct {
+	pending    accessApprovalPending
+	sessionGen uint64
+}
 
 func (m *model) handleAccessConfirmKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch normalizedKey(k) {
@@ -988,6 +1044,25 @@ func commitStagedAccessCmd(configDir string, p accessApprovalPending) tea.Cmd {
 		prior := p.PriorPolicy
 		havePrior := true
 		err := broker.TransactBrokerFile(config.BrokerPath(configDir), func(meta *broker.File) error {
+			var binding *broker.CredentialBinding
+			for i := range meta.Bindings {
+				if meta.Bindings[i].ID == p.BindingID {
+					binding = &meta.Bindings[i]
+				}
+			}
+			if binding == nil || binding.SecretID != p.SecretID {
+				return fmt.Errorf("binding changed after approval was staged")
+			}
+			found := false
+			for i := range meta.Grants {
+				if meta.Grants[i].ID == p.GrantID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("staged grant missing")
+			}
 			// The vault mutation is inside the broker lock so another approval or
 			// rebind cannot interleave between policy change and activation.
 			if err := secret.MutateVaultSession(config.VaultPath(configDir), "", p.VaultKey, secret.SessionMutation{Mutate: func(v *secret.Vault) error {
@@ -1010,15 +1085,6 @@ func commitStagedAccessCmd(configDir string, p accessApprovalPending) tea.Cmd {
 			}
 			if approvalCrashPoint != nil {
 				approvalCrashPoint("after-policy")
-			}
-			var binding *broker.CredentialBinding
-			for i := range meta.Bindings {
-				if meta.Bindings[i].ID == p.BindingID {
-					binding = &meta.Bindings[i]
-				}
-			}
-			if binding == nil || binding.SecretID != p.SecretID {
-				return fmt.Errorf("binding changed after approval was staged")
 			}
 			for i := range meta.Grants {
 				if meta.Grants[i].ID == p.GrantID {
@@ -1592,7 +1658,7 @@ func (m *model) adjustSetting(dir int) (tea.Model, tea.Cmd) {
 		wasEnabled := m.cfg.EnableAnimations
 		m.cfg.EnableAnimations = !wasEnabled
 		m.statusMsg = fmt.Sprintf("Animations: %t", m.cfg.EnableAnimations)
-		if err := config.SaveConfig(config.ConfigPath(m.configDir), m.cfg); err != nil {
+		if err := m.persistSetting(5); err != nil {
 			m.statusMsg += " (save failed: " + err.Error() + ")"
 			return m, nil
 		}
@@ -1630,10 +1696,39 @@ func (m *model) adjustSetting(dir int) (tea.Model, tea.Cmd) {
 	default:
 		return m, nil
 	}
-	if err := config.SaveConfig(config.ConfigPath(m.configDir), m.cfg); err != nil {
+	if err := m.persistSetting(m.selected[screenSettings]); err != nil {
 		m.statusMsg += " (save failed: " + err.Error() + ")"
 	}
 	return m, nil
+}
+
+func (m *model) persistSetting(index int) error {
+	return config.MutateConfigFile(config.ConfigPath(m.configDir), func(latest *config.Config) error {
+		switch index {
+		case 0:
+			latest.AutoLock = m.cfg.AutoLock
+		case 1:
+			latest.Theme = m.cfg.Theme
+		case 2:
+			latest.DefaultProfile = m.cfg.DefaultProfile
+		case 3:
+			latest.ClipboardTTLSeconds = m.cfg.ClipboardTTLSeconds
+		case 4:
+			latest.AdapterVerifyTimeoutSeconds = m.cfg.AdapterVerifyTimeoutSeconds
+		case 5:
+			latest.EnableAnimations = m.cfg.EnableAnimations
+		case 6:
+			latest.EnableRiskyExport = m.cfg.EnableRiskyExport
+		case 7:
+			latest.RotationReminderDays = m.cfg.RotationReminderDays
+		case 8:
+			latest.RuntimePolicy = m.cfg.RuntimePolicy
+			if latest.RuntimePolicy == config.RuntimePolicyStrict {
+				latest.EnableRiskyExport = false
+			}
+		}
+		return nil
+	})
 }
 
 // handleHelpKey processes keys on the help screen.
@@ -1952,22 +2047,17 @@ func clampInt(v, min, max int) int {
 
 // deleteScratchPad removes the selected scratchpad from the vault.
 func (m *model) deleteScratchPad() tea.Cmd {
+	if m.vaultSession == nil {
+		return nil
+	}
 	sp := m.selectedScratchPad()
 	if sp == nil {
 		return nil
 	}
-	if err := m.vaultSession.vault.RemoveScratchPad(sp.ID); err != nil {
-		return nil
+	id, key, path := sp.ID, m.vaultSession.key, config.VaultPath(m.configDir)
+	return func() tea.Msg {
+		return scratchDeletedMsg{id: id, err: secret.MutateVaultWithKey(path, key, func(latest *secret.Vault) error { return latest.RemoveScratchPad(id) })}
 	}
-	if err := secret.SaveVaultWithKey(config.VaultPath(m.configDir), m.vaultSession.key, m.vaultSession.vault); err != nil {
-		return nil
-	}
-	if m.scratchListSelected > 0 {
-		m.scratchListSelected--
-	}
-	m.resetScratchSelection()
-	m.logAudit("scratch.delete", "", "")
-	return nil
 }
 
 // editScratchInExternalEditor opens the scratchpad body in $EDITOR.
@@ -1986,6 +2076,10 @@ func (m *model) editScratchInExternalEditor() tea.Cmd {
 	}
 }
 
+type scratchDeletedMsg struct {
+	id  string
+	err error
+}
 type scratchExternalEditedMsg struct {
 	body string
 }
@@ -2082,17 +2176,45 @@ func (m *model) clampSelected(i int) int {
 	return i
 }
 
+func (m *model) filteredProviderIndices() []int {
+	out := []int{}
+	for i, p := range m.providers.Providers {
+		if m.filterText == "" || strings.Contains(strings.ToLower(p.Name+" "+p.Slug+" "+p.CanonicalEnvVar()), strings.ToLower(m.filterText)) {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+func (m *model) filteredKeyIndices() []int {
+	out := []int{}
+	for i, k := range m.keys {
+		if m.filterText == "" || strings.Contains(strings.ToLower(k.Label+" "+k.ProviderSlug+" "+k.ID), strings.ToLower(m.filterText)) {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+func (m *model) filteredProfileIndices() []int {
+	out := []int{}
+	for i, p := range m.profiles.Profiles {
+		if m.filterText == "" || strings.Contains(strings.ToLower(p.Name+" "+p.ProviderSlug+" "+p.KeyID), strings.ToLower(m.filterText)) {
+			out = append(out, i)
+		}
+	}
+	return out
+}
+
 // itemCount returns the number of selectable rows for a screen.
 func (m *model) itemCount(s screen) int {
 	switch s {
 	case screenDashboard:
 		return dashboardActionCount()
 	case screenProviders:
-		return len(m.providers.Providers)
+		return len(m.filteredProviderIndices())
 	case screenKeys:
-		return len(m.keys)
+		return len(m.filteredKeyIndices())
 	case screenProfiles:
-		return len(m.profiles.Profiles)
+		return len(m.filteredProfileIndices())
 	case screenDoctor:
 		return len(m.doctorResults)
 	case screenAudit:
@@ -2260,23 +2382,29 @@ func (m *model) editPlaceholder() string {
 }
 
 func (m *model) selectedProvider() *provider.Provider {
-	if m.selected[screenProviders] < len(m.providers.Providers) {
-		return &m.providers.Providers[m.selected[screenProviders]]
+	idx := m.filteredProviderIndices()
+	sel := m.selected[screenProviders]
+	if sel >= 0 && sel < len(idx) {
+		return &m.providers.Providers[idx[sel]]
 	}
 	return nil
 }
 
 func (m *model) selectedProfile() *profile.Profile {
-	if m.selected[screenProfiles] < len(m.profiles.Profiles) {
-		return &m.profiles.Profiles[m.selected[screenProfiles]]
+	idx := m.filteredProfileIndices()
+	sel := m.selected[screenProfiles]
+	if sel >= 0 && sel < len(idx) {
+		return &m.profiles.Profiles[idx[sel]]
 	}
 	return nil
 }
 
 // selectedKey returns the currently selected key from the masked list.
 func (m *model) selectedKey() *secret.MaskedKeyItem {
-	if m.selected[screenKeys] < len(m.keys) {
-		return &m.keys[m.selected[screenKeys]]
+	idx := m.filteredKeyIndices()
+	sel := m.selected[screenKeys]
+	if sel >= 0 && sel < len(idx) {
+		return &m.keys[idx[sel]]
 	}
 	return nil
 }
@@ -2363,9 +2491,8 @@ func (m *model) startDelete() (tea.Model, tea.Cmd) {
 	m.deleteConfirmed = false
 	switch m.active {
 	case screenProviders:
-		// If the provider has referencing keys, open straight into the
-		// cascade-delete confirmation (key count shown) instead of a generic
-		// "are you sure". No keys → fall through to the normal confirm prompt.
+		// Referencing keys must be deleted or reassigned first. Cross-file
+		// provider+vault cascade deletion has no single durable transaction.
 		var refCount int
 		if m.vaultSession != nil && m.vaultSession.vault != nil {
 			for _, k := range m.vaultSession.vault.Keys {
@@ -2375,8 +2502,7 @@ func (m *model) startDelete() (tea.Model, tea.Cmd) {
 			}
 		}
 		if refCount > 0 {
-			m.deleteConfirmWait = true
-			m.deleteBlockReason = fmt.Sprintf("Provider %q is used by %d key(s). Delete provider and its keys?", m.modalTarget, refCount)
+			m.deleteBlockReason = fmt.Sprintf("Provider %q is used by %d key(s). Delete or reassign those keys first.", m.modalTarget, refCount)
 			return m, nil
 		}
 		m.modalPrompt = "Delete provider " + m.modalTarget + "?"
@@ -2404,18 +2530,19 @@ func (m *model) startDelete() (tea.Model, tea.Cmd) {
 
 // selectedItemKey returns a stable key for the selected item.
 func (m *model) selectedItemKey() string {
+	sel := m.selected[m.active]
 	switch m.active {
 	case screenProviders:
-		if m.selected[screenProviders] < len(m.providers.Providers) {
-			return m.providers.Providers[m.selected[screenProviders]].Slug
+		if idx := m.filteredProviderIndices(); sel >= 0 && sel < len(idx) {
+			return m.providers.Providers[idx[sel]].Slug
 		}
 	case screenKeys:
-		if m.selected[screenKeys] < len(m.keys) {
-			return m.keys[m.selected[screenKeys]].ID
+		if idx := m.filteredKeyIndices(); sel >= 0 && sel < len(idx) {
+			return m.keys[idx[sel]].ID
 		}
 	case screenProfiles:
-		if m.selected[screenProfiles] < len(m.profiles.Profiles) {
-			return m.profiles.Profiles[m.selected[screenProfiles]].Name
+		if idx := m.filteredProfileIndices(); sel >= 0 && sel < len(idx) {
+			return m.profiles.Profiles[idx[sel]].Name
 		}
 	}
 	return ""
@@ -2822,23 +2949,19 @@ func (m *model) commitAdd() (tea.Model, tea.Cmd) {
 			m.statusMsg = "Provider invalid: " + vErr.Error()
 			return m, nil
 		}
-		err = m.providers.Add(p)
-		if err == nil {
-			err = m.providers.Save(config.ProvidersPath(m.configDir))
-		}
+		err = coordination.WithConfigLock(m.configDir, func() error {
+			return provider.MutateRegistryFile(config.ProvidersPath(m.configDir), func(latest *provider.Registry) error { return latest.Add(p) })
+		})
 		if err == nil {
 			m.logAudit("provider.add", p.Slug, "")
 		}
 	case screenProfiles:
 		name, provSlug, keyID := vals[0], vals[1], vals[2]
-		err = m.profiles.Add(profile.Profile{
-			Name:         name,
-			ProviderSlug: sanitizeSlug(provSlug),
-			KeyID:        keyID,
+		err = coordination.WithConfigLock(m.configDir, func() error {
+			return profile.MutateStoreFile(config.ProfilesPath(m.configDir), func(latest *profile.Store) error {
+				return latest.Add(profile.Profile{Name: name, ProviderSlug: sanitizeSlug(provSlug), KeyID: keyID})
+			})
 		})
-		if err == nil {
-			err = profile.SaveStore(config.ProfilesPath(m.configDir), m.profiles)
-		}
 		if err == nil {
 			m.logAudit("profile.add", "", name)
 		}
@@ -2864,29 +2987,46 @@ func (m *model) applyDelete() bool {
 	m.deleteBlockReason = ""
 	switch m.active {
 	case screenProviders:
-		// Find keys that reference this provider.
-		var keyIDs []string
-		if m.vaultSession != nil && m.vaultSession.vault != nil {
-			for _, k := range m.vaultSession.vault.Keys {
-				if k.ProviderSlug == m.modalTarget {
-					keyIDs = append(keyIDs, k.ID)
+		blocked := false
+		err := coordination.WithConfigLock(m.configDir, func() error {
+			if m.vaultSession != nil {
+				latest, err := secret.LoadVaultByKey(config.VaultPath(m.configDir), m.vaultSession.key)
+				if err != nil {
+					return err
+				}
+				for _, k := range latest.Keys {
+					if k.ProviderSlug == m.modalTarget {
+						blocked = true
+						return nil
+					}
 				}
 			}
-		}
-		// If keys reference this provider and the user hasn't confirmed the
-		// cascade yet, prompt them. A hard block frustrates cleanup; instead
-		// we warn and let them delete the provider and its keys together.
-		if len(keyIDs) > 0 && !m.deleteConfirmed {
-			m.deleteConfirmWait = true
-			m.deleteBlockReason = fmt.Sprintf("Provider %q is used by %d key(s). Delete provider and its keys?", m.modalTarget, len(keyIDs))
+			profiles, err := profile.LoadStore(config.ProfilesPath(m.configDir))
+			if err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			for _, p := range profiles.Profiles {
+				if p.ProviderSlug == m.modalTarget {
+					blocked = true
+					return nil
+				}
+			}
+			return provider.MutateRegistryFile(config.ProvidersPath(m.configDir), func(reg *provider.Registry) error {
+				if reg.Find(m.modalTarget) == nil {
+					return fmt.Errorf("provider not found")
+				}
+				return reg.Remove(m.modalTarget)
+			})
+		})
+		if err != nil {
+			m.statusMsg = "Provider delete failed: " + err.Error()
 			return true
 		}
-		// Confirmed (or no refs): cascade-delete the provider and its keys.
-		for _, id := range keyIDs {
-			_ = m.vaultSession.vault.Remove(id)
+		if blocked {
+			m.deleteBlockReason = fmt.Sprintf("Provider %q is referenced by a key or profile; delete or reassign it first", m.modalTarget)
+			return true
 		}
 		_ = m.providers.Remove(m.modalTarget)
-		_ = m.providers.Save(config.ProvidersPath(m.configDir))
 		if m.vaultSession != nil && m.vaultSession.vault != nil {
 			m.keys = secret.ToMaskedList(m.vaultSession.vault.Keys)
 		}
@@ -2895,8 +3035,10 @@ func (m *model) applyDelete() bool {
 		m.deleteConfirmWait = false
 		m.deleteConfirmed = false
 	case screenProfiles:
-		_ = m.profiles.Remove(m.modalTarget)
-		_ = profile.SaveStore(config.ProfilesPath(m.configDir), m.profiles)
+		if err := profile.MutateStoreFile(config.ProfilesPath(m.configDir), func(latest *profile.Store) error { return latest.Remove(m.modalTarget) }); err != nil {
+			m.statusMsg = "Profile delete failed: " + err.Error()
+			return true
+		}
 		m.logAudit("profile.delete", "", m.modalTarget)
 		m.statusMsg = "Profile deleted."
 	case screenKeys:
@@ -3061,15 +3203,10 @@ func (m *model) commitRotate() (tea.Model, tea.Cmd) {
 				m.statusMsg = "API key replacement failed: " + err.Error()
 				return m, nil
 			}
-		} else if err := m.vaultSession.vault.Add(secret.SecretRecord{
-			ID:           m.modalTarget,
-			Kind:         secret.SecretAPIKey,
-			ProviderSlug: p.ProviderSlug,
-			Label:        p.Name + " API key",
-			Secret:       newSecret,
-			Policy:       secret.DefaultSecretPolicy(secret.SecretAPIKey),
-		}); err != nil {
-			m.statusMsg = "API key replacement failed: " + err.Error()
+		} else {
+			m.addInput.Reset()
+			m.addInput.EchoMode = textinput.EchoNormal
+			m.statusMsg = "Referenced vault key is missing; add it through the key flow first."
 			return m, nil
 		}
 	} else {
@@ -3081,14 +3218,7 @@ func (m *model) commitRotate() (tea.Model, tea.Cmd) {
 		if profileReplacement {
 			latestRec := latest.Get(m.modalTarget)
 			if latestRec == nil {
-				return latest.Add(secret.SecretRecord{
-					ID:           m.modalTarget,
-					Kind:         secret.SecretAPIKey,
-					ProviderSlug: providerSlug,
-					Label:        profileName + " API key",
-					Secret:       newSecret,
-					Policy:       secret.DefaultSecretPolicy(secret.SecretAPIKey),
-				})
+				return fmt.Errorf("referenced vault key is missing")
 			}
 		}
 		return latest.Rotate(m.modalTarget, newSecret)
@@ -3189,8 +3319,17 @@ func (m *model) commitKeyAdd() (tea.Model, tea.Cmd) {
 			}
 		}
 	}
-	if err := secret.MutateVaultWithKey(config.VaultPath(m.configDir), m.vaultSession.key, func(latest *secret.Vault) error {
-		return latest.Add(rec)
+	if err := coordination.WithConfigLock(m.configDir, func() error {
+		if providerSlug != "default" {
+			latest, err := provider.LoadRegistry(config.ProvidersPath(m.configDir))
+			if err != nil {
+				return err
+			}
+			if latest.Find(providerSlug) == nil {
+				return fmt.Errorf("provider %q does not exist", providerSlug)
+			}
+		}
+		return secret.MutateVaultWithKey(config.VaultPath(m.configDir), m.vaultSession.key, func(latest *secret.Vault) error { return latest.Add(rec) })
 	}); err != nil {
 		m.statusMsg = "Key add failed: " + err.Error()
 		return m, nil
@@ -3238,6 +3377,7 @@ func (m *model) commitEdit() (tea.Model, tea.Cmd) {
 	case screenProviders:
 		p := m.selectedProvider()
 		if p != nil && len(vals) >= 4 {
+			oldSlug := p.Slug
 			p.Name = vals[0]
 			p.Slug = sanitizeSlug(vals[1])
 			p.EnvVar = vals[2]
@@ -3248,7 +3388,7 @@ func (m *model) commitEdit() (tea.Model, tea.Cmd) {
 				m.closeEditModal()
 				return m, nil
 			}
-			err = m.providers.Save(config.ProvidersPath(m.configDir))
+			err = provider.MutateRegistryFile(config.ProvidersPath(m.configDir), func(latest *provider.Registry) error { return latest.Update(oldSlug, *p) })
 			if err == nil {
 				m.logAudit("provider.edit", p.Slug, "")
 			}
@@ -3315,69 +3455,51 @@ func (m *model) commitProfileEdit(vals []string) (tea.Model, tea.Cmd) {
 		m.statusMsg = "Unknown provider: " + sanitizeSlug(vals[1])
 		return m, nil
 	}
-	stores, err := profile.CloneStore(m.profiles)
-	if err != nil {
-		m.statusMsg = "Profile clone failed: " + err.Error()
-		return m, nil
-	}
-	vault, err := secret.CloneVault(m.vaultSession.vault)
-	if err != nil {
-		m.statusMsg = "Vault clone failed: " + err.Error()
-		return m, nil
-	}
-	updated := stores.Find(p.Name)
-	if updated == nil {
-		m.statusMsg = "Profile no longer exists."
-		return m, nil
-	}
-	key := vault.Get(vals[2])
-	createdKey := false
-	if key == nil {
-		if strings.TrimSpace(vals[2]) == "" {
-			m.statusMsg = "A key ID or API key is required."
-			return m, nil
-		}
-		if err := vault.Add(secret.SecretRecord{
-			Kind:         secret.SecretAPIKey,
-			ProviderSlug: prov.Slug,
-			Label:        vals[0],
-			Secret:       vals[2],
-		}); err != nil {
-			m.statusMsg = "Key add failed: " + err.Error()
-			return m, nil
-		}
-		key = &vault.Keys[len(vault.Keys)-1]
-		createdKey = true
-	}
-	if !provider.CredentialCompatible(prov.Slug, key.ProviderSlug) {
-		m.statusMsg = fmt.Sprintf("Key provider %q does not match profile provider %q", key.ProviderSlug, prov.Slug)
-		return m, nil
-	}
-	updated.Name = vals[0]
-	updated.ProviderSlug = prov.Slug
-	updated.KeyID = key.ID
-	if a, ok := m.adapterRegistry.Get(updated.TargetApp()); ok {
-		updated.Target.RenderMode = adapter.RenderModeForContract(a.Contract())
-	}
+	oldName, newName, keySelector, providerSlug := p.Name, vals[0], vals[2], prov.Slug
+	configDir, keyMaterial := m.configDir, m.vaultSession.key
 	m.modal = modalNone
 	m.focus = focusContent
 	m.addInput.Blur()
 	m.addValues = nil
 	m.statusMsg = "Saving profile..."
-	configDir, keyMaterial, name := m.configDir, m.vaultSession.key, updated.Name
 	return m, func() tea.Msg {
-		if createdKey {
-			if err := secret.SaveVaultWithKey(config.VaultPath(configDir), keyMaterial, vault); err != nil {
-				return profileEditSavedMsg{err: err}
+		err := secret.MutateVaultWithKey(config.VaultPath(configDir), keyMaterial, func(latest *secret.Vault) error {
+			rec := latest.Get(keySelector)
+			if rec == nil {
+				return fmt.Errorf("key %q does not exist; add it through the key flow before editing the profile", keySelector)
 			}
-		}
-		if err := profile.SaveStore(config.ProfilesPath(configDir), stores); err != nil {
+			if rec.Archived {
+				return fmt.Errorf("key %q is archived", keySelector)
+			}
+			if !provider.CredentialCompatible(providerSlug, rec.ProviderSlug) {
+				return fmt.Errorf("key provider %q does not match profile provider %q", rec.ProviderSlug, providerSlug)
+			}
+			keySelector = rec.ID
+			return nil
+		})
+		if err != nil {
 			return profileEditSavedMsg{err: err}
 		}
-		if !createdKey {
-			vault = nil
+		err = profile.MutateStoreFile(config.ProfilesPath(configDir), func(latest *profile.Store) error {
+			updated := latest.Find(oldName)
+			if updated == nil {
+				return fmt.Errorf("profile no longer exists")
+			}
+			if other := latest.Find(newName); other != nil && other.Name != oldName {
+				return fmt.Errorf("profile name %q already exists", newName)
+			}
+			updated.Name, updated.ProviderSlug, updated.KeyID = newName, providerSlug, keySelector
+			if a, ok := m.adapterRegistry.Get(updated.TargetApp()); ok {
+				updated.Target.RenderMode = adapter.RenderModeForContract(a.Contract())
+			}
+			return nil
+		})
+		if err != nil {
+			return profileEditSavedMsg{err: err}
 		}
-		return profileEditSavedMsg{profiles: stores, vault: vault, name: name}
+		stores, _ := profile.LoadStore(config.ProfilesPath(configDir))
+		vault, _ := secret.LoadVaultByKey(config.VaultPath(configDir), keyMaterial)
+		return profileEditSavedMsg{profiles: stores, vault: vault, name: newName}
 	}
 }
 
@@ -3601,12 +3723,22 @@ func unlockResult(configDir string, v *secret.Vault, key [32]byte) unlockResultM
 // checks when the vault is sealed, full unlocked checks otherwise. This
 // is the single entry point the TUI uses.
 func (m *model) runDoctor() tea.Cmd {
-	return func() tea.Msg {
-		if m.unlocked && m.vaultSession != nil && m.vaultSession.vault != nil {
-			results := security.RunDoctorUnlocked(m.configDir, m.vaultSession.vault, m.profiles)
-			return doctorResultMsg{results: results}
+	generation := m.sessionGen
+	var vaultCopy *secret.Vault
+	var profilesCopy *profile.Store
+	if m.unlocked && m.vaultSession != nil && m.vaultSession.vault != nil {
+		var err error
+		vaultCopy, err = secret.CloneVault(m.vaultSession.vault)
+		if err != nil {
+			return func() tea.Msg { return doctorResultMsg{sessionGen: generation} }
 		}
-		return doctorResultMsg{results: security.RunDoctor(m.configDir)}
+		profilesCopy, _ = profile.CloneStore(m.profiles)
+	}
+	return func() tea.Msg {
+		if vaultCopy != nil {
+			return doctorResultMsg{sessionGen: generation, results: security.RunDoctorUnlocked(m.configDir, vaultCopy, profilesCopy)}
+		}
+		return doctorResultMsg{sessionGen: generation, results: security.RunDoctor(m.configDir)}
 	}
 }
 
@@ -3647,6 +3779,11 @@ func (m *model) prepareTUILaunch(commandLine string) tea.Cmd {
 	registry := m.adapterRegistry
 	providersSnapshot := &provider.Registry{Providers: append([]provider.Provider(nil), m.providers.Providers...)}
 	providerSnapshot := *prov
+	sessionGen := m.sessionGen
+	secrets := []string{key.Secret}
+	for _, component := range key.ExtraSecrets {
+		secrets = append(secrets, component.Secret)
+	}
 	inheritEnv := append([]string(nil), m.cfg.InheritEnv...)
 	fields, parseErr := splitCommandLine(commandLine)
 	if parseErr != nil {
@@ -3699,8 +3836,7 @@ func (m *model) prepareTUILaunch(commandLine string) tea.Cmd {
 		interactiveExec.AuditLogger = audit.NewLogger(config.AuditPath(configDir))
 		interactiveExec.Profile = prof.Name
 		interactiveExec.Provider = strategy.Support.ID
-		return launchPreparedMsg{
-			profile: prof.Name, execCommand: interactiveExec, cleanup: prepared.Cleanup,
+		return launchPreparedMsg{sessionGen: sessionGen, secrets: secrets, profile: prof.Name, execCommand: interactiveExec, cleanup: prepared.Cleanup,
 			vault: vault, configDir: configDir, keyID: prof.KeyID,
 			command: prepared.Cmd.Path, workingDir: workingDir,
 		}

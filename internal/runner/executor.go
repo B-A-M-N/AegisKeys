@@ -12,6 +12,7 @@ import (
 	"aegiskeys/internal/adapter"
 	"aegiskeys/internal/fsutil"
 	"aegiskeys/internal/profile"
+	"aegiskeys/internal/provider"
 	"aegiskeys/internal/proxy"
 )
 
@@ -47,41 +48,26 @@ func (e *LaunchExecutor) Execute(
 		Args:    plan.Args,
 	}
 
-	// 1. Materialize config files.
-	if len(plan.Files) > 0 {
-		fm := e.FileMaterializer
-		fm.OverwritePolicy = policy.OverwritePolicy
-		fm.BackupDir = policy.BackupDir
-		if fm.OverwritePolicy == "" {
-			fm.OverwritePolicy = "backup"
-		}
-		if fm.BackupDir == "" {
-			fm.BackupDir = filepath.Join(e.ConfigDir, "tmp", "backups")
-		}
-
-		inputs := make([]FileMaterializerInput, len(plan.Files))
-		for i, f := range plan.Files {
-			inputs[i] = FileMaterializerInput{
-				Path:    f.Path,
-				Content: f.Content,
-			}
-		}
-		written, err := fm.MaterialFiles(inputs)
-		if err != nil {
-			return result, fmt.Errorf("materialize files: %w", err)
-		}
-		result.FilesWritten = written
-	}
-
-	// 2. Run the command via the strategy-driven runner.
+	// Strategy execution applies and restores file writes atomically; do not
+	// materialize here first and leave side effects when validation fails.
 	strategy := &adapter.LaunchStrategy{
 		Plan:    *plan,
 		Support: adapter.AppSupportContract{ID: "executor", CanLaunch: true},
 	}
-	result.ExitErr = Run(context.Background(), strategy, RunOptions{
-		ConfigDir:    e.ConfigDir,
-		InheritStdio: true,
-	})
+	if err := adapter.ValidateLaunchStrategyForMode(strategy, profile.Profile{}, provider.Provider{}, nil, adapter.DefaultSecurityPolicy(), adapter.ResolveRun); err != nil {
+		return result, err
+	}
+	prepared, err := PrepareCommandWithCleanup(context.Background(), strategy, RunOptions{ConfigDir: e.ConfigDir, InheritStdio: true})
+	if err != nil {
+		return result, err
+	}
+	result.ExitErr = func() error {
+		runErr := prepared.Cmd.Run()
+		if prepared.Cleanup != nil {
+			_ = prepared.Cleanup()
+		}
+		return runErr
+	}()
 	return result, nil
 }
 

@@ -377,7 +377,11 @@ func PrepareCommandWithCleanup(ctx context.Context, strategy *adapter.LaunchStra
 		return nil, errors.New("nil launch strategy")
 	}
 	if strategy.Support.ID == "explicit-launch" {
-		if err := adapter.ValidateExplicitLaunch(strategy, nil); err != nil {
+		raw := make([]string, 0, len(strategy.Plan.Env))
+		for _, value := range strategy.Plan.Env {
+			raw = append(raw, value)
+		}
+		if err := adapter.ValidateExplicitLaunch(strategy, raw); err != nil {
 			return nil, err
 		}
 	} else if !strategy.Validated {
