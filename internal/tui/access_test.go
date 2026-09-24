@@ -52,13 +52,12 @@ func TestAccessApprovalStagesThenActivatesAfterConfirmedPolicyChange(t *testing.
 	}
 }
 
-func TestAccessApprovalMissingKeyRemovesStagedGrant(t *testing.T) {
+func TestPrepareRejectsMissingKeyBeforeStaging(t *testing.T) {
 	dir := t.TempDir()
-	vaultPath := config.VaultPath(dir)
-	if err := secret.InitVault(vaultPath, "pw"); err != nil {
+	if err := secret.InitVault(config.VaultPath(dir), "pw"); err != nil {
 		t.Fatal(err)
 	}
-	_, key, _ := secret.LoadVaultWithKey(vaultPath, "pw")
+	_, key, _ := secret.LoadVaultWithKey(config.VaultPath(dir), "pw")
 	meta := broker.NewFile()
 	meta.Bindings = append(meta.Bindings, broker.CredentialBinding{ID: "binding_1", Name: "app/missing", SecretID: "key_missing"})
 	if err := broker.SaveBrokerFile(config.BrokerPath(dir), meta); err != nil {
@@ -66,14 +65,60 @@ func TestAccessApprovalMissingKeyRemovesStagedGrant(t *testing.T) {
 	}
 	exe := filepath.Join(dir, "app")
 	_ = os.WriteFile(exe, []byte("#!/bin/sh\n"), 0700)
-	prepared := prepareAccessApprovalCmd(dir, "binding_1", key, exe, "resolve", time.Now().Add(time.Hour).Format(time.RFC3339))().(accessApprovalPreparedMsg)
-	done := commitStagedAccessCmd(dir, prepared.pending)().(accessMutationDoneMsg)
-	if done.err == nil {
-		t.Fatal("missing key accepted")
+	msg := prepareAccessApprovalCmd(dir, "binding_1", key, exe, "resolve", time.Now().Add(time.Hour).Format(time.RFC3339))()
+	if _, ok := msg.(accessApprovalPreparedMsg); ok {
+		t.Fatal("missing key was staged")
 	}
-	final, _ := broker.LoadBrokerFile(config.BrokerPath(dir))
-	if len(final.Grants) != 0 {
-		t.Fatal("failed approval left staged grant")
+	got, _ := broker.LoadBrokerFile(config.BrokerPath(dir))
+	if len(got.Grants) != 0 || len(got.PendingApprovals) != 0 {
+		t.Fatal("missing-key preparation left authorization state")
+	}
+}
+
+func TestRecoverPendingApprovalRollsBackIncompleteAndFinalizesCommitted(t *testing.T) {
+	dir := t.TempDir()
+	vaultPath := config.VaultPath(dir)
+	if err := secret.InitVault(vaultPath, "pw"); err != nil {
+		t.Fatal(err)
+	}
+	_, key, _ := secret.LoadVaultWithKey(vaultPath, "pw")
+	if err := secret.MutateVaultWithKey(vaultPath, key, func(v *secret.Vault) error {
+		return v.Add(secret.SecretRecord{ID: "k1", Label: "One", Secret: "s1", Policy: secret.SecretPolicy{Version: 1}})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := secret.MutateVaultWithKey(vaultPath, key, func(v *secret.Vault) error {
+		return v.Add(secret.SecretRecord{ID: "k2", Label: "Two", Secret: "s2", Policy: secret.SecretPolicy{Version: 1, AllowBrokerResolve: true}})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	meta := broker.NewFile()
+	meta.Bindings = append(meta.Bindings, broker.CredentialBinding{ID: "b1", Name: "app/one", SecretID: "k1"}, broker.CredentialBinding{ID: "b2", Name: "app/two", SecretID: "k2"})
+	g := func(id, bid string, enabled bool) broker.AccessGrant {
+		return broker.AccessGrant{ID: id, Name: id, BindingID: bid, Client: broker.ClientConstraint{UID: 1, ExecutablePath: "/x"}, Capabilities: []broker.Capability{broker.CapabilityResolve}, Enabled: enabled, CreatedAt: time.Now()}
+	}
+	meta.Grants = []broker.AccessGrant{g("incomplete", "b1", false), g("committed", "b2", true)}
+	meta.PendingApprovals = []broker.ApprovalIntent{{GrantID: "incomplete", BindingID: "b1", SecretID: "k1", CreatedAt: time.Now()}, {GrantID: "committed", BindingID: "b2", SecretID: "k2", PriorAllowResolve: true, CreatedAt: time.Now()}}
+	if err := broker.SaveBrokerFile(config.BrokerPath(dir), meta); err != nil {
+		t.Fatal(err)
+	}
+	if err := secret.MutateVaultWithKey(vaultPath, key, func(v *secret.Vault) error { v.Get("k1").Policy.AllowBrokerResolve = true; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	msg := recoverPendingApprovalsCmd(dir, key)().(accessMutationDoneMsg)
+	if msg.err != nil {
+		t.Fatal(msg.err)
+	}
+	v, _ := secret.LoadVaultByKey(vaultPath, key)
+	if v.Get("k1").Policy.AllowBrokerResolve {
+		t.Fatal("incomplete approval policy not rolled back")
+	}
+	if !v.Get("k2").Policy.AllowBrokerResolve {
+		t.Fatal("committed approval policy changed")
+	}
+	got, _ := broker.LoadBrokerFile(config.BrokerPath(dir))
+	if len(got.Grants) != 1 || got.Grants[0].ID != "committed" || len(got.PendingApprovals) != 0 {
+		t.Fatalf("bad recovery state: %+v", got)
 	}
 }
 

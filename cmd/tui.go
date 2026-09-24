@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"aegiskeys/internal/config"
+	"aegiskeys/internal/fsutil"
 	"aegiskeys/internal/profile"
 	"aegiskeys/internal/provider"
 	"aegiskeys/internal/tui"
@@ -65,23 +66,28 @@ func recoverMalformedConfig(dir string) error {
 		return fmt.Errorf("aborted")
 	}
 	stamp := time.Now().UTC().Format("20060102T150405.000000000Z")
-	backedUp := make([]recoveryFile, 0, len(files))
 	for _, f := range files {
 		backup := f.path + ".damaged." + stamp
-		if err := os.Rename(f.path, backup); err != nil {
-			rollbackRecovery(backedUp)
+		original, err := os.ReadFile(f.path)
+		if err != nil {
+			return fmt.Errorf("read damaged file %s: %w", f.path, err)
+		}
+		if err := fsutil.AtomicWriteFile(backup, original); err != nil {
 			return fmt.Errorf("backup %s: %w", f.path, err)
 		}
-		backedUp = append(backedUp, recoveryFile{path: backup, name: f.name, fresh: f.fresh})
 	}
-	for i, f := range backedUp {
-		if err := os.WriteFile(files[i].path, []byte(f.fresh), 0600); err != nil {
-			rollbackRecovery(backedUp)
+	for _, f := range files {
+		if recoveryCrashPoint != nil {
+			recoveryCrashPoint("before-replace:" + f.name)
+		}
+		if err := fsutil.AtomicWriteFile(f.path, []byte(f.fresh)); err != nil {
 			return err
 		}
 	}
 	return nil
 }
+
+var recoveryCrashPoint func(string)
 
 func mustJSON(v any) string             { data, _ := jsonMarshal(v); return string(data) }
 func jsonMarshal(v any) ([]byte, error) { return json.MarshalIndent(v, "", " ") }

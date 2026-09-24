@@ -360,6 +360,7 @@ type accessApprovalPending struct {
 	ExpiresAt    time.Time
 	GrantID      string
 	VaultKey     [32]byte
+	PriorPolicy  secret.SecretPolicy
 }
 
 // keyFormState captures the fields for adding a new API key.

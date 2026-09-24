@@ -59,6 +59,16 @@ func (f *File) Validate() error {
 			}
 		}
 	}
+	intentIDs := make(map[string]bool)
+	for _, intent := range f.PendingApprovals {
+		if intent.GrantID == "" || intent.BindingID == "" || intent.SecretID == "" || !bindingIDs[intent.BindingID] || intent.CreatedAt.IsZero() {
+			return errors.New("invalid broker approval intent")
+		}
+		if intentIDs[intent.GrantID] {
+			return errors.New("duplicate broker approval intent")
+		}
+		intentIDs[intent.GrantID] = true
+	}
 	return nil
 }
 

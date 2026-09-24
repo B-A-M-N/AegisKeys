@@ -70,14 +70,27 @@ type AccessGrant struct {
 	ExpiresAt    *time.Time       `json:"expires_at,omitempty"`
 }
 
+// ApprovalIntent durably records a cross-domain approval spanning
+// broker.json and vault.enc. Recovery rolls it back when its staged grant is
+// absent; an enabled grant is the committed terminal state.
+type ApprovalIntent struct {
+	GrantID           string    `json:"grant_id"`
+	BindingID         string    `json:"binding_id"`
+	SecretID          string    `json:"secret_id"`
+	PriorAllowResolve bool      `json:"prior_allow_resolve"`
+	PriorAllowRotate  bool      `json:"prior_allow_rotate"`
+	CreatedAt         time.Time `json:"created_at"`
+}
+
 // File is the metadata-only broker store persisted as broker.json.
 // Revision is a transactional mutation counter only. broker.json is neither
 // cryptographically authenticated nor protected against rollback by this build.
 type File struct {
-	Version  int                 `json:"version"`
-	Revision uint64              `json:"revision"`
-	Bindings []CredentialBinding `json:"bindings"`
-	Grants   []AccessGrant       `json:"grants,omitempty"`
+	Version          int                 `json:"version"`
+	Revision         uint64              `json:"revision"`
+	Bindings         []CredentialBinding `json:"bindings"`
+	Grants           []AccessGrant       `json:"grants,omitempty"`
+	PendingApprovals []ApprovalIntent    `json:"pending_approvals,omitempty"`
 }
 
 // NewFile returns an empty current-version broker metadata file.
