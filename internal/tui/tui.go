@@ -34,7 +34,7 @@ func Run(configDir, version string) error {
 	reg, err := provider.LoadRegistry(config.ProvidersPath(configDir))
 	providersMissing := errors.Is(err, os.ErrNotExist)
 	if err != nil && !providersMissing {
-		return fmt.Errorf("load providers (file preserved; repair before retrying): %w", err)
+		return fmt.Errorf("load providers (file preserved; run `aegiskeys recover-config --confirm` to back up and reset malformed metadata): %w", err)
 	}
 	if providersMissing {
 		reg = provider.NewRegistry()
@@ -47,14 +47,14 @@ func Run(configDir, version string) error {
 	store, err := profile.LoadStore(config.ProfilesPath(configDir))
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("load profiles (file preserved; repair before retrying): %w", err)
+			return fmt.Errorf("load profiles (file preserved; run `aegiskeys recover-config --confirm` to back up and reset malformed metadata): %w", err)
 		}
 		store = profile.NewStore()
 	}
 	cfg, err := config.LoadConfig(config.ConfigPath(configDir))
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("load settings (file preserved; repair before retrying): %w", err)
+			return fmt.Errorf("load settings (file preserved; run `aegiskeys recover-config --confirm` to back up and reset malformed metadata): %w", err)
 		}
 		cfg = config.DefaultConfig()
 	}

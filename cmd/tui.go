@@ -88,7 +88,9 @@ func jsonMarshal(v any) ([]byte, error) { return json.MarshalIndent(v, "", " ") 
 
 func rollbackRecovery(backups []recoveryFile) {
 	for _, b := range backups {
-		_ = os.Rename(b.path, originalRecoveryPath(b.path))
+		original := originalRecoveryPath(b.path)
+		_ = os.Remove(original)
+		_ = os.Rename(b.path, original)
 	}
 }
 func originalRecoveryPath(backup string) string {
@@ -104,6 +106,9 @@ func init() {
 	rootCmd.AddCommand(tuiCmd, recoverConfigCmd)
 }
 func runTUI(_ *cobra.Command) error {
+	if err := offerConfigRecovery(resolvedConfigDir()); err != nil {
+		return err
+	}
 	if err := requireInitialized(); err != nil {
 		return err
 	}
@@ -111,4 +116,16 @@ func runTUI(_ *cobra.Command) error {
 		return fmt.Errorf("tui: %w", err)
 	}
 	return nil
+}
+
+func offerConfigRecovery(dir string) error {
+	_, regErr := provider.LoadRegistry(config.ProvidersPath(dir))
+	_, storeErr := profile.LoadStore(config.ProfilesPath(dir))
+	_, cfgErr := config.LoadConfig(config.ConfigPath(dir))
+	damaged := (regErr != nil && !errors.Is(regErr, os.ErrNotExist)) || (storeErr != nil && !errors.Is(storeErr, os.ErrNotExist)) || (cfgErr != nil && !errors.Is(cfgErr, os.ErrNotExist))
+	if !damaged {
+		return nil
+	}
+	fmt.Println("AegisKeys found malformed provider/profile/settings metadata. Files remain untouched unless you explicitly recover them.")
+	return recoverMalformedConfig(dir)
 }

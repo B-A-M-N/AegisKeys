@@ -9,6 +9,27 @@ import (
 	"aegiskeys/internal/config"
 )
 
+func TestOfferConfigRecoveryPreservesFilesWhenAborted(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(config.ProfilesPath(dir), []byte("damaged"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.ReadFile(config.ProfilesPath(dir))
+	old := os.Stdin
+	r, w, _ := os.Pipe()
+	os.Stdin = r
+	defer func() { os.Stdin = old; r.Close() }()
+	_, _ = w.WriteString("NO\n")
+	w.Close()
+	if err := offerConfigRecovery(dir); err == nil {
+		t.Fatal("abort was accepted")
+	}
+	after, _ := os.ReadFile(config.ProfilesPath(dir))
+	if string(after) != string(before) {
+		t.Fatal("aborted recovery modified malformed file")
+	}
+}
+
 func TestRecoveryLeavesHealthyFilesUntouched(t *testing.T) {
 	dir := t.TempDir()
 	healthy := []byte(`{"version":3,"providers":[]}`)

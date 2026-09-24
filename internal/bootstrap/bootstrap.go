@@ -89,6 +89,9 @@ func AutoBootstrap(configDir string) error {
 	providersPath := filepath.Join(configDir, config.ProvidersFile)
 	reg, err := provider.LoadRegistry(providersPath)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("providers metadata is damaged; recover before retrying: %w", err)
+		}
 		reg = provider.NewRegistry()
 	}
 	if reg.MergeDefaults(provider.DefaultProviders()) {
