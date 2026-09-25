@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -1963,6 +1964,12 @@ func TestScratchSaveKeepsEditorOpenUntilEncryptedWriteSucceeds(t *testing.T) {
 // cleanup function actually restores the original config file state. This is a
 // true end-to-end test of the TUI launch path without needing tea.ExecProcess.
 func TestTUI_LaunchPrepared_ExecutesCleanup(t *testing.T) {
+	fakeDir := t.TempDir()
+	fake := filepath.Join(fakeDir, "hermes")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeDir)
 	m := newTestModel(t)
 	m.unlocked = true
 	m.active = screenLaunch
@@ -2020,6 +2027,12 @@ func TestTUI_LaunchPrepared_ExecutesCleanup(t *testing.T) {
 // A config-file profile must produce a non-nil cleanup handle in the
 // launchPreparedMsg so runtime config overlays are restored after exit.
 func TestTUI_LaunchPrepared_HasCleanup(t *testing.T) {
+	fakeDir := t.TempDir()
+	fake := filepath.Join(fakeDir, "qwen")
+	if err := os.WriteFile(fake, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeDir)
 	// The Qwen adapter writes under $HOME.  Keep this integration test
 	// hermetic: it must never inspect, back up, or modify a developer's real
 	// ~/.qwen configuration.

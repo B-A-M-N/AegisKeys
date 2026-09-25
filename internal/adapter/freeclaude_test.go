@@ -204,6 +204,7 @@ func TestFreeClaudeAdapter_UsesNativeTransportForOpenCodeGoChatOnlyModel(t *test
 	if _, err := a.Validate(p, prov); err != nil {
 		t.Fatalf("expected chat-only OpenCode Go model to be bridgeable: %v", err)
 	}
+	p.Target.Command = writeFreeCodeCapabilitiesScript(t, "free-code-native", `{"openai_compatible_chat_completions":true}`)
 	strat, err := a.Render(p, prov, &secret.SecretRecord{Secret: "test-go-key"})
 	if err != nil || strat.Bridge != nil {
 		t.Fatalf("expected native strategy without bridge, got %#v, %v", strat, err)
