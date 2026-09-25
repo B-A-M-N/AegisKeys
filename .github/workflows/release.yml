@@ -133,7 +133,7 @@ jobs:
         run: sha256sum -c dist/SHA256SUMS
 
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@e8998f949152b193b0cb484e820d1a1894bdae0b1 # v2
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: "dist/*"
 
