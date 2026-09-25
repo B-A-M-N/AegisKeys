@@ -72,6 +72,20 @@ func verifyOneAdapter(id string, reg *adapter.Registry, cfg config.Config) adapt
 		return adapterVerifyResult{"SKIP", "no compatible synthetic provider"}
 	}
 	prof := syntheticProfile(id, prov, a.Contract())
+	tmp, err := os.MkdirTemp("", "aegiskeys-adapter-verify-*")
+	if err != nil {
+		return adapterVerifyResult{"FAIL", err.Error()}
+	}
+	defer os.RemoveAll(tmp)
+	if id == "free-claude" {
+		fakeFreeCode := filepath.Join(tmp, "free-code")
+		capability := `{"build_time":"adapter-verify","executable":"adapter-verify","openai_compatible_chat_completions":true}`
+		script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = capabilities ] && [ \"$2\" = --json ]; then printf '%%s\\n' '%s'; exit 0; fi\nexit 0\n", capability)
+		if err := os.WriteFile(fakeFreeCode, []byte(script), 0700); err != nil {
+			return adapterVerifyResult{"FAIL", "free-code fixture: " + err.Error()}
+		}
+		prof.Target.Command = fakeFreeCode
+	}
 	strategy, err := adapter.ResolveLaunchStrategyForMode(prof, prov, key, reg, adapter.ResolveSave)
 	if err != nil {
 		if strings.Contains(err.Error(), "launch blocked") || strings.Contains(err.Error(), "no command") {
@@ -90,11 +104,6 @@ func verifyOneAdapter(id string, reg *adapter.Registry, cfg config.Config) adapt
 		}
 	}
 
-	tmp, err := os.MkdirTemp("", "aegiskeys-adapter-verify-*")
-	if err != nil {
-		return adapterVerifyResult{"FAIL", err.Error()}
-	}
-	defer os.RemoveAll(tmp)
 	home := filepath.Join(tmp, "home")
 	xdg := filepath.Join(tmp, "xdg")
 	_ = os.MkdirAll(home, 0700)
