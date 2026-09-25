@@ -11,6 +11,7 @@ import (
 	"charm.land/huh/v2"
 	"golang.org/x/term"
 
+	"aegiskeys/internal/audit"
 	"aegiskeys/internal/config"
 	"aegiskeys/internal/coordination"
 	"aegiskeys/internal/keychain"
@@ -23,6 +24,12 @@ func loadAppConfig() config.Config {
 		return config.DefaultConfig()
 	}
 	return cfg
+}
+
+func logAuditEvent(event audit.Event) {
+	if err := audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(event); err != nil {
+		fmt.Fprintf(os.Stderr, "audit log write failed: %v\n", err)
+	}
 }
 
 func effectiveProfileName(flagValue string, args ...string) (string, error) {
@@ -154,6 +161,7 @@ func precheckVault(password string, precheck func(*secret.Vault) error) error {
 			if err != nil {
 				return err
 			}
+			defer secret.ZeroVault(latest)
 			return precheck(latest)
 		}
 	}
@@ -161,6 +169,7 @@ func precheckVault(password string, precheck func(*secret.Vault) error) error {
 	if err != nil {
 		return err
 	}
+	defer secret.ZeroVault(latest)
 	return precheck(latest)
 }
 
@@ -232,4 +241,21 @@ func execCommand(name string, args []string, stdinText string) error {
 
 func clearClipboard() error {
 	return copyToClipboard("")
+}
+
+func readClipboard() (string, error) {
+	for _, item := range []struct{ read, write string }{
+		{"pbpaste", "pbcopy"}, {"wl-paste", "wl-copy"}, {"xclip -selection clipboard -o", "xclip -selection clipboard"},
+	} {
+		parts := strings.Fields(item.read)
+		if len(parts) > 0 {
+			if _, err := exec.LookPath(parts[0]); err == nil {
+				out, e := exec.Command(parts[0], parts[1:]...).Output()
+				if e == nil {
+					return string(out), nil
+				}
+			}
+		}
+	}
+	return "", fmt.Errorf("clipboard read unavailable")
 }

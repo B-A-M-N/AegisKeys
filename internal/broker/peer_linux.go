@@ -3,11 +3,15 @@
 package broker
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -55,21 +59,61 @@ func (r LinuxPeerResolver) fromUcred(cred *unix.Ucred) (PeerIdentity, error) {
 	if int(cred.Uid) != r.UID {
 		return PeerIdentity{}, ErrAccessDenied
 	}
-	exe, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", cred.Pid))
+	procExe := fmt.Sprintf("/proc/%d/exe", cred.Pid)
+	exeFile, err := os.Open(procExe)
 	if err != nil {
+		return PeerIdentity{}, fmt.Errorf("resolve peer executable: %w", err)
+	}
+	defer exeFile.Close()
+	exe, err := os.Readlink(procExe)
+	if err != nil {
+		_ = exeFile.Close()
 		return PeerIdentity{}, fmt.Errorf("resolve peer executable: %w", err)
 	}
 	canonical, err := filepath.EvalSymlinks(exe)
 	if err != nil {
 		return PeerIdentity{}, fmt.Errorf("canonicalize peer executable: %w", err)
 	}
+	// /proc/<pid>/exe is a descriptor-backed reference to the inode the peer
+	// is actually executing. Keep that inode pinned while comparing the
+	// separately resolved path and hashing the same file description.
+	procInfo, err := exeFile.Stat()
+	if err != nil {
+		return PeerIdentity{}, fmt.Errorf("stat peer executable: %w", err)
+	}
+	pathFile, err := os.Open(canonical)
+	if err != nil {
+		return PeerIdentity{}, fmt.Errorf("open resolved peer executable: %w", err)
+	}
+	defer pathFile.Close()
+	pathInfo, err := pathFile.Stat()
+	if err != nil {
+		return PeerIdentity{}, fmt.Errorf("stat resolved peer executable: %w", err)
+	}
+	if !sameFileIdentity(procInfo, pathInfo) {
+		return PeerIdentity{}, errors.New("executable identity changed during peer verification")
+	}
 	identity := PeerIdentity{PID: int(cred.Pid), UID: int(cred.Uid), GID: int(cred.Gid), ExecutablePath: canonical}
 	if r.HashExecutables {
-		hash, err := HashExecutable(canonical)
-		if err != nil {
+		h := sha256.New()
+		if _, err := io.Copy(h, exeFile); err != nil {
 			return PeerIdentity{}, err
 		}
-		identity.ExecutableHash = hash
+		identity.ExecutableHash = hex.EncodeToString(h.Sum(nil))
 	}
 	return identity, nil
+}
+
+func sameFileIdentity(a, b os.FileInfo) bool {
+	return fileIdentityKey(a) == fileIdentityKey(b)
+}
+
+func fileIdentityKey(info os.FileInfo) string {
+	// Stat_t is Linux-specific here; use the syscall representation without
+	// relying on a pathname lookup. This helper is kept separate for tests.
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Sprintf("%T:%v", info.Sys(), info.Sys())
+	}
+	return strconv.FormatUint(uint64(stat.Dev), 10) + ":" + strconv.FormatUint(uint64(stat.Ino), 10)
 }

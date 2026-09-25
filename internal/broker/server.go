@@ -12,10 +12,12 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
+
+	"aegiskeys/internal/fsutil"
 )
 
 // Server limits are deliberately conservative for a same-user local service.
@@ -69,11 +71,20 @@ type Session struct {
 	service  *Service
 	audit    auditLogger
 
-	mu       sync.Mutex
-	locked   bool
-	vaultKey [32]byte
-	inflight chan struct{}
-	closed   bool
+	mu                   sync.Mutex
+	locked               bool
+	generation           uint64
+	sessionCtx           context.Context
+	cancelSession        context.CancelFunc
+	activeRequests       int
+	activeCond           *sync.Cond
+	operationMu          sync.Mutex
+	vaultKey             [32]byte
+	inflight             chan struct{}
+	closed               bool
+	beforeResolveRelease func()
+	beforeRotateSuccess  func()
+	beforeRotateCommit   func()
 }
 
 type auditLogger interface {
@@ -87,7 +98,7 @@ func Listen(configDir, socketPath string, peer PeerResolver) (net.Listener, erro
 		return nil, errors.New("nil peer resolver")
 	}
 	runtimeDir := filepath.Dir(socketPath)
-	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+	if err := fsutil.EnsureDir(runtimeDir); err != nil {
 		return nil, err
 	}
 	if err := os.Chmod(runtimeDir, 0700); err != nil {
@@ -148,8 +159,15 @@ func sameOwner(uid uint32) bool { return uid == currentUID() }
 // fileUID extracts the owner on Unix systems. On unsupported platforms, a
 // sentinel never matches the current user, failing closed.
 func fileUID(info os.FileInfo) uint32 {
-	if st, ok := info.Sys().(*syscall.Stat_t); ok {
-		return st.Uid
+	v := reflect.ValueOf(info.Sys())
+	if v.IsValid() && v.Kind() == reflect.Pointer {
+		v = v.Elem()
+	}
+	if v.IsValid() && v.Kind() == reflect.Struct {
+		uid := v.FieldByName("Uid")
+		if uid.IsValid() {
+			return uint32(uid.Uint())
+		}
 	}
 	return ^uint32(0)
 }
@@ -172,8 +190,15 @@ func NewSession(listener net.Listener, meta *File, vaultPath string, key [32]byt
 		vaultKey: key,
 		inflight: make(chan struct{}, maxRequests),
 	}
+	s.sessionCtx, s.cancelSession = context.WithCancel(context.Background())
+	s.activeCond = sync.NewCond(&s.mu)
 	// Production sessions always authorize from persisted broker.json.
 	service.metaPath = filepath.Join(filepath.Dir(vaultPath), "broker.json")
+	if _, statErr := os.Stat(service.metaPath); statErr == nil {
+		if err := ReconcileExpiredGrants(service.metaPath, vaultPath, key, time.Now()); err != nil {
+			return nil, fmt.Errorf("reconcile expired broker grants: %w", err)
+		}
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/status", s.handleStatus)
 	mux.HandleFunc("/v1/resolve", s.handleResolve)
@@ -218,24 +243,48 @@ func (s *Session) Close() error {
 	s.closed = true
 	key := s.vaultKey
 	s.vaultKey = [32]byte{}
+	if s.activeCond == nil {
+		s.activeCond = sync.NewCond(&s.mu)
+	}
+	if s.cancelSession != nil {
+		s.cancelSession()
+	}
 	s.mu.Unlock()
+	for s.activeRequests > 0 && s.activeCond != nil {
+		s.activeCond.Wait()
+	}
 	_ = s.server.Close()
 	for i := range key {
 		key[i] = 0
 	}
-	s.audit.Log("broker_stopped", "ok", nil)
+	if s.audit != nil {
+		s.audit.Log("broker_stopped", "ok", nil)
+	}
 	return nil
 }
 
 // Lock zeroes the retained derived key while leaving the socket listening.
+// Invalidation happens before waiting for the operation barrier so any request
+// that has not crossed its generation fence cannot release a credential or
+// commit a rotation after the user initiates lock.
 func (s *Session) Lock() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for i := range s.vaultKey {
 		s.vaultKey[i] = 0
 	}
 	s.locked = true
-	s.audit.Log("broker_locked", "ok", nil)
+	s.generation++
+	if s.cancelSession != nil {
+		s.cancelSession()
+	}
+	// Lock completion is a barrier: no request that began before the lock may
+	// still resolve a credential or rotate the vault after this returns.
+	s.sessionCtx, s.cancelSession = context.WithCancel(context.Background())
+	s.mu.Unlock()
+	s.waitForActiveRequests()
+	if s.audit != nil {
+		s.audit.Log("broker_locked", "ok", nil)
+	}
 }
 
 // Locked reports whether the session has zeroed its key.
@@ -252,6 +301,46 @@ func (s *Session) key() ([32]byte, bool) {
 		return [32]byte{}, false
 	}
 	return s.vaultKey, true
+}
+
+func (s *Session) beginRequest() (context.Context, uint64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.locked {
+		return nil, 0, false
+	}
+	s.activeRequests++
+	ctx := s.sessionCtx
+	gen := s.generation
+	return ctx, gen, true
+}
+func (s *Session) endRequest() {
+	s.mu.Lock()
+	if s.activeRequests > 0 {
+		s.activeRequests--
+	}
+	if s.activeCond != nil {
+		s.activeCond.Broadcast()
+	}
+	s.mu.Unlock()
+}
+
+func (s *Session) waitForActiveRequests() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for s.activeRequests > 0 && s.activeCond != nil {
+		s.activeCond.Wait()
+	}
+}
+func (s *Session) requestContext() (context.Context, uint64, bool) { return s.beginRequest() }
+func (s *Session) finishRequest()                                  { s.endRequest() }
+func (s *Session) requestValid(ctx context.Context, gen uint64) bool {
+	if ctx == nil || ctx.Err() != nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.locked && s.generation == gen
 }
 
 func (s *Session) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -287,13 +376,34 @@ func (s *Session) handleResolve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	peer.VaultKey = key
+	ctx, gen, ok := s.beginRequest()
+	if !ok {
+		s.lockedResponse(w, "resolve", peer)
+		return
+	}
+	defer s.endRequest()
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+	if s.beforeResolveRelease != nil {
+		s.beforeResolveRelease()
+	}
+	if !s.requestValid(ctx, gen) {
+		s.lockedResponse(w, "resolve", peer)
+		return
+	}
 	result, err := s.service.Resolve(req.Binding, peer)
 	if err != nil {
 		s.serviceError(w, "resolve", peer, err)
 		return
 	}
+	if !s.requestValid(ctx, gen) {
+		s.lockedResponse(w, "resolve", peer)
+		return
+	}
 	writeJSON(w, result)
-	s.audit.Log("credential_resolved", "ok", map[string]string{"binding_ref": auditBindingRef(req.Binding), "client_executable": peer.ExecutablePath})
+	if s.audit != nil {
+		s.audit.Log("credential_resolved", "ok", map[string]string{"binding_ref": auditBindingRef(req.Binding), "client_executable": peer.ExecutablePath})
+	}
 }
 
 func (s *Session) handleRotate(w http.ResponseWriter, r *http.Request) {
@@ -315,13 +425,39 @@ func (s *Session) handleRotate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	peer.VaultKey = key
-	s.audit.Log("credential_rotation_requested", "ok", map[string]string{"binding_ref": auditBindingRef(req.Binding), "client_executable": peer.ExecutablePath})
+	ctx, gen, ok := s.beginRequest()
+	if !ok {
+		s.lockedResponse(w, "rotate", peer)
+		return
+	}
+	defer s.endRequest()
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+	if s.beforeRotateSuccess != nil {
+		s.beforeRotateSuccess()
+	}
+	if !s.requestValid(ctx, gen) {
+		s.lockedResponse(w, "rotate", peer)
+		return
+	}
+	if s.audit != nil {
+		s.audit.Log("credential_rotation_requested", "ok", map[string]string{"binding_ref": auditBindingRef(req.Binding), "client_executable": peer.ExecutablePath})
+	}
+	if s.beforeRotateCommit != nil {
+		s.beforeRotateCommit()
+	}
 	if err := s.service.Rotate(req, peer); err != nil {
 		s.serviceError(w, "rotate", peer, err)
 		return
 	}
+	if !s.requestValid(ctx, gen) {
+		s.lockedResponse(w, "rotate", peer)
+		return
+	}
 	writeJSON(w, struct{}{})
-	s.audit.Log("credential_rotated", "ok", map[string]string{"binding_ref": auditBindingRef(req.Binding), "client_executable": peer.ExecutablePath})
+	if s.audit != nil {
+		s.audit.Log("credential_rotated", "ok", map[string]string{"binding_ref": auditBindingRef(req.Binding), "client_executable": peer.ExecutablePath})
+	}
 }
 
 type peerIdentityKey struct{}
@@ -330,16 +466,18 @@ func (s *Session) authorize(w http.ResponseWriter, r *http.Request, binding stri
 	peer, known := r.Context().Value(peerIdentityKey{}).(PeerIdentity)
 	if !known {
 		writeError(w, http.StatusForbidden, "access denied")
-		s.audit.Log("credential_access_denied", "denied", map[string]string{
-			"operation": operation, "binding_ref": auditBindingRef(binding),
-		})
+		if s.audit != nil {
+			s.audit.Log("credential_access_denied", "denied", map[string]string{"operation": operation, "binding_ref": auditBindingRef(binding)})
+		}
 		return PeerIdentity{}, false
 	}
 	// The resolver never supplies the key; authorization precedes vault load.
 	peer.VaultKey = [32]byte{}
-	s.audit.Log("credential_access_requested", "pending", map[string]string{
-		"binding_ref": auditBindingRef(binding), "operation": string(capability), "client_executable": peer.ExecutablePath,
-	})
+	if s.audit != nil {
+		s.audit.Log("credential_access_requested", "pending", map[string]string{
+			"binding_ref": auditBindingRef(binding), "operation": string(capability), "client_executable": peer.ExecutablePath,
+		})
+	}
 	return peer, true
 }
 
@@ -351,7 +489,11 @@ func (s *Session) decodeRequest(w http.ResponseWriter, r *http.Request, dst *Req
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(dst); err != nil || dec.Decode(&struct{}{}) == nil {
+	if err := dec.Decode(dst); err != nil {
+		writeError(w, http.StatusBadRequest, "request invalid")
+		return false
+	}
+	if err := ensureEOF(dec); err != nil {
 		writeError(w, http.StatusBadRequest, "request invalid")
 		return false
 	}
@@ -373,9 +515,11 @@ func (s *Session) methodNotAllowed(w http.ResponseWriter) {
 
 func (s *Session) lockedResponse(w http.ResponseWriter, operation string, peer PeerIdentity) {
 	writeError(w, http.StatusLocked, "vault locked")
-	s.audit.Log("credential_access_denied", "locked", map[string]string{
-		"operation": operation, "client_executable": peer.ExecutablePath,
-	})
+	if s.audit != nil {
+		s.audit.Log("credential_access_denied", "locked", map[string]string{
+			"operation": operation, "client_executable": peer.ExecutablePath,
+		})
+	}
 }
 
 func (s *Session) serviceError(w http.ResponseWriter, operation string, peer PeerIdentity, err error) {
@@ -390,9 +534,11 @@ func (s *Session) serviceError(w http.ResponseWriter, operation string, peer Pee
 		writeError(w, http.StatusBadRequest, "request invalid")
 	}
 	if errors.Is(err, ErrAccessDenied) {
-		s.audit.Log("credential_access_denied", "denied", map[string]string{
-			"operation": operation, "client_executable": peer.ExecutablePath,
-		})
+		if s.audit != nil {
+			s.audit.Log("credential_access_denied", "denied", map[string]string{
+				"operation": operation, "client_executable": peer.ExecutablePath,
+			})
+		}
 	}
 }
 

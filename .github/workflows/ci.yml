@@ -12,10 +12,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
           cache: true
@@ -35,6 +35,16 @@ jobs:
       - name: Test
         run: go test ./...
 
+      - name: TCP integration tests
+        env:
+          AEGISKEYS_ALLOW_TCP_TESTS: "1"
+        run: go test ./internal/bridge ./internal/provider
+
+      - name: Unix-socket broker integration tests
+        env:
+          AEGISKEYS_RUN_SOCKET_E2E: "1"
+        run: go test ./internal/broker -run 'TestBrokerUnixSocketE2E|TestBrokerConcurrentResolveRotateImmediateRevocation' -count=1
+
       - name: Race test
         run: go test -race ./...
 
@@ -42,7 +52,7 @@ jobs:
         run: go vet ./...
 
       - name: Vulnerability scan
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 
       - name: Adapter render/no-leak verification
         run: go run . adapter verify

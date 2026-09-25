@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"aegiskeys/internal/appcatalog"
+	"aegiskeys/internal/fsutil"
 	"aegiskeys/internal/profile"
 	"aegiskeys/internal/provider"
 	"aegiskeys/internal/secret"
@@ -127,12 +129,7 @@ type Registry struct {
 func NewRegistry() *Registry {
 	r := &Registry{
 		adapters: make(map[string]AppAdapter),
-		order: []string{
-			"generic", "crush", "aider", "cline", "hermes", "qwen", "claude", "free-claude", "vibe", "goose",
-			"codex", "mimo", "opencode", "openhands", "gemini", "copilot", "continue",
-			"zed", "intellij",
-			"roo", "kilo", "cursor",
-		},
+		order:    appcatalog.All(),
 	}
 	for _, a := range []AppAdapter{
 		GenericOpenAIAdapter{},
@@ -450,13 +447,34 @@ func modelArgFlag(adapterID string) []string {
 func writeEnvFile(env map[string]string, profileName, configDir string) (*FileWrite, error) {
 	var sb strings.Builder
 	for k, v := range env {
+		if strings.ContainsAny(v, "\x00\r\n\t\v\f") {
+			return nil, fmt.Errorf("environment value %q contains control characters", k)
+		}
 		fmt.Fprintf(&sb, "%s=%s\n", k, v)
 	}
 	dir := filepath.Join(configDir, "tmp", "envfiles")
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := fsutil.EnsureDir(dir); err != nil {
 		return nil, err
 	}
-	path := filepath.Join(dir, profileName+".env")
+	if err := os.Chmod(dir, 0700); err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 || info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("unsafe env file directory")
+	}
+	tmp, err := os.CreateTemp(dir, "env-*.env")
+	if err != nil {
+		return nil, err
+	}
+	path := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(path)
+		return nil, err
+	}
+	// The random path is not profile-derived, so concurrent launches cannot
+	// collide and a malicious profile name cannot escape the private directory.
+	_ = profileName
 	return &FileWrite{
 		Path:        path,
 		Format:      "env",
@@ -464,5 +482,6 @@ func writeEnvFile(env map[string]string, profileName, configDir string) (*FileWr
 		Scope:       ScopeTemp,
 		MergePolicy: MergeNone,
 		Description: "Temporary env file for child-process injection",
+		TempRoot:    dir,
 	}, nil
 }

@@ -33,7 +33,7 @@ func ModelCachePath(configDir, slug string) string {
 
 // EnsureModelCacheDir creates the model-cache directory with 0700 perms.
 func EnsureModelCacheDir(configDir string) error {
-	return os.MkdirAll(ModelCacheDir(configDir), 0700)
+	return fsutil.EnsureDir(ModelCacheDir(configDir))
 }
 
 // LoadModelCache reads a provider's model cache. Returns a zero-value cache

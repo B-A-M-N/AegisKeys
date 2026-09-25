@@ -162,3 +162,11 @@ func TestModelSlots_CustomSlotMap(t *testing.T) {
 		t.Error("custom slot not preserved")
 	}
 }
+
+func TestStoreRejectsTraversalProfileName(t *testing.T) {
+	s := NewStore()
+	s.Profiles = []Profile{{Name: "../../escape", ProviderSlug: "p", KeyID: "k"}}
+	if err := s.Validate(); err == nil {
+		t.Fatal("traversal profile name accepted")
+	}
+}

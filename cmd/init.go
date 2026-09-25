@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 
@@ -18,7 +19,10 @@ var initCmd = &cobra.Command{
 	Use:   "init",
 	Short: "Initialize the AegisKeys vault and config directory",
 	Long: "Creates the config directory, prompts for a master password, " +
-		"creates an encrypted vault, and seeds the default provider registry.",
+		"creates an encrypted vault, and seeds the default provider registry.\n\n" +
+		"Automation should pipe the master password through stdin from a protected " +
+		"descriptor; --password is deprecated because shell history and process " +
+		"listings can expose its value.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		dir := resolvedConfigDir()
 
@@ -69,7 +73,9 @@ var initCmd = &cobra.Command{
 
 		// Log the event (no secret value).
 		logger := audit.NewLogger(config.AuditPath(dir))
-		logger.Log(audit.Event{Event: "vault_initialized"})
+		if err := logger.Log(audit.Event{Event: "vault_initialized"}); err != nil {
+			fmt.Fprintf(os.Stderr, "audit log write failed: %v\n", err)
+		}
 
 		fmt.Printf("Initialized AegisKeys at %s\n", dir)
 		fmt.Printf("Vault: %s (encrypted, Argon2id + AES-256-GCM)\n", vaultPath)
@@ -83,6 +89,7 @@ var initCmd = &cobra.Command{
 }
 
 func init() {
-	initCmd.Flags().StringVar(&initPassword, "password", "", "master password (non-interactive; less secure — visible in shell history)")
+	initCmd.Flags().StringVar(&initPassword, "password", "", "master password (deprecated; use protected stdin automation)")
+	_ = initCmd.Flags().MarkDeprecated("password", "use a protected input descriptor via stdin; passing passwords in argv can expose them")
 	rootCmd.AddCommand(initCmd)
 }

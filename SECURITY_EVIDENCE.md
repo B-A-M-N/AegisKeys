@@ -77,12 +77,33 @@ Tests are adversarial: they attempt to violate the claim and assert the system r
 | Rotate requires rotate grant and changes only target | `broker.TestRotateRequiresCapability`, `broker.TestRotateAuthorizedChangesOnlyTarget`, `broker.TestServiceRotationWithoutSocket` | PASS |
 | Unix-socket protocol rejects invalid methods/fields/bodies | `broker.TestProtocolValidation` | PASS |
 | Concurrent broker request handling and related broker suites are race-clean | `go test -race ./internal/broker` | PASS; Unix-bind E2E reports an explicit environment skip in the current sandbox; a recorder-based dual-policy unit test runs without a socket |
+| Binding rechecks use stable IDs, not names | `broker.TestFindBindingByIDDoesNotConfuseGeneratedIDWithName`, `cmd.TestAccessGrantByBindingIDE2EResolveAndImmediateRevoke` | PASS |
+| Interpreter-wide grants fail closed without explicit acknowledgement | `broker.TestInterpreterGrantRefusedByDefault` | PASS |
+| CLI/TUI approval recovery cannot activate a cancelled grant | `broker.TestApprovalCommitCancellationRecomputesPolicyAndRemovesGrant`, `tui.TestApprovalCrashRecoveryProcess` | PASS |
+| Approval recovery preserves unrelated/manual policy and concurrent administrative/grant requirements | `broker.TestRecoveryPreservesUnrelatedManualPolicy`, `TestRecoveryPreservesAdministrativePolicyCapturedForAffectedRecord`, `TestRecoveryPreservesConcurrentAdministrativeChange`, `TestRecoveryKeepsPolicyRequiredByConcurrentGrant`, `TestRecoverApprovalGrantPreservesUnrelatedManualPolicy` | PASS |
 
 ### 6.2 Dependency vulnerabilities
 
 | Claim | Test | Result |
 |-------|------|--------|
-| No reachable known vulnerabilities in code or standard library | `go run golang.org/x/vuln/cmd/govulncheck@latest ./...` with Go 1.25.12+ | PASS on network-enabled release host (not run in offline workspace) |
+| No reachable known vulnerabilities in code or standard library | `go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...` with Go 1.25.13+ | PASS on Go 1.25.13 after the 1.25.12 standard-library findings were remediated by the Go 1.25.13 toolchain floor |
+
+### 6.3 TUI session and configuration lifecycle
+
+| Claim | Test | Result |
+|-------|------|--------|
+| First unlock gets nonzero generation and stale approvals are rejected | `tui.TestFirstSessionGenerationFencesPreparedApproval` | PASS |
+| Lock invalidates pending scratch results without nil dereference | `tui.TestStaleScratchDeleteNeverDereferencesLockedSession` | PASS |
+| Ctrl+C and q both clear the vault session | `tui.TestCtrlCAndQZeroVaultSession` | PASS |
+| Model fetch results cannot overwrite a newer request | `tui.TestStaleModelFetchRequestCannotOverwriteNewerSelection` | PASS |
+| Missing profile key returns an error instead of panic | `tui.TestTUI_LaunchPrepared_*` plus launch tests | PASS |
+| External editor uses private configured runtime and shell-free argv | `tui.TestExternalEditorUsesConfiguredPrivateRuntimeAndArguments` | PASS |
+| Editor failure and interrupted startup leave no AegisKeys plaintext directory | `tui.TestExternalEditorFailureCallbackRemovesResidualDirectory`, `TestExternalEditorCleansInterruptedPrivateDirectory` | PASS |
+| Stale editor preparation is deleted and never launches under a new session | `tui.TestStalePreparedEditorIsDeletedWithoutLaunch` | PASS |
+| Superseded active-vault snapshots are zeroized through one replacement path | `tui.TestReplaceVaultSnapshotZeroesSupersededSecrets` | PASS |
+| Stale wizard fetch cannot clear newer loading state | `tui.TestStaleWizardModelFetchDoesNotClearCurrentLoadingState` | PASS |
+| Unchanged config overlay restores; child/user modification is preserved with conflict | `adapter.TestApplyFileWritesWithRestorePreservesChildModification`, existing restore tests | PASS |
+| Request control sequences including DCS/C1 are removed | `tui.TestSanitizeLaunchOutputDropsDCSAndC1Controls` | PASS |
 
 ### 7. Saved profiles resolve before use
 
@@ -95,8 +116,8 @@ Tests are adversarial: they attempt to violate the claim and assert the system r
 
 | Claim | Test | Result |
 |-------|------|--------|
-| Existing user TOML is not clobbered | `adapter.TestApplyFileWrites_TOMLRefusesExistingUserConfig` | PASS |
-| Existing user XML is not clobbered | `adapter.TestApplyFileWrites_XMLRefusesExistingUserConfig` | PASS |
+| Existing user TOML is structurally merged | `adapter.TestApplyFileWrites_TOMLMergesExistingUserConfig` | PASS |
+| Existing user XML is structurally patched | `adapter.TestApplyFileWrites_XMLPatchesExistingUserConfig` | PASS |
 | Fresh TOML config can be written | `adapter.TestApplyFileWrites_TOMLAllowsFreshUserConfig` | PASS |
 | Audit log is created with locked-down permissions | `audit.TestLoggerCreatesParentAndLocksPermissions`, `audit.TestLoggerRepairsPermissiveAuditLog` | PASS |
 
@@ -124,7 +145,7 @@ Tests are adversarial: they attempt to violate the claim and assert the system r
 | Concurrent snapshot saves could resurrect deletes or overwrite existing records | Added flock and `MutateVault*` latest-state transactions |
 | Raw secret argv flags exposed key material | Removed `key add --secret` and `vault add --secret`; prompt only |
 | CLI profile create could save broken profiles | Added central `resolve.ValidateResolution` and render-mode derivation |
-| TOML/XML “merge” could overwrite existing user config | Refuse existing user/project overwrite until parser-backed merge exists |
+| TOML/XML “merge” could overwrite existing user config | Parser-backed structural TOML merge and identity-aware XML patch preserve unrelated entries |
 | Provider metadata commands could display/export corrupted secret-bearing metadata | Redact provider CLI output; refuse export unless strict metadata validation passes |
 | Audit logger trusted all future metadata callers | Pattern-redact audit event fields before write and force `0600` on the audit file |
 | `adapter verify` default mode depended on locally installed target apps | Split render/files/no-leak verification from optional `--installed` smoke checks |
@@ -135,7 +156,7 @@ Tests are adversarial: they attempt to violate the claim and assert the system r
 |-----|------|-------------------|
 | Sibling process isolation not explicit | Low | Out of scope (OS property) |
 | Memory zeroization best-effort | Low | Out of scope (Go GC) |
-| Existing user-scope TOML/XML merge still limited | Medium | Fail closed until parser-backed managed-block merge is complete |
+| Adapter contracts marked `verified` may still need version-pinned real-application qualification | Medium | Maintain a separate real-launch matrix; fake executable smoke is contract evidence only |
 
 ## Central enforcement gate
 

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 
 	"aegiskeys/internal/fsutil"
@@ -27,7 +26,11 @@ type Config struct {
 	RotationReminderDays        int       `json:"rotation_reminder_days"` // days before flagging a key for rotation; 0 = disabled
 	RuntimePolicy               string    `json:"runtime_policy"`         // strict (default), standard, permissive
 	KeyringEnabled              bool      `json:"keyring_enabled,omitempty"`
-	BrokerAutoLockMinutes       int       `json:"broker_auto_lock_minutes"`
+	BrokerAutoLockMinutes       int       `json:"broker_auto_lock_minutes"` // absolute broker session lifetime; 0 = never
+	// EnableExternalScratchpadEditor defaults to false. External editors may
+	// create backup/swap files containing plaintext scratchpad bodies, so the
+	// operator must explicitly opt in after reviewing that editor behavior.
+	EnableExternalScratchpadEditor bool `json:"enable_external_scratchpad_editor,omitempty"`
 
 	// InheritEnv lists parent environment variable names that are passed
 	// through to launched profile apps on top of the strict allowlist. This
@@ -123,18 +126,18 @@ func MutateConfigFile(path string, mutate func(*Config) error) error {
 	if mutate == nil {
 		return fmt.Errorf("nil config mutation")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	if err := fsutil.EnsureDir(filepath.Dir(path)); err != nil {
 		return err
 	}
-	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
+	lock, err := fsutil.OpenLockFile(path + ".lock")
 	if err != nil {
 		return err
 	}
 	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+	if err := fsutil.LockFile(lock); err != nil {
 		return err
 	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	defer fsutil.UnlockFile(lock)
 	cfg, err := LoadConfig(path)
 	if os.IsNotExist(err) {
 		cfg = DefaultConfig()

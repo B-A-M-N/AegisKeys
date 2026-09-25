@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"aegiskeys/internal/fsutil"
 )
 
 // knownSecretKeys are env var names that, if found in a .env file, indicate
@@ -51,7 +53,7 @@ func dotEnvLocations(workdir string) []string {
 
 // scanDotEnvForSecrets reads a .env file and returns any known secret keys found.
 func scanDotEnvForSecrets(path string) []string {
-	data, err := os.ReadFile(path)
+	data, err := fsutil.ReadFile(path, 1<<20)
 	if err != nil {
 		return nil
 	}

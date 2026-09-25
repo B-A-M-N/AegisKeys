@@ -2,9 +2,9 @@ package coordination
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
-	"syscall"
+
+	"aegiskeys/internal/fsutil"
 )
 
 // WithConfigLock serializes operations that span encrypted vault records and
@@ -14,17 +14,17 @@ func WithConfigLock(configDir string, fn func() error) error {
 	if fn == nil {
 		return fmt.Errorf("nil coordinated operation")
 	}
-	if err := os.MkdirAll(configDir, 0700); err != nil {
+	if err := fsutil.EnsureDir(configDir); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(filepath.Join(configDir, "coordination.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	f, err := fsutil.OpenLockFile(filepath.Join(configDir, "coordination.lock"))
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	if err := fsutil.LockFile(f); err != nil {
 		return fmt.Errorf("acquire configuration coordination lock: %w", err)
 	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	defer fsutil.UnlockFile(f)
 	return fn()
 }

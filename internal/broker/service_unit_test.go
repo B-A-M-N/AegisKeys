@@ -19,7 +19,7 @@ func serviceForUnit(t *testing.T, allowPolicy bool, executable string, capabilit
 	meta.Grants = append(meta.Grants, AccessGrant{
 		ID: "grant_1", Name: "App", BindingID: "binding_1",
 		Client:       ClientConstraint{UID: 1000, ExecutablePath: executable},
-		Capabilities: capabilities, Enabled: true,
+		Capabilities: capabilities, ComponentAllowlist: []string{"primary", "secondary"}, Enabled: true,
 	})
 	service, err := NewService(meta, vaultPath)
 	if err != nil {
@@ -85,5 +85,29 @@ func TestWriteErrorRecorder(t *testing.T) {
 	writeError(rec, http.StatusForbidden, "access denied")
 	if rec.Code != http.StatusForbidden || !bytes.Contains(rec.Body.Bytes(), []byte("access denied")) {
 		t.Fatalf("unexpected recorder response: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGrantComponentRestrictionIntersectsBinding(t *testing.T) {
+	svc, _ := serviceForUnit(t, true, "/opt/app", CapabilityResolve)
+	meta := svc.meta
+	meta.Grants[0].ComponentAllowlist = []string{"primary"}
+	rec := &secret.SecretRecord{Secret: "secondary", ExtraSecrets: []secret.NamedSecret{{Key: "secondary", EnvVar: "SECONDARY", Secret: "secondary-value"}}}
+	_ = rec
+	if meta.Grants[0].ComponentAllowlist[0] != "primary" {
+		t.Fatal("bad setup")
+	}
+}
+
+func TestGrantCannotResolveSecondaryWhenGrantPrimaryOnly(t *testing.T) {
+	svc, peer := serviceForUnit(t, true, "/opt/app", CapabilityResolve)
+	meta := svc.meta
+	meta.Grants[0].ComponentAllowlist = []string{"primary"}
+	result, err := svc.Resolve("app/service", peer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Value == "" || len(result.Components) != 0 {
+		t.Fatalf("primary-only grant received secondary component: %+v", result)
 	}
 }

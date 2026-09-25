@@ -32,6 +32,7 @@ func MutateVaultSession(path, password string, sessionKey [32]byte, mutation Ses
 		if err != nil {
 			return err
 		}
+		defer ZeroVault(latest)
 		if mutation.Preload != nil {
 			if err := mutation.Preload(latest); err != nil {
 				return err
@@ -47,6 +48,7 @@ func MutateVaultSession(path, password string, sessionKey [32]byte, mutation Ses
 		if err != nil {
 			return err
 		}
+		defer ZeroVault(latest)
 		if err := mutation.Preload(latest); err != nil {
 			return err
 		}

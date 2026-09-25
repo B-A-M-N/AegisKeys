@@ -559,3 +559,32 @@ func TestSerialize_IncludesScratchPads(t *testing.T) {
 		t.Error("Serialize must never contain raw secrets")
 	}
 }
+
+func TestInitVaultConcurrentExactlyOneCreates(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "vault.enc")
+	results := make(chan error, 2)
+	go func() { results <- InitVault(path, "password1") }()
+	go func() { results <- InitVault(path, "password2") }()
+	a, b := <-results, <-results
+	if (a == nil) == (b == nil) {
+		t.Fatalf("expected one success: %v %v", a, b)
+	}
+	if _, err := LoadVault(path, "password1"); err != nil {
+		if _, err2 := LoadVault(path, "password2"); err2 != nil {
+			t.Fatal("winning vault cannot unlock")
+		}
+	}
+}
+
+func TestInitVaultExistingCannotOverwrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "vault.enc")
+	if err := InitVault(path, "password1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := InitVault(path, "password2"); err == nil {
+		t.Fatal("second init unexpectedly overwrote vault")
+	}
+	if _, err := LoadVault(path, "password1"); err != nil {
+		t.Fatal("first vault damaged")
+	}
+}

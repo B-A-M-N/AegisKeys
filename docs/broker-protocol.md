@@ -20,7 +20,11 @@ Read this before enabling a grant:
 The socket is local-only. There is no TCP listener. Linux peer credentials and
 executable path/hash pinning restrict accidental cross-application exposure;
 they are **not** a sandbox and do not defend against malware already running as
-the same user.
+the same user. A grant to Python, Node.js, Ruby, or another shared interpreter
+authorizes every script run by that interpreter. AegisKeys refuses such grants
+unless `--allow-interpreter-wide` is explicit and labels them interpreter-wide.
+Script arguments are not a security boundary. Use a dedicated launcher, OS-user
+separation, or a sandbox when per-application isolation is required.
 
 ## Runtime files
 
@@ -152,7 +156,18 @@ const options = {
   method: 'POST',
   headers: {'Content-Type': 'application/json'},
 };
-const req = http.request(options, res => res.pipe(process.stdout));
+const req = http.request(options, res => {
+  let body = '';
+  res.setEncoding('utf8');
+  res.on('data', chunk => { body += chunk; });
+  res.on('end', () => {
+    if (res.statusCode !== 200) throw new Error(`broker resolve failed: ${res.statusCode}`);
+    const credential = JSON.parse(body);
+    // Configure the intended in-memory client; never print or persist value.
+    process.env[credential.env_var] = credential.value;
+  });
+});
+req.on('error', console.error);
 req.end(JSON.stringify({binding: 'athena/openrouter'}));
 ```
 

@@ -723,6 +723,30 @@ func (m *model) renderDetailModal() string {
 			b.WriteString(s.KeyLabel.Render("Provider: ") + s.Body.Render(p.ProviderSlug) + "\n")
 			b.WriteString(s.KeyLabel.Render("Key ID:  ") + s.Muted.Render(p.KeyID) + "\n")
 		}
+	case screenAccess:
+		row, ok := m.selectedAccessRow()
+		if ok && row.grant != nil {
+			g := row.grant
+			b.WriteString(s.KeyLabel.Render("Name:       ") + s.Body.Render(g.Name) + "\n")
+			b.WriteString(s.KeyLabel.Render("Binding:    ") + s.Body.Render(row.binding.Name) + "\n")
+			b.WriteString(s.KeyLabel.Render("Executable: ") + s.Body.Render(g.Client.ExecutablePath) + "\n")
+			b.WriteString(s.KeyLabel.Render("SHA-256:    ") + s.Muted.Render(g.Client.ExecutableHash) + "\n")
+			identity := string(g.Client.IdentityScope)
+			if identity == "" {
+				identity = string(broker.ClassifyExecutable(g.Client.ExecutablePath))
+			}
+			b.WriteString(s.KeyLabel.Render("Identity:   ") + s.Body.Render(identity) + "\n")
+			state := "DISABLED"
+			if g.Enabled {
+				state = "ENABLED"
+			}
+			b.WriteString(s.KeyLabel.Render("State:      ") + s.Body.Render(state) + "\n")
+			expiry := "never"
+			if g.ExpiresAt != nil {
+				expiry = g.ExpiresAt.UTC().Format(time.RFC3339)
+			}
+			b.WriteString(s.KeyLabel.Render("Expires:    ") + s.Body.Render(expiry) + "\n")
+		}
 	case screenAudit:
 		if m.selected[screenAudit] < len(m.auditEvents) {
 			e := m.auditEvents[m.selected[screenAudit]]
@@ -805,7 +829,11 @@ func (m *model) scratchView(s *Styles) string {
 	// Footer: contextual controls.
 	b.WriteString("\n\n")
 	if m.scratchEditing {
-		b.WriteString(s.Muted.Render("ctrl+s save  ctrl+e external editor  esc cancel"))
+		editorHint := "ctrl+e external editor (disabled in Settings)"
+		if m.cfg.EnableExternalScratchpadEditor {
+			editorHint = "ctrl+e external editor (plaintext/editor backups possible)  esc cancel"
+		}
+		b.WriteString(s.Muted.Render("ctrl+s save  " + editorHint))
 	} else if m.scratchSelecting {
 		b.WriteString(s.Muted.Render("v clear selection  j/k extend  y copy selected  c copy selected  esc cancel"))
 	} else {
@@ -891,55 +919,92 @@ func inheritEnvDisplay(names []string) string {
 	return strings.Join(names, ",") + "  (CLI)"
 }
 
-// accessView renders a masked list of stable application bindings and grants.
+// accessView renders broker state, bindings, and each grant as a selectable row.
 func (m *model) accessView(s *Styles) string {
 	var b strings.Builder
 	b.WriteString(s.Title.Render("Access / Integrations"))
 	b.WriteString("\n\n")
-	meta := m.brokerMeta
-	if meta == nil {
+	if m.brokerRunning {
+		b.WriteString(s.Success.Render("Broker: RUNNING / UNLOCKED"))
+	} else {
+		b.WriteString(s.Warning.Render("Broker: STOPPED or LOCKED — start with `aegiskeys broker serve`"))
+	}
+	b.WriteString("\n\n")
+	if m.brokerMeta == nil {
 		b.WriteString(s.Danger.Render("Broker metadata unavailable."))
 		b.WriteString("\n")
 		return b.String()
 	}
-	if len(meta.Bindings) == 0 {
-		b.WriteString(s.Muted.Render("No application bindings. Use `aegiskeys access binding add`."))
+	rows := m.accessRows()
+	if len(rows) == 0 {
+		b.WriteString(s.Muted.Render("No application bindings. Press Z to create one."))
 		b.WriteString("\n")
 		return b.String()
 	}
-	b.WriteString(s.Muted.Render("BINDING                 ACCESS"))
+	b.WriteString(s.Muted.Render("TYPE   NAME / EXECUTABLE                         CAPS       STATE     EXPIRES"))
 	b.WriteString("\n")
-	start, end := visibleWindow(len(meta.Bindings), m.selected[screenAccess], m.screenListRows(1))
+	start, end := visibleWindow(len(rows), m.selected[screenAccess], m.screenListRows(2))
 	for i := start; i < end; i++ {
-		binding := meta.Bindings[i]
-		access := "none"
-		var clients []string
-		for _, grant := range meta.Grants {
-			if grant.BindingID != binding.ID || !grant.Enabled {
-				continue
-			}
-			caps := capabilityDisplay(grant.Capabilities)
-			if grant.Client.ExecutablePath != "" {
-				clients = append(clients, filepath.Base(grant.Client.ExecutablePath)+" "+caps)
-			} else {
-				clients = append(clients, "local "+caps)
-			}
-		}
-		if len(clients) > 0 {
-			access = strings.Join(clients, ", ")
-		}
+		row := rows[i]
 		marker := m.selMarker(s, i)
-		row := fmt.Sprintf("%-21s %s", truncate(binding.Name, 21), truncate(access, 42))
-		if m.rowSelected(i) {
-			b.WriteString(marker + " " + s.SelectedRow.Render(row) + "\n")
+		line := ""
+		if row.grant == nil {
+			line = fmt.Sprintf("BIND   %-42s", truncate(row.binding.Name, 42))
 		} else {
-			b.WriteString(marker + " " + row + "\n")
+			g := row.grant
+			state := "DISABLED"
+			if g.Enabled {
+				state = "ENABLED"
+			}
+			identity := filepath.Base(g.Client.ExecutablePath)
+			if g.Client.IdentityScope == broker.IdentityInterpreterWide {
+				identity += " [interpreter]"
+			}
+			expiry := "never"
+			if g.ExpiresAt != nil {
+				expiry = g.ExpiresAt.UTC().Format("2006-01-02 15:04Z")
+			}
+			line = fmt.Sprintf("GRANT  %-20s %-10s %-9s %s", truncate(identity, 20), truncate(capabilityDisplay(g.Capabilities), 10), state, expiry)
+		}
+		if m.rowSelected(i) {
+			b.WriteString(marker + " " + s.SelectedRow.Render(line) + "\n")
+		} else {
+			b.WriteString(marker + " " + line + "\n")
 		}
 	}
-	b.WriteString("\n")
-	b.WriteString(s.Muted.Render("Enter inspect · R refresh · Z add · A approve · E rebind · X revoke · No raw credentials appear"))
-	b.WriteString("\n")
+	b.WriteString("\n" + s.Muted.Render("Enter inspect · R refresh · Z add · A approve · E rebind · X revoke selected grant") + "\n")
 	return b.String()
+}
+
+type accessRow struct {
+	binding *broker.CredentialBinding
+	grant   *broker.AccessGrant
+}
+
+func (m *model) accessRows() []accessRow {
+	if m.brokerMeta == nil {
+		return nil
+	}
+	rows := make([]accessRow, 0, len(m.brokerMeta.Bindings)+len(m.brokerMeta.Grants))
+	for i := range m.brokerMeta.Bindings {
+		binding := &m.brokerMeta.Bindings[i]
+		rows = append(rows, accessRow{binding: binding})
+		for j := range m.brokerMeta.Grants {
+			if m.brokerMeta.Grants[j].BindingID == binding.ID {
+				g := m.brokerMeta.Grants[j]
+				rows = append(rows, accessRow{binding: binding, grant: &g})
+			}
+		}
+	}
+	return rows
+}
+func (m *model) selectedAccessRow() (accessRow, bool) {
+	rows := m.accessRows()
+	i := m.selected[screenAccess]
+	if i < 0 || i >= len(rows) {
+		return accessRow{}, false
+	}
+	return rows[i], true
 }
 
 func capabilityDisplay(caps []broker.Capability) string {

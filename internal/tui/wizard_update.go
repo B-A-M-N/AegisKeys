@@ -725,6 +725,7 @@ func (m *model) enterWizardStep(step WizardStep) tea.Cmd {
 	m.wizard.selected = 0
 	m.wizard.errMsg = ""
 	if step == StepModels {
+		m.wizard.modelRequestID++
 		m.ensureModelInputs()
 		// Reset any previously-fetched catalog so stale results never leak
 		// across provider changes.
@@ -795,6 +796,9 @@ func (m *model) fetchWizardModelsCmd() tea.Cmd {
 	}
 	slug := prov.Slug
 	pCopy := *prov
+	m.wizard.modelRequestID++
+	requestID := m.wizard.modelRequestID
+	sessionGen := m.sessionGen
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15_000_000_000) // 15s
 		defer cancel()
@@ -802,6 +806,8 @@ func (m *model) fetchWizardModelsCmd() tea.Cmd {
 		return wizardModelsFetchedMsg{
 			providerSlug: slug,
 			models:       models,
+			requestID:    requestID,
+			sessionGen:   sessionGen,
 			err:          err,
 		}
 	}

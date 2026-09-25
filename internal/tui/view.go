@@ -63,7 +63,11 @@ func (m *model) View() tea.View {
 
 	// Layer 1: Matrix background (only in unprotected cells).
 	if m.unlocked && m.cfg.EnableAnimations && m.matrix != nil {
-		m.matrix.SetLogo(m.activeMatrixLogoID())
+		if id := m.activeMatrixLogoID(); id != "" {
+			m.matrix.SetLogoPinned(id)
+		} else {
+			m.matrix.ClearLogoPinned()
+		}
 		buf := NewMatrixBuffer(w, h)
 		buf.Protected = protected
 		m.matrix.Render(buf)
@@ -384,6 +388,49 @@ func protectModalArea(grid [][]gridCell, priority [][]int, r Rect, layer int, w,
 	}
 }
 
+// wrapModalText preserves full executable paths and split long hex fingerprints
+// across lines instead of truncating security-review material.
+func wrapModalText(s string, width int) string {
+	if width <= 0 {
+		return s
+	}
+	var out []string
+	for _, line := range strings.Split(s, "\n") {
+		if lipgloss.Width(line) <= width {
+			out = append(out, line)
+			continue
+		}
+		words := strings.Fields(line)
+		if len(words) == 0 {
+			out = append(out, "")
+			continue
+		}
+		cur := ""
+		for _, word := range words {
+			for len(word) > width {
+				if cur != "" {
+					out = append(out, cur)
+					cur = ""
+				}
+				out = append(out, word[:width])
+				word = word[width:]
+			}
+			if cur == "" {
+				cur = word
+			} else if lipgloss.Width(cur)+1+lipgloss.Width(word) <= width {
+				cur += " " + word
+			} else {
+				out = append(out, cur)
+				cur = word
+			}
+		}
+		if cur != "" {
+			out = append(out, cur)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
 // writeLineStyled writes text with per-character color from parsed ANSI segments.
 // Unlike writeLine, this preserves fg/bg from the styled input rather than
 // replacing it with a single styleID. Spaces are written when writeSpaces is
@@ -522,7 +569,7 @@ func (m *model) drawModal(grid [][]gridCell, priority [][]int, r Rect, s *Styles
 		if i+3 >= r.H-1 {
 			break
 		}
-		line = truncate(line, r.W-4)
+		line = wrapModalText(line, r.W-4)
 		writeLine(grid, priority, r.X+2, r.Y+3+i, line, 23, contentLayer, w, h, false)
 	}
 
@@ -661,29 +708,10 @@ func renderGridFrame(grid [][]gridCell, s *Styles, w, h int, frame int) string {
 			}
 
 			// Determine if this cell has custom styling that breaks the run.
-			hasCustom := c.fg != "" || c.bg != "" || c.bold
 			styleChanged := styleID != runStyle
 			fgChanged := c.fg != runFg
 			bgChanged := c.bg != runBg
 			boldChanged := c.bold != runBold
-
-			if hasCustom {
-				// Flush any pending run before handling this cell.
-				flush()
-				runStyle = styleID
-				runFg = c.fg
-				runBg = c.bg
-				runBold = c.bold
-				run.WriteRune(ch)
-				// Flush immediately after a custom-styled cell to avoid
-				// merging with neighbors that may have different styling.
-				flush()
-				runStyle = -999
-				runFg = ""
-				runBg = ""
-				runBold = false
-				continue
-			}
 
 			if styleChanged || fgChanged || bgChanged || boldChanged {
 				flush()

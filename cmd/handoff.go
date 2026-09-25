@@ -7,7 +7,6 @@ import (
 
 	"aegiskeys/internal/adapter"
 	"aegiskeys/internal/audit"
-	"aegiskeys/internal/config"
 	"aegiskeys/internal/secret"
 )
 
@@ -110,7 +109,7 @@ var handoffCmd = &cobra.Command{
 		}
 
 		// Write audit metadata only — never the secret value.
-		audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{
+		logAuditEvent(audit.Event{
 			Event:    "manual_handoff_started",
 			Profile:  prof.Name,
 			Provider: prof.ProviderSlug,

@@ -3,7 +3,6 @@ package secret
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"time"
 
 	"aegiskeys/internal/fsutil"
@@ -56,6 +55,12 @@ func recoveryCandidates(env *VaultEnvelope) []KDFParams {
 // was needed. This is the robust path for vaults poisoned by older SealWithKey
 // versions that wrote metadata inconsistent with the actual derivation.
 func OpenEnvelopeWithRecovery(password string, env *VaultEnvelope) (plaintext string, key [32]byte, candidate int, recovered bool, err error) {
+	if err := validateLegacyEnvelopeOnly(env); err != nil {
+		return "", key, -1, false, err
+	}
+	if err := validateEnvelopeDigestForRecovery(env); err != nil {
+		return "", key, -1, false, err
+	}
 	var lastErr error
 	for i, params := range recoveryCandidates(env) {
 		derived, derr := DeriveKeyWithParams(password, env.Salt, params)
@@ -63,7 +68,7 @@ func OpenEnvelopeWithRecovery(password string, env *VaultEnvelope) (plaintext st
 			lastErr = derr
 			continue
 		}
-		pt, oerr := OpenWithKey(derived, env)
+		pt, oerr := openWithKeyRecovery(derived, env)
 		if oerr == nil {
 			return pt, derived, i, i != 0, nil
 		}
@@ -77,19 +82,15 @@ func OpenEnvelopeWithRecovery(password string, env *VaultEnvelope) (plaintext st
 // candidates (including legacy KDF shapes); if one succeeds, a metadata/key
 // mismatch is present. It never modifies the vault file.
 func DiagnoseUnlock(path, password string) (canUnlock, legacyWorks bool, env *VaultEnvelope, err error) {
-	data, err := os.ReadFile(path)
+	_, envelope, err := readEnvelopeFileRelaxed(path)
 	if err != nil {
-		return false, false, nil, fmt.Errorf("read vault: %w", err)
-	}
-	var envelope VaultEnvelope
-	if err := json.Unmarshal(data, &envelope); err != nil {
-		return false, false, nil, fmt.Errorf("parse envelope: %w", err)
+		return false, false, nil, err
 	}
 	env = &envelope
 
 	// Try the most likely candidate first (the envelope's stored params).
 	if key, derr := DeriveKeyWithParams(password, envelope.Salt, envelope.KDFParams); derr == nil {
-		if _, oerr := OpenWithKey(key, &envelope); oerr == nil {
+		if _, oerr := openWithKeyRecovery(key, &envelope); oerr == nil {
 			return true, false, env, nil
 		}
 	}
@@ -207,9 +208,12 @@ func writeBackup(path string) error {
 // WriteVaultBackup is the exported entry point: copies the vault file to
 // <path>.bak.<utc-timestamp> and returns the backup path.
 func WriteVaultBackup(path string) (string, error) {
-	data, err := os.ReadFile(path)
+	data, err := readSecureFile(path, maxEnvelopeBytes)
 	if err != nil {
 		return "", err
+	}
+	if len(data) > maxEnvelopeBytes {
+		return "", fmt.Errorf("vault envelope too large")
 	}
 	backupPath := fmt.Sprintf("%s.bak.%s", path, time.Now().UTC().Format("20060102-150405.000000000Z"))
 	if err := fsutil.AtomicWriteFile(backupPath, data); err != nil {
@@ -220,6 +224,7 @@ func WriteVaultBackup(path string) (string, error) {
 
 // writeEnvelope atomically writes an envelope to path (0600).
 func writeEnvelope(path string, env *VaultEnvelope) error {
+	env.Digest = envelopeDigest(*env)
 	data, err := json.MarshalIndent(env, "", "  ")
 	if err != nil {
 		return err

@@ -7,7 +7,6 @@ import (
 	"os"
 	"slices"
 	"strings"
-	"syscall"
 	"time"
 
 	"aegiskeys/internal/fsutil"
@@ -371,6 +370,9 @@ func (s *Store) Validate() error {
 		if name == "" || seen[name] {
 			return fmt.Errorf("profile name is empty or duplicate: %q", p.Name)
 		}
+		if strings.ContainsAny(p.Name, "/\\\x00\r\n") || p.Name == "." || p.Name == ".." || strings.Contains(p.Name, "..") {
+			return fmt.Errorf("profile name %q contains path separators or traversal", p.Name)
+		}
 		seen[name] = true
 		if strings.TrimSpace(p.ProviderSlug) == "" || strings.TrimSpace(p.KeyID) == "" {
 			return fmt.Errorf("profile %q requires provider_slug and key_id", name)
@@ -397,15 +399,15 @@ func MutateStoreFile(path string, mutate func(*Store) error) error {
 	if mutate == nil {
 		return errors.New("nil profile mutation")
 	}
-	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
+	lock, err := fsutil.OpenLockFile(path + ".lock")
 	if err != nil {
 		return err
 	}
 	defer lock.Close()
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+	if err := fsutil.LockFile(lock); err != nil {
 		return err
 	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	defer fsutil.UnlockFile(lock)
 	store, err := LoadStore(path)
 	if os.IsNotExist(err) {
 		store = NewStore()

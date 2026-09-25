@@ -1,0 +1,289 @@
+{
+  "schema": 3,
+  "assets": [
+    {
+      "path": "internal/logo/assets/logos/Crush.png",
+      "sha256": "06e735574c3e1725818560a64136b4b7cd0aa35e8279feb334561b37a9883eec",
+      "represented_apps": [
+        "crush"
+      ],
+      "provenance": "AI-generated illustration; generation tool/terms not recorded",
+      "generation_tool": "not recorded",
+      "generation_terms": "not recorded",
+      "intended_presentation": "compatibility identifier / Matrix-rain silhouette",
+      "brand_guidelines": "not reviewed; generic fallback selected",
+      "publication": "generic-fallback",
+      "attribution_notice": "Third-party names identify compatibility only; no endorsement implied.",
+      "review_basis": "dedicated third-party artwork withheld from release pending per-asset review"
+    },
+    {
+      "path": "internal/logo/assets/logos/MistralVibe.png",
+      "sha256": "6fb5042e2a73beb7330eb0d25627d6248be0a3a08515e19017cab310c95c8016",
+      "represented_apps": [
+        "vibe",
+        "mistral",
+        "mistralai"
+      ],
+      "provenance": "AI-generated illustration; generation tool/terms not recorded",
+      "generation_tool": "not recorded",
+      "generation_terms": "not recorded",
+      "intended_presentation": "compatibility identifier / Matrix-rain silhouette",
+      "brand_guidelines": "not reviewed; generic fallback selected",
+      "publication": "generic-fallback",
+      "attribution_notice": "Third-party names identify compatibility only; no endorsement implied.",
+      "review_basis": "dedicated third-party artwork withheld from release pending per-asset review"
+    },
+    {
+      "path": "internal/logo/assets/logos/aider.png",
+      "sha256": "1aaaa4a3158bc0f43514a14c770b82202b0a12babb1e5136a6493a8565924543",
+      "represented_apps": [
+        "aider"
+      ],
+      "provenance": "AI-generated illustration; generation tool/terms not recorded",
+      "generation_tool": "not recorded",
+      "generation_terms": "not recorded",
+      "intended_presentation": "compatibility identifier / Matrix-rain silhouette",
+      "brand_guidelines": "not reviewed; generic fallback selected",
+      "publication": "generic-fallback",
+      "attribution_notice": "Third-party names identify compatibility only; no endorsement implied.",
+      "review_basis": "dedicated third-party artwork withheld from release pending per-asset review"
+    },
+    {
+      "path": "internal/logo/assets/logos/c7cd9534-6455-4993-9eed-014e18d85d8f.png",
+      "sha256": "e78d694e6759121473d5c4b230153f520d568fed32c71caff57366ebc57569f8",
+      "represented_apps": [
+        "generic"
+      ],
+      "provenance": "AI-generated internal generic identity illustration; generation tool/terms not recorded",
+      "generation_tool": "not recorded",
+      "generation_terms": "not recorded",
+      "intended_presentation": "generic compatibility identity used for unresolved third-party artwork",
+      "brand_guidelines": "not applicable to third-party marks; generic identity is AegisKeys-owned presentation",
+      "publication": "approved",
+      "attribution_notice": "Third-party names identify compatibility only; no endorsement implied.",
+      "review_basis": "internal generic identity; no third-party mark approval claimed"
+    },
+    {
+      "path": "internal/logo/assets/logos/claudecode.png",
+      "sha256": "7a7ff0881ca24b69099062e12e7088c3be94f08cee0bdc47dc02829699e0e8de",
+      "represented_apps": [
+        "claude",
+        "free-claude",
+        "anthropic",
+        "roo",
+        "kilo",
+        "cursor"
+      ],
+      "provenance": "AI-generated illustration; generation tool/terms not recorded",
+      "generation_tool": "not recorded",
+      "generation_terms": "not recorded",
+      "intended_presentation": "compatibility identifier / Matrix-rain silhouette",
+      "brand_guidelines": "not reviewed; generic fallback selected",
+      "publication": "generic-fallback",
+      "attribution_notice": "Third-party names identify compatibility only; no endorsement implied.",
+      "review_basis": "dedicated third-party artwork withheld from release pending per-asset review"
+    },
+    {
+      "path": "internal/logo/assets/logos/cline.png",
+      "sha256": "c077104acd71d834fd97b9fa2f0f900c27fbbda271ff294ddc0366af41009990",
+      "represented_apps": [
+        "cline"
+      ],
+      "provenance": "AI-generated illustration; generation tool/terms not recorded",
+      "generation_tool": "not recorded",
+      "generation_terms": "not recorded",
+      "intended_presentation": "compatibility identifier / Matrix-rain silhouette",
+      "brand_guidelines": "not reviewed; generic fallback selected",
+      "publication": "generic-fallback",
+      "attribution_notice": "Third-party names identify compatibility only; no endorsement implied.",
+      "review_basis": "dedicated third-party artwork withheld from release pending per-asset review"
+    },
+    {
+      "path": "internal/logo/assets/logos/codex.png",
+      "sha256": "6d59a7cf65a40b6554220679d849cc3d8d6561c7786bc30c03bc3d399127f7a7",
+      "represented_apps": [
+        "codex"
+      ],
+      "provenance": "AI-generated illustration; generation tool/terms not recorded",
+      "generation_tool": "not recorded",
+      "generation_terms": "not recorded",
+      "intended_presentation": "compatibility identifier / Matrix-rain silhouette",
+      "brand_guidelines": "not reviewed; generic fallback selected",
+      "publication": "generic-fallback",
+      "attribution_notice": "Third-party names identify compatibility only; no endorsement implied.",
+      "review_basis": "dedicated third-party artwork withheld from release pending per-asset review"
+    },
+    {
+      "path": "internal/logo/assets/logos/continue.png",
+      "sha256": "4e8610762a82c375c989456111f13615b21748c5eeebb6def1db3ab4013cf8c6",
+      "represented_apps": [
+        "continue"
+      ],
+      "provenance": "AI-generated illustration; generation tool/terms not recorded",
+      "generation_tool": "not recorded",
+      "generation_terms": "not recorded",
+      "intended_presentation": "compatibility identifier / Matrix-rain silhouette",
+      "brand_guidelines": "not reviewed; generic fallback selected",
+      "publication": "generic-fallback",
+      "attribution_notice": "Third-party names identify compatibility only; no endorsement implied.",
+      "review_basis": "dedicated third-party artwork withheld from release pending per-asset review"
+    },
+    {
+      "path": "internal/logo/assets/logos/geminicli.png",
+      "sha256": "2fe95ee559b2e000a73631b5a6d1cf8e982d5a321bfd2cbafbf71a6107a5c407",
+      "represented_apps": [
+        "gemini",
+        "google"
+      ],
+      "provenance": "AI-generated illustration; generation tool/terms not recorded",
+      "generation_tool": "not recorded",
+      "generation_terms": "not recorded",
+      "intended_presentation": "compatibility identifier / Matrix-rain silhouette",
+      "brand_guidelines": "not reviewed; generic fallback selected",
+      "publication": "generic-fallback",
+      "attribution_notice": "Third-party names identify compatibility only; no endorsement implied.",
+      "review_basis": "dedicated third-party artwork withheld from release pending per-asset review"
+    },
+    {
+      "path": "internal/logo/assets/logos/githubcopilot.png",
+      "sha256": "556664a5ed861763ddad7447287b338ade878384539d8b07c2fbfb74d5cb63b7",
+      "represented_apps": [
+        "copilot"
+      ],
+      "provenance": "AI-generated illustration; generation tool/terms not recorded",
+      "generation_tool": "not recorded",
+      "generation_terms": "not recorded",
+      "intended_presentation": "compatibility identifier / Matrix-rain silhouette",
+      "brand_guidelines": "not reviewed; generic fallback selected",
+      "publication": "generic-fallback",
+      "attribution_notice": "Third-party names identify compatibility only; no endorsement implied.",
+      "review_basis": "dedicated third-party artwork withheld from release pending per-asset review"
+    },
+    {
+      "path": "internal/logo/assets/logos/goose.png",
+      "sha256": "cc1282828db51eb16f637b8eed9b16c3f9ca8bd0b0d078e5cbf51004dd4124a9",
+      "represented_apps": [
+        "goose"
+      ],
+      "provenance": "AI-generated illustration; generation tool/terms not recorded",
+      "generation_tool": "not recorded",
+      "generation_terms": "not recorded",
+      "intended_presentation": "compatibility identifier / Matrix-rain silhouette",
+      "brand_guidelines": "not reviewed; generic fallback selected",
+      "publication": "generic-fallback",
+      "attribution_notice": "Third-party names identify compatibility only; no endorsement implied.",
+      "review_basis": "dedicated third-party artwork withheld from release pending per-asset review"
+    },
+    {
+      "path": "internal/logo/assets/logos/hermes-agent.png",
+      "sha256": "acdd776c1661477969c00baeeb3a41ebabb14836038135bd7d65bee83b6469a8",
+      "represented_apps": [
+        "hermes",
+        "hermes-agent"
+      ],
+      "provenance": "AI-generated illustration; generation tool/terms not recorded",
+      "generation_tool": "not recorded",
+      "generation_terms": "not recorded",
+      "intended_presentation": "compatibility identifier / Matrix-rain silhouette",
+      "brand_guidelines": "not reviewed; generic fallback selected",
+      "publication": "generic-fallback",
+      "attribution_notice": "Third-party names identify compatibility only; no endorsement implied.",
+      "review_basis": "dedicated third-party artwork withheld from release pending per-asset review"
+    },
+    {
+      "path": "internal/logo/assets/logos/intellij.png",
+      "sha256": "cdbb361345e4059b59d60ed5e729b0da4cfa50942f070d87e73a926a769bb7a7",
+      "represented_apps": [
+        "intellij"
+      ],
+      "provenance": "AI-generated illustration; generation tool/terms not recorded",
+      "generation_tool": "not recorded",
+      "generation_terms": "not recorded",
+      "intended_presentation": "compatibility identifier / Matrix-rain silhouette",
+      "brand_guidelines": "not reviewed; generic fallback selected",
+      "publication": "generic-fallback",
+      "attribution_notice": "Third-party names identify compatibility only; no endorsement implied.",
+      "review_basis": "dedicated third-party artwork withheld from release pending per-asset review"
+    },
+    {
+      "path": "internal/logo/assets/logos/mimocode.png",
+      "sha256": "8968473f715f882ff57bbb58dda7f4fd0a5cc55c8f62f16ea578930061a88321",
+      "represented_apps": [
+        "mimo"
+      ],
+      "provenance": "AI-generated illustration; generation tool/terms not recorded",
+      "generation_tool": "not recorded",
+      "generation_terms": "not recorded",
+      "intended_presentation": "compatibility identifier / Matrix-rain silhouette",
+      "brand_guidelines": "not reviewed; generic fallback selected",
+      "publication": "generic-fallback",
+      "attribution_notice": "Third-party names identify compatibility only; no endorsement implied.",
+      "review_basis": "dedicated third-party artwork withheld from release pending per-asset review"
+    },
+    {
+      "path": "internal/logo/assets/logos/opencode.png",
+      "sha256": "c46c834a8992bf3c8e48587872c9675796349af99932f414b40dd10b7ba2c27d",
+      "represented_apps": [
+        "opencode"
+      ],
+      "provenance": "AI-generated illustration; generation tool/terms not recorded",
+      "generation_tool": "not recorded",
+      "generation_terms": "not recorded",
+      "intended_presentation": "compatibility identifier / Matrix-rain silhouette",
+      "brand_guidelines": "not reviewed; generic fallback selected",
+      "publication": "generic-fallback",
+      "attribution_notice": "Third-party names identify compatibility only; no endorsement implied.",
+      "review_basis": "dedicated third-party artwork withheld from release pending per-asset review"
+    },
+    {
+      "path": "internal/logo/assets/logos/openhands.png",
+      "sha256": "3965c8a0995ba8c380f12006aeb8da57a0ebf4ff7026fbcf30400d367f1785b7",
+      "represented_apps": [
+        "openhands"
+      ],
+      "provenance": "AI-generated illustration; generation tool/terms not recorded",
+      "generation_tool": "not recorded",
+      "generation_terms": "not recorded",
+      "intended_presentation": "compatibility identifier / Matrix-rain silhouette",
+      "brand_guidelines": "not reviewed; generic fallback selected",
+      "publication": "generic-fallback",
+      "attribution_notice": "Third-party names identify compatibility only; no endorsement implied.",
+      "review_basis": "dedicated third-party artwork withheld from release pending per-asset review"
+    },
+    {
+      "path": "internal/logo/assets/logos/qwencode.png",
+      "sha256": "67cb43daf8d53735d55a6657b45d2a657564e0c6f60700727edff2033c7f4650",
+      "represented_apps": [
+        "qwen"
+      ],
+      "provenance": "AI-generated illustration; generation tool/terms not recorded",
+      "generation_tool": "not recorded",
+      "generation_terms": "not recorded",
+      "intended_presentation": "compatibility identifier / Matrix-rain silhouette",
+      "brand_guidelines": "not reviewed; generic fallback selected",
+      "publication": "generic-fallback",
+      "attribution_notice": "Third-party names identify compatibility only; no endorsement implied.",
+      "review_basis": "dedicated third-party artwork withheld from release pending per-asset review"
+    },
+    {
+      "path": "internal/logo/assets/logos/zed.png",
+      "sha256": "d56d659721161d0797c55d9b93ebc64e8890d50d05d77cfbafbcfbab1534e68c",
+      "represented_apps": [
+        "zed"
+      ],
+      "provenance": "AI-generated illustration; generation tool/terms not recorded",
+      "generation_tool": "not recorded",
+      "generation_terms": "not recorded",
+      "intended_presentation": "compatibility identifier / Matrix-rain silhouette",
+      "brand_guidelines": "not reviewed; generic fallback selected",
+      "publication": "generic-fallback",
+      "attribution_notice": "Third-party names identify compatibility only; no endorsement implied.",
+      "review_basis": "dedicated third-party artwork withheld from release pending per-asset review"
+    }
+  ],
+  "policy": {
+    "review_model": "per-asset",
+    "unresolved_assets": "runtime generic fallback; dedicated artwork is not embedded in release binaries",
+    "non_endorsement": "Third-party names and marks identify compatibility only; AegisKeys is independent."
+  }
+}

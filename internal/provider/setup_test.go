@@ -12,11 +12,17 @@ func TestResolveEndpointSubstitution(t *testing.T) {
 		{"azure", "https://{resource}.openai.azure.com", map[string]string{"resource": "my-resource"}, "https://my-resource.openai.azure.com"},
 		{"bedrock", "https://bedrock-runtime.{region}.amazonaws.com", map[string]string{"region": "eu-west-1"}, "https://bedrock-runtime.eu-west-1.amazonaws.com"},
 		{"no template falls back", "", map[string]string{"x": "y"}, "https://base.example.com"},
-		{"unmatched left intact", "https://{missing}.example.com", map[string]string{}, "https://{missing}.example.com"},
+		{"unmatched rejected", "https://{missing}.example.com", map[string]string{}, ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			p := Provider{Endpoints: EndpointSpec{BaseURL: "https://base.example.com", URLTemplate: c.tpl}}
+			p := Provider{
+				Endpoints: EndpointSpec{BaseURL: "https://base.example.com", URLTemplate: c.tpl},
+				Setup: []SetupParam{
+					{Key: "resource", Endpoint: true},
+					{Key: "region", Endpoint: true},
+				},
+			}
 			got := p.ResolveEndpoint(c.fields)
 			if got != c.want {
 				t.Errorf("ResolveEndpoint = %q, want %q", got, c.want)
@@ -90,4 +96,36 @@ func findDefault(slug string) *Provider {
 		}
 	}
 	return nil
+}
+
+func TestResolveEndpointRejectsHostileSubstitution(t *testing.T) {
+	p := Provider{
+		Endpoints: EndpointSpec{BaseURL: "https://base.example.com", URLTemplate: "https://{resource}.openai.azure.com"},
+		Setup:     []SetupParam{{Key: "resource", Endpoint: true}},
+	}
+	for _, value := range []string{"evil.com", "evil.com@trusted.example", "evil.com/path", "evil.com#fragment", "evil..com", "-evil.com", "evil_com/"} {
+		if got := p.ResolveEndpoint(map[string]string{"resource": value}); got != "" {
+			t.Errorf("hostile substitution %q resolved to %q", value, got)
+		}
+	}
+}
+
+func TestValidateStrictRejectsUnsafeEndpointMetadata(t *testing.T) {
+	base := Provider{Name: "P", Slug: "p", EnvVar: "P_KEY", BaseURL: "https://example.com", Auth: AuthSpec{Type: "bearer", EnvVar: "P_KEY"}}
+	cases := []Provider{
+		func() Provider { p := base; p.Catalog.RefreshURL = "http://remote.example.com/models"; return p }(),
+		func() Provider { p := base; p.Endpoints.ModelsURL = "https://user:pass@example.com/models"; return p }(),
+		func() Provider { p := base; p.Endpoints.ModelsURL = "https://0.0.0.0/models"; return p }(),
+		func() Provider {
+			p := base
+			p.Endpoints.URLTemplate = "https://{unbound}.example.com"
+			p.Setup = []SetupParam{{Key: "resource", Endpoint: true}}
+			return p
+		}(),
+	}
+	for i, p := range cases {
+		if err := p.ValidateStrict(); err == nil {
+			t.Errorf("case %d: unsafe endpoint metadata accepted", i)
+		}
+	}
 }

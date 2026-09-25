@@ -1,8 +1,10 @@
 package adapter
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,6 +19,10 @@ import (
 // path expansion, preflight checks (symlinks, scope, parent perms), secret
 // redaction checks, backup, and merge policies.
 func ApplyFileWrites(writes []FileWrite, env map[string]string) error {
+	return applyFileWrites(writes, env, nil)
+}
+
+func applyFileWrites(writes []FileWrite, env map[string]string, completed func(int) error) error {
 	// Seed backup redaction with current env values so backups never preserve
 	// active secrets verbatim.
 	knownSecrets := make([]string, 0, len(env))
@@ -25,14 +31,14 @@ func ApplyFileWrites(writes []FileWrite, env map[string]string) error {
 			knownSecrets = append(knownSecrets, v)
 		}
 	}
-	for _, w := range writes {
+	for writeIndex, w := range writes {
 		path, err := expandPath(w.Path, env)
 		if err != nil {
 			return fmt.Errorf("expand path %q: %w", w.Path, err)
 		}
 
 		// Preflight: refuse symlinks, scope violations, unsafe parents.
-		if err := preflightWrite(path, w.Scope); err != nil {
+		if err := preflightWrite(path, w.Scope, w.TempRoot); err != nil {
 			return fmt.Errorf("preflight %q: %w", path, err)
 		}
 
@@ -79,44 +85,56 @@ func ApplyFileWrites(writes []FileWrite, env map[string]string) error {
 		default:
 			return fmt.Errorf("unsupported merge policy %q for %s", w.MergePolicy, path)
 		}
+		if completed != nil {
+			if err := completed(writeIndex); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
 
 type fileSnapshot struct {
-	path    string
-	exists  bool
-	content []byte
-	mode    os.FileMode
+	path        string
+	exists      bool
+	content     []byte
+	mode        os.FileMode
+	overlayHash [32]byte
 }
 
-// ApplyFileWritesWithRestore applies file writes and returns a cleanup function
-// that restores the pre-launch file state. Files created by the write are
-// removed; files that existed before the write are restored with their prior
-// content and mode.
+// ApplyFileWritesWithRestore applies file writes and conditionally restores
+// the pre-launch state. Cleanup removes only an untouched AegisKeys overlay.
+// If the child/user changed the managed file after launch, it is preserved and
+// cleanup reports a conflict rather than silently discarding legitimate edits.
 func ApplyFileWritesWithRestore(writes []FileWrite, env map[string]string) (func() error, error) {
 	snapshots := make([]fileSnapshot, 0, len(writes))
+	byPath := make(map[string]int, len(writes))
+	completed := make(map[string]bool, len(writes))
+	forceRestore := make(map[string]bool)
 	for _, w := range writes {
 		path, err := expandPath(w.Path, env)
 		if err != nil {
 			return nil, fmt.Errorf("expand path %q: %w", w.Path, err)
 		}
-		if err := preflightWrite(path, w.Scope); err != nil {
+		if err := preflightWrite(path, w.Scope, w.TempRoot); err != nil {
 			return nil, fmt.Errorf("preflight %q: %w", path, err)
 		}
-
+		if idx, ok := byPath[path]; ok {
+			snapshots[idx].path = path
+			continue
+		}
+		byPath[path] = len(snapshots)
 		snap := fileSnapshot{path: path}
 		info, err := os.Stat(path)
 		switch {
 		case os.IsNotExist(err):
 			snapshots = append(snapshots, snap)
-			continue
 		case err != nil:
 			return nil, fmt.Errorf("stat %s: %w", path, err)
 		case info.IsDir():
 			return nil, fmt.Errorf("cannot snapshot directory %s", path)
 		default:
-			data, err := os.ReadFile(path)
+			data, err := fsutil.ReadFile(path, 4<<20)
 			if err != nil {
 				return nil, fmt.Errorf("read %s for restore snapshot: %w", path, err)
 			}
@@ -127,22 +145,50 @@ func ApplyFileWritesWithRestore(writes []FileWrite, env map[string]string) (func
 		}
 	}
 
+	restored := false
 	restore := func() error {
+		if restored {
+			return nil
+		}
+		restored = true
 		var errs []string
 		for i := len(snapshots) - 1; i >= 0; i-- {
 			snap := snapshots[i]
+			if !completed[snap.path] {
+				continue
+			}
+			current, readErr := fsutil.ReadFile(snap.path, 4<<20)
+			if readErr != nil && !os.IsNotExist(readErr) {
+				errs = append(errs, fmt.Sprintf("%s: %v", snap.path, readErr))
+				continue
+			}
+			currentExists := readErr == nil
+			if currentExists && sha256.Sum256(current) != snap.overlayHash {
+				if forceRestore[snap.path] {
+					if snap.exists {
+						if err := atomicWrite(snap.path, snap.content, snap.mode); err != nil {
+							errs = append(errs, fmt.Sprintf("%s: %v", snap.path, err))
+						}
+					} else if currentExists {
+						if err := os.Remove(snap.path); err != nil {
+							errs = append(errs, fmt.Sprintf("%s: %v", snap.path, err))
+						}
+					}
+					continue
+				}
+				errs = append(errs, fmt.Sprintf("%s: changed after launch; preserved to avoid overwriting application/user edits", snap.path))
+				continue
+			}
 			if snap.exists {
 				if err := ensureDir(snap.path); err != nil {
 					errs = append(errs, fmt.Sprintf("%s: %v", snap.path, err))
-					continue
-				}
-				if err := atomicWrite(snap.path, snap.content, snap.mode); err != nil {
+				} else if err := atomicWrite(snap.path, snap.content, snap.mode); err != nil {
 					errs = append(errs, fmt.Sprintf("%s: %v", snap.path, err))
 				}
-				continue
-			}
-			if err := os.Remove(snap.path); err != nil && !os.IsNotExist(err) {
-				errs = append(errs, fmt.Sprintf("%s: %v", snap.path, err))
+			} else if currentExists {
+				if err := os.Remove(snap.path); err != nil {
+					errs = append(errs, fmt.Sprintf("%s: %v", snap.path, err))
+				}
 			}
 		}
 		if len(errs) > 0 {
@@ -151,12 +197,43 @@ func ApplyFileWritesWithRestore(writes []FileWrite, env map[string]string) (func
 		return nil
 	}
 
-	if err := ApplyFileWrites(writes, env); err != nil {
-		_ = restore()
-		return nil, err
+	applyErr := applyFileWrites(writes, env, func(writeIndex int) error {
+		w := writes[writeIndex]
+		path, err := expandPath(w.Path, env)
+		if err != nil {
+			return err
+		}
+		idx := byPath[path]
+		completed[path] = true
+		data, readErr := fsutil.ReadFile(path, 4<<20)
+		if readErr != nil {
+			forceRestore[path] = true
+			return fmt.Errorf("hash managed overlay %s: %w", path, readErr)
+		}
+		snapshots[idx].overlayHash = sha256.Sum256(data)
+		if fileWriteVerificationHook != nil {
+			if err := fileWriteVerificationHook(path); err != nil {
+				forceRestore[path] = true
+				return err
+			}
+		}
+		if fileWriteFaultHook != nil {
+			if err := fileWriteFaultHook(writeIndex); err != nil {
+				forceRestore[path] = true
+				return err
+			}
+		}
+		return nil
+	})
+	if applyErr != nil {
+		return nil, errors.Join(applyErr, restore())
 	}
 	return restore, nil
 }
+
+var fileWriteVerificationHook func(string) error
+
+var fileWriteFaultHook func(int) error
 
 func refuseUnsafeReplace(path string, scope ConfigScope, format string) error {
 	if scope == ScopeProfile || scope == ScopeTemp {
@@ -177,8 +254,28 @@ func refuseUnsafeReplace(path string, scope ConfigScope, format string) error {
 
 // preflightWrite validates that a write is safe: no symlinks, no sensitive
 // project paths, and (for project scope) no group/world-writable parent dirs.
-func preflightWrite(path string, scope ConfigScope) error {
+func preflightWrite(path string, scope ConfigScope, tempRoot string) error {
 	clean := filepath.Clean(path)
+	if scope == ScopeTemp {
+		if tempRoot == "" {
+			return fmt.Errorf("temporary write has no containment root")
+		}
+		root, err := filepath.Abs(tempRoot)
+		if err != nil {
+			return err
+		}
+		candidate, err := filepath.Abs(clean)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, candidate)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+			return fmt.Errorf("temporary path escapes private root: %s", clean)
+		}
+		if filepath.Base(clean) == "" {
+			return fmt.Errorf("unsafe temporary path %s", clean)
+		}
+	}
 
 	// Refuse to write through symlinks (final path or any parent directory).
 	info, err := os.Lstat(clean)
@@ -290,18 +387,14 @@ func atomicWrite(path string, data []byte, mode os.FileMode) error {
 	if mode == 0 {
 		mode = 0600
 	}
-	if err := fsutil.AtomicWriteFile(path, data); err != nil {
-		return err
-	}
-	// AtomicWriteFile may create with a different mode; enforce 0600 (or the
-	// requested mode) explicitly. This is critical for secrets-adjacent files.
-	return os.Chmod(path, mode)
+	// The shared writer applies the mode to the pinned temporary file before
+	// rename; avoid reopening the final pathname just to chmod it.
+	return fsutil.AtomicWriteFileMode(path, data, mode)
 }
 
 // ensureDir creates the parent directory if needed.
 func ensureDir(path string) error {
-	dir := filepath.Dir(path)
-	return os.MkdirAll(dir, 0700)
+	return fsutil.EnsureDir(filepath.Dir(path))
 }
 
 // backupExisting creates a timestamped backup of an existing file.
@@ -318,7 +411,7 @@ func backupExisting(path string) error {
 	}
 
 	backupDir := filepath.Join(filepath.Dir(path), ".aegiskeys-backups")
-	if err := os.MkdirAll(backupDir, 0700); err != nil {
+	if err := fsutil.EnsureDir(backupDir); err != nil {
 		return err
 	}
 
@@ -326,15 +419,13 @@ func backupExisting(path string) error {
 	backupName := filepath.Base(path) + "." + timestamp + ".bak"
 	backupPath := filepath.Join(backupDir, backupName)
 
-	data, err := os.ReadFile(path)
+	data, err := fsutil.ReadFile(path, 4<<20)
 	if err != nil {
 		return fmt.Errorf("read %s for backup: %w", path, err)
 	}
 	if err := atomicWrite(backupPath, data, 0600); err != nil {
 		return fmt.Errorf("write backup %s: %w", backupPath, err)
 	}
-	// Enforce 0600 on the backup even if atomicWrite created it looser.
-	_ = os.Chmod(backupPath, 0600)
 	return nil
 }
 
@@ -354,8 +445,7 @@ func backupWithPolicy(path string, policy BackupPolicy, scope ConfigScope, secre
 	case BackupRedacted:
 		return backupRedacted(path, secrets)
 	case BackupEncrypted:
-		// Encrypted backup requires a vault session; fall back to redacted here.
-		return backupRedacted(path, secrets)
+		return errors.New("encrypted backup policy is unsupported: use redacted backup or an explicitly managed encrypted export")
 	default:
 		return fmt.Errorf("unknown backup policy %q", policy)
 	}
@@ -374,7 +464,7 @@ func backupRedacted(path string, secrets []string) error {
 		return fmt.Errorf("cannot backup directory %s", path)
 	}
 
-	data, err := os.ReadFile(path)
+	data, err := fsutil.ReadFile(path, 4<<20)
 	if err != nil {
 		return fmt.Errorf("read %s for backup: %w", path, err)
 	}
@@ -384,7 +474,7 @@ func backupRedacted(path string, secrets []string) error {
 	redacted := r.RedactString(string(data))
 
 	backupDir := filepath.Join(filepath.Dir(path), ".aegiskeys-backups")
-	if err := os.MkdirAll(backupDir, 0700); err != nil {
+	if err := fsutil.EnsureDir(backupDir); err != nil {
 		return err
 	}
 
@@ -395,7 +485,6 @@ func backupRedacted(path string, secrets []string) error {
 	if err := atomicWrite(backupPath, []byte(redacted), 0600); err != nil {
 		return fmt.Errorf("write backup %s: %w", backupPath, err)
 	}
-	_ = os.Chmod(backupPath, 0600)
 	return nil
 }
 
@@ -419,7 +508,7 @@ func mergeJSONFile(path string, newContent []byte, mode os.FileMode) error {
 		return atomicWrite(path, merged, mode)
 	}
 
-	data, err := os.ReadFile(path)
+	data, err := fsutil.ReadFile(path, 4<<20)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
 	}
@@ -488,7 +577,7 @@ func mergeJSONCFileInternal(path string, newContent []byte, mode os.FileMode) er
 		}
 		return atomicWrite(path, merged, mode)
 	}
-	data, err := os.ReadFile(path)
+	data, err := fsutil.ReadFile(path, 4<<20)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
 	}
@@ -590,7 +679,7 @@ func mergeYAMLFile(path string, newContent []byte, mode os.FileMode, managedBloc
 		return atomicWrite(path, []byte(sb.String()), mode)
 	}
 
-	data, err := os.ReadFile(path)
+	data, err := fsutil.ReadFile(path, 4<<20)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
 	}
@@ -687,7 +776,7 @@ func mergeTOMLFile(path string, newContent []byte, mode os.FileMode) error {
 		return atomicWrite(path, merged, mode)
 	}
 
-	data, err := os.ReadFile(path)
+	data, err := fsutil.ReadFile(path, 4<<20)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
 	}
@@ -735,7 +824,7 @@ func mergeXMLFile(path string, newContent []byte, mode os.FileMode) error {
 		}
 		return atomicWrite(path, newContent, mode)
 	}
-	data, err := os.ReadFile(path)
+	data, err := fsutil.ReadFile(path, 4<<20)
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
 	}

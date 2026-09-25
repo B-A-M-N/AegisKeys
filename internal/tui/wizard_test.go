@@ -202,8 +202,9 @@ func TestWizard_ProviderCompatViews_IncludesIncompatible(t *testing.T) {
 	// that previously dead-ended the wizard.
 	_ = m.providers.Add(provider.Provider{
 		Name: "gemini-clone", Slug: "gemini-clone", EnvVar: "GEMINI_API_KEY",
-		BaseURL:       "https://generativelanguage.googleapis.com",
-		Compatibility: provider.CompatGoogle,
+		BaseURL:        "https://generativelanguage.googleapis.com",
+		Compatibility:  provider.CompatGoogle,
+		AllowQueryAuth: true,
 	})
 
 	views := m.wizardProviderCompatViews()

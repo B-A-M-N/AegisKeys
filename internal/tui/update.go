@@ -3,7 +3,11 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,6 +28,13 @@ import (
 	"aegiskeys/internal/secret"
 	"aegiskeys/internal/security"
 )
+
+func brokerUnixClientForTUI(socket string) (*http.Client, error) {
+	return &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "unix", socket)
+	}}}, nil
+}
 
 // Update routes messages. Blocking work never runs here; it returns tea.Cmd.
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -72,12 +83,20 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case unlockResultMsg:
+		if msg.requestID == 0 || msg.requestID != m.unlockRequestID {
+			if msg.vault != nil {
+				secret.ZeroVault(msg.vault)
+			}
+			return m, nil
+		}
+		m.unlockInFlight = false
 		if msg.err != nil {
 			m.unlockError = msg.err.Error()
 			m.passwordInput.Reset()
 			return m, m.passwordInput.Focus()
 		}
 		m.unlocked = true
+		m.unlockSessionContext()
 		m.unlockError = ""
 		m.lastActivity = time.Now()
 		m.keys = msg.keys
@@ -96,7 +115,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case accessApprovalPreparedMsg:
-		if msg.sessionGen != 0 && (msg.sessionGen != m.sessionGen || !m.unlocked || m.vaultSession == nil) {
+		if msg.sessionGen == 0 || msg.sessionGen != m.sessionGen || !m.unlocked || m.vaultSession == nil {
 			return m, cleanupStagedAccessCmd(m.configDir, msg.pending.GrantID)
 		}
 		m.accessApproval = &msg.pending
@@ -106,6 +125,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case accessMutationDoneMsg:
+		if msg.sessionGen != m.sessionGen || !m.unlocked || m.vaultSession == nil {
+			return m, nil
+		}
 		if msg.err != nil {
 			m.statusMsg = msg.err.Error()
 			return m, nil
@@ -117,6 +139,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.brokerMeta, m.brokerErr = msg.meta, ""
 		if msg.err != nil {
 			m.brokerErr = msg.err.Error()
+		}
+		return m, nil
+
+	case brokerStatusMsg:
+		m.brokerRunning = msg.running && !msg.locked
+		if msg.err != "" {
+			m.brokerErr = msg.err
 		}
 		return m, nil
 
@@ -224,6 +253,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.refreshLaunchPreview()
 
 	case wizardModelsFetchedMsg:
+		if msg.requestID != m.wizard.modelRequestID || msg.sessionGen != m.sessionGen {
+			return m, nil
+		}
 		m.wizard.fetchingModels = false
 		if msg.err != nil {
 			// Non-fatal: show error in status but let the user type manually.
@@ -250,14 +282,29 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case scratchExternalEditedMsg:
-		if m.scratchEditing && m.scratchEditingID != "" {
-			m.scratchBodyInput.SetValue(msg.body)
-			m.markScratchDirty()
-			m.statusMsg = "Loaded from external editor; saving automatically."
-			return m, m.scheduleScratchAutosave()
+	case externalEditorPreparedMsg:
+		if msg.err != nil {
+			m.statusMsg = "External editor refused: " + msg.err.Error()
+			return m, nil
 		}
-		return m, nil
+		if msg.sessionGen == 0 || msg.sessionGen != m.sessionGen || !m.unlocked || m.vaultSession == nil || msg.scratchID == "" || m.scratchEditingID != msg.scratchID {
+			msg.cleanup()
+			return m, nil
+		}
+		return m, executeExternalEditor(msg)
+
+	case externalEditorFinishedMsg:
+		if msg.err != nil {
+			m.statusMsg = "External editor failed: " + msg.err.Error()
+			return m, nil
+		}
+		if msg.sessionGen != m.sessionGen || !m.unlocked || m.vaultSession == nil || m.scratchEditingID != msg.scratchID {
+			return m, nil
+		}
+		m.scratchBodyInput.SetValue(msg.body)
+		m.markScratchDirty()
+		m.statusMsg = "Loaded from external editor; saving automatically."
+		return m, m.scheduleScratchAutosave()
 
 	case scratchAutosaveMsg:
 		if msg.id != m.scratchEditingID || msg.revision != m.scratchRevision || !m.scratchDirty || m.scratchSaveInFlight {
@@ -266,20 +313,31 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.saveScratchPadDraft(false, true)
 
 	case profileEditSavedMsg:
+		if msg.sessionGen != m.sessionGen || !m.unlocked || m.vaultSession == nil {
+			if msg.vault != nil {
+				secret.ZeroVault(msg.vault)
+			}
+			return m, nil
+		}
 		if msg.err != nil {
+			if msg.vault != nil {
+				secret.ZeroVault(msg.vault)
+			}
 			m.statusMsg = "Profile save failed: " + msg.err.Error()
 			return m, nil
 		}
 		m.profiles = msg.profiles
 		if msg.vault != nil && m.vaultSession != nil {
-			m.vaultSession.vault = msg.vault
-			m.keys = secret.ToMaskedList(msg.vault.Keys)
+			m.replaceVaultSnapshot(msg.vault)
 		}
 		m.logAudit("profile.edit", "", msg.name)
 		m.statusMsg = "Updated."
 		return m, nil
 
 	case scratchDeletedMsg:
+		if msg.sessionGen != m.sessionGen || !m.unlocked || m.vaultSession == nil {
+			return m, nil
+		}
 		if msg.err != nil {
 			m.statusMsg = "Scratchpad delete failed: " + msg.err.Error()
 			return m, nil
@@ -289,8 +347,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusMsg = "Scratchpad deleted; vault refresh failed: " + err.Error()
 			return m, nil
 		}
-		m.vaultSession.vault = latest
-		m.keys = secret.ToMaskedList(latest.Keys)
+		m.replaceVaultSnapshot(latest)
 		if m.scratchListSelected > 0 {
 			m.scratchListSelected--
 		}
@@ -300,7 +357,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case scratchSavedMsg:
-		m.scratchSaveInFlight = false
+		if msg.sessionGen != m.sessionGen || !m.unlocked || m.vaultSession == nil {
+			m.scratchSaveInFlight = false
+			return m, nil
+		}
 		if msg.err != nil {
 			m.statusMsg = "Scratchpad save failed: " + msg.err.Error()
 			return m, nil
@@ -311,7 +371,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.logAudit("scratch.update", "", "")
 		if m.vaultSession != nil && m.vaultSession.key != ([32]byte{}) {
 			if latest, err := secret.LoadVaultByKey(config.VaultPath(m.configDir), m.vaultSession.key); err == nil {
-				m.vaultSession.vault = latest
+				m.replaceVaultSnapshot(latest)
 			}
 		}
 		if msg.closeEditor && m.scratchEditingID == msg.id {
@@ -334,6 +394,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case modelCatalogLoadedMsg:
 		m.modelCatalog.fetching = false
+		if msg.requestID != m.modelCatalog.requestID || msg.sessionGen != m.sessionGen {
+			return m, nil
+		}
 		if msg.err != nil {
 			m.modelCatalog.errMsg = "Refresh failed: " + msg.err.Error()
 			return m, nil
@@ -389,6 +452,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		// Always allow ctrl+c to quit.
 		if msg.String() == "ctrl+c" {
+			m.lockVault()
 			m.quit = true
 			return m, tea.Quit
 		}
@@ -459,7 +523,8 @@ func (m *model) handlePaste(content string) (tea.Model, tea.Cmd) {
 
 	// Modal is active: route paste to addInput for any modal that uses it.
 	switch m.modal {
-	case modalAddKey, modalAdd, modalEdit, modalRotate, modalReplaceProfileKey:
+	case modalAddKey, modalAdd, modalEdit, modalRotate, modalReplaceProfileKey,
+		modalAccess, modalAccessRebind, modalAccessApprove:
 		var cmd tea.Cmd
 		m.addInput, cmd = m.addInput.Update(tea.PasteMsg{Content: content})
 		if m.modal == modalAddKey {
@@ -495,7 +560,16 @@ func (m *model) handleLockedKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch k.String() {
 	case "enter":
 		if pw := m.passwordInput.Value(); pw != "" {
-			return m, unlockCmd(m.configDir, pw)
+			if m.unlockInFlight {
+				return m, nil
+			}
+			m.unlockRequestID++
+			if m.unlockRequestID == 0 {
+				m.unlockRequestID = 1
+			}
+			m.unlockInFlight = true
+			requestID := m.unlockRequestID
+			return m, unlockCmd(m.configDir, pw, requestID)
 		}
 		return m, nil
 	case "esc":
@@ -725,24 +799,24 @@ func (m *model) handleContentKey(key string) (tea.Model, tea.Cmd) {
 }
 
 func revokeAccessGrantCmd(configDir, grantID string) tea.Cmd {
+	return revokeAccessGrantSessionCmd(context.Background(), configDir, grantID, [32]byte{}, 0)
+}
+
+func revokeAccessGrantSessionCmd(ctx context.Context, configDir, grantID string, vaultKey [32]byte, sessionGen uint64) tea.Cmd {
 	path := config.BrokerPath(configDir)
 	return func() tea.Msg {
-		err := broker.MutateBrokerFile(path, func(meta *broker.File) error {
-			for i := range meta.Grants {
-				if meta.Grants[i].ID == grantID {
-					meta.Grants[i].Enabled = false
-					return nil
-				}
-			}
-			return fmt.Errorf("grant %s not found", grantID)
-		})
-		return accessMutationDoneMsg{err: err, message: "Access grant revoked."}
+		if err := approvalContextErr(ctx); err != nil {
+			return accessMutationDoneMsg{err: err, sessionGen: sessionGen}
+		}
+		err := broker.RevokeGrant(path, config.VaultPath(configDir), vaultKey, grantID)
+		return accessMutationDoneMsg{err: err, message: "Access grant revoked.", sessionGen: sessionGen}
 	}
 }
 
 type accessMutationDoneMsg struct {
-	message string
-	err     error
+	message    string
+	err        error
+	sessionGen uint64
 }
 
 // approvalCrashPoint is a test-only fault injection hook. Production never
@@ -783,74 +857,7 @@ func cleanupStaleStagedAccessCmd(configDir string, maxAge time.Duration) tea.Cmd
 
 func recoverPendingApprovalsCmd(configDir string, vaultKey [32]byte) tea.Cmd {
 	return func() tea.Msg {
-		err := broker.TransactBrokerFile(config.BrokerPath(configDir), func(meta *broker.File) error {
-			if len(meta.PendingApprovals) == 0 {
-				return nil
-			}
-			terminal := map[string]bool{}
-			processed := map[string]bool{}
-			for _, grant := range meta.Grants {
-				if grant.Enabled {
-					terminal[grant.ID] = true
-				}
-			}
-			for _, intent := range meta.PendingApprovals {
-				processed[intent.GrantID] = true
-				if terminal[intent.GrantID] {
-					continue
-				}
-				neededResolve, neededRotate := intent.PriorAllowResolve, intent.PriorAllowRotate
-				bindingSecrets := map[string]string{}
-				for _, binding := range meta.Bindings {
-					bindingSecrets[binding.ID] = binding.SecretID
-				}
-				for _, grant := range meta.Grants {
-					if !grant.Enabled || bindingSecrets[grant.BindingID] != intent.SecretID {
-						continue
-					}
-					for _, capability := range grant.Capabilities {
-						if capability == broker.CapabilityResolve {
-							neededResolve = true
-						}
-						if capability == broker.CapabilityRotate {
-							neededRotate = true
-						}
-					}
-				}
-				if err := secret.MutateVaultSession(config.VaultPath(configDir), "", vaultKey, secret.SessionMutation{Mutate: func(v *secret.Vault) error {
-					rec := v.Get(intent.SecretID)
-					if rec == nil {
-						return nil
-					}
-					rec.Policy.AllowBrokerResolve = neededResolve
-					rec.Policy.AllowBrokerRotate = neededRotate
-					return nil
-				}}); err != nil {
-					return err
-				}
-			}
-			rollbacks := map[string]bool{}
-			for grantID := range processed {
-				if !terminal[grantID] {
-					rollbacks[grantID] = true
-				}
-			}
-			grants := meta.Grants[:0]
-			for _, grant := range meta.Grants {
-				if !rollbacks[grant.ID] {
-					grants = append(grants, grant)
-				}
-			}
-			meta.Grants = grants
-			intents := meta.PendingApprovals[:0]
-			for _, intent := range meta.PendingApprovals {
-				if !processed[intent.GrantID] {
-					intents = append(intents, intent)
-				}
-			}
-			meta.PendingApprovals = intents
-			return nil
-		})
+		err := broker.RecoverPendingApprovals(config.BrokerPath(configDir), config.VaultPath(configDir), vaultKey)
 		return accessMutationDoneMsg{err: err}
 	}
 }
@@ -860,12 +867,22 @@ func (m *model) handleAccessApprovalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 	steps := []struct{ prompt, placeholder string }{
 		{"Approve executable path for binding", "/absolute/path/to/app"},
 		{"Capability (resolve, rotate, or both)", "resolve"},
+		{"Components (primary, secondary keys; comma-separated)", "primary"},
 		{"Expiration (future RFC3339)", time.Now().Add(time.Hour).Format(time.RFC3339)},
 	}
 	if key == "esc" {
 		m.modal = modalNone
 		m.focus = focusContent
 		m.addInput.Blur()
+		return m, nil
+	}
+	if m.accessStep == 0 && broker.SupportedInterpreter(strings.TrimSpace(m.addInput.Value())) && !strings.Contains(m.modalPrompt, "interpreter-wide") {
+		m.modalPrompt += "\nWARNING: this authorizes every script run by this interpreter; it is not per-script isolation."
+	}
+	if !m.unlocked || m.vaultSession == nil || m.sessionCtx == nil {
+		m.statusMsg = "Unlock the vault before approving application access."
+		m.modal = modalNone
+		m.focus = focusContent
 		return m, nil
 	}
 	if key != "enter" {
@@ -885,14 +902,18 @@ func (m *model) handleAccessApprovalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) 
 		m.modalPrompt = steps[m.accessStep].prompt
 		return m, m.addInput.Focus()
 	}
-	bindingID := m.modalTarget
-	return m, prepareAccessApprovalGenCmd(m.configDir, bindingID, m.sessionGen, m.vaultSession.key, m.addValues[0], m.addValues[1], m.addValues[2])
+	return m, prepareAccessApprovalSessionCmd(m.sessionCtx, m.configDir, m.modalTarget, m.sessionGen, m.vaultSession.key, m.addValues[0], m.addValues[1], m.addValues[2], m.addValues[3])
 }
 
 func prepareAccessApprovalCmd(configDir, bindingID string, vaultKey [32]byte, executable, capabilityText, expiresText string) tea.Cmd {
-	return prepareAccessApprovalGenCmd(configDir, bindingID, 0, vaultKey, executable, capabilityText, expiresText)
+	return prepareAccessApprovalGenCmd(configDir, bindingID, 1, vaultKey, executable, capabilityText, expiresText)
 }
+
 func prepareAccessApprovalGenCmd(configDir, bindingID string, sessionGen uint64, vaultKey [32]byte, executable, capabilityText, expiresText string) tea.Cmd {
+	return prepareAccessApprovalSessionCmd(context.Background(), configDir, bindingID, sessionGen, vaultKey, executable, capabilityText, expiresText, "primary")
+}
+
+func prepareAccessApprovalSessionCmd(ctx context.Context, configDir, bindingID string, sessionGen uint64, vaultKey [32]byte, executable, capabilityText, expiresText, componentText string) tea.Cmd {
 	return func() tea.Msg {
 		canonical, err := filepath.EvalSymlinks(executable)
 		if err != nil {
@@ -906,60 +927,62 @@ func prepareAccessApprovalGenCmd(configDir, bindingID string, sessionGen uint64,
 		if err != nil {
 			return accessMutationDoneMsg{err: err}
 		}
+		components := parseAccessComponents(componentText)
+		if len(components) == 0 {
+			return accessMutationDoneMsg{err: fmt.Errorf("at least one credential component is required")}
+		}
 		expiration, err := time.Parse(time.RFC3339, expiresText)
 		if err != nil || !expiration.After(time.Now()) {
 			return accessMutationDoneMsg{err: fmt.Errorf("expiration must be a future RFC3339 timestamp")}
 		}
-		meta, err := broker.LoadBrokerFile(config.BrokerPath(configDir))
+		client, err := broker.NewClientConstraint(os.Getuid(), canonical, hash, false)
 		if err != nil {
 			return accessMutationDoneMsg{err: err}
-		}
-		var binding *broker.CredentialBinding
-		for i := range meta.Bindings {
-			if meta.Bindings[i].ID == bindingID {
-				binding = &meta.Bindings[i]
-			}
-		}
-		if binding == nil {
-			return accessMutationDoneMsg{err: fmt.Errorf("binding not found")}
 		}
 		grantID, err := broker.NewGrantID()
 		if err != nil {
 			return accessMutationDoneMsg{err: err}
 		}
-		v, err := secret.LoadVaultByKey(config.VaultPath(configDir), vaultKey)
+		intent, err := broker.StageApproval(ctx, config.BrokerPath(configDir), config.VaultPath(configDir), vaultKey, bindingID, broker.ApprovalGrantSpec{
+			ID: grantID, Name: filepath.Base(canonical), BindingID: bindingID, Client: client,
+			Capabilities: capabilities, ComponentAllowlist: components, ExpiresAt: &expiration,
+		})
 		if err != nil {
-			return accessMutationDoneMsg{err: err}
-		}
-		rec := v.Get(binding.SecretID)
-		if rec == nil || rec.Archived {
-			secret.ZeroVault(v)
-			return accessMutationDoneMsg{err: fmt.Errorf("binding target not found or archived")}
-		}
-		prior := rec.Policy
-		secret.ZeroVault(v)
-		now := time.Now()
-		pending := accessApprovalPending{BindingID: binding.ID, SecretID: binding.SecretID, BindingName: binding.Name, Executable: canonical, Hash: hash, Capabilities: capabilities, ExpiresAt: expiration, GrantID: grantID, VaultKey: vaultKey, PriorPolicy: prior}
-		if err := broker.MutateBrokerFile(config.BrokerPath(configDir), func(meta *broker.File) error {
-			meta.Grants = append(meta.Grants, broker.AccessGrant{ID: grantID, Name: filepath.Base(canonical), BindingID: binding.ID, Client: broker.ClientConstraint{UID: os.Getuid(), ExecutablePath: canonical, ExecutableHash: hash}, Capabilities: capabilities, Enabled: false, CreatedAt: now, ExpiresAt: &expiration})
-			meta.PendingApprovals = append(meta.PendingApprovals, broker.ApprovalIntent{GrantID: grantID, BindingID: binding.ID, SecretID: binding.SecretID, Capabilities: capabilities, PriorAllowResolve: prior.AllowBrokerResolve, PriorAllowRotate: prior.AllowBrokerRotate, CreatedAt: now})
-			return nil
-		}); err != nil {
 			return accessMutationDoneMsg{err: err}
 		}
 		if approvalCrashPoint != nil {
 			approvalCrashPoint("after-stage")
 		}
+		pending := accessApprovalPending{
+			BindingID: intent.BindingID, SecretID: intent.SecretID, BindingName: bindingNameForIntent(configDir, intent.BindingID),
+			Executable: canonical, Hash: hash, Capabilities: append([]broker.Capability(nil), intent.Capabilities...),
+			ComponentAllowlist: append([]string(nil), components...),
+			ExpiresAt:          expiration, GrantID: intent.GrantID, VaultKey: vaultKey, SessionGen: sessionGen,
+		}
 		return accessApprovalPreparedMsg{pending: pending, sessionGen: sessionGen}
 	}
 }
 
+func bindingNameForIntent(configDir, bindingID string) string {
+	meta, err := broker.LoadBrokerFile(config.BrokerPath(configDir))
+	if err != nil {
+		return bindingID
+	}
+	if binding := meta.FindBindingByID(bindingID); binding != nil {
+		return binding.Name
+	}
+	return bindingID
+}
+
 func parseAccessCapabilities(text string) ([]broker.Capability, error) {
 	seen := map[broker.Capability]bool{}
-	for _, raw := range strings.Split(strings.ToLower(text), ",") {
+	parts := strings.Split(strings.ToLower(text), ",")
+	for _, raw := range parts {
 		raw = strings.TrimSpace(raw)
 		if raw == "both" {
-			raw = "resolve,rotate"
+			seen[broker.CapabilityResolve] = true
+			seen[broker.CapabilityRotate] = true
+			continue
 		}
 		if raw == "" {
 			continue
@@ -981,6 +1004,19 @@ func parseAccessCapabilities(text string) ([]broker.Capability, error) {
 		out = append(out, broker.CapabilityRotate)
 	}
 	return out, nil
+}
+
+func parseAccessComponents(text string) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, v := range strings.Split(text, ",") {
+		v = strings.TrimSpace(v)
+		if v != "" && !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 type accessApprovalPreparedMsg struct {
@@ -1007,7 +1043,7 @@ func (m *model) handleAccessConfirmKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if p == nil {
 			return m, nil
 		}
-		return m, commitStagedAccessCmd(m.configDir, *p)
+		return m, commitStagedAccessSessionCmd(m.sessionCtx, m.configDir, *p)
 	default:
 		return m, nil
 	}
@@ -1015,132 +1051,22 @@ func (m *model) handleAccessConfirmKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 func cleanupStagedAccessCmd(configDir, grantID string) tea.Cmd {
 	return func() tea.Msg {
-		if grantID == "" {
-			return accessMutationDoneMsg{}
-		}
-		err := broker.MutateBrokerFile(config.BrokerPath(configDir), func(meta *broker.File) error {
-			kept := meta.Grants[:0]
-			for _, g := range meta.Grants {
-				if g.ID != grantID {
-					kept = append(kept, g)
-				}
-			}
-			meta.Grants = kept
-			intents := meta.PendingApprovals[:0]
-			for _, intent := range meta.PendingApprovals {
-				if intent.GrantID != grantID {
-					intents = append(intents, intent)
-				}
-			}
-			meta.PendingApprovals = intents
-			return nil
-		})
-		return accessMutationDoneMsg{err: err}
+		return accessMutationDoneMsg{err: broker.CancelStagedApproval(config.BrokerPath(configDir), grantID)}
 	}
 }
 
 func commitStagedAccessCmd(configDir string, p accessApprovalPending) tea.Cmd {
-	return func() tea.Msg {
-		prior := p.PriorPolicy
-		havePrior := true
-		err := broker.TransactBrokerFile(config.BrokerPath(configDir), func(meta *broker.File) error {
-			var binding *broker.CredentialBinding
-			for i := range meta.Bindings {
-				if meta.Bindings[i].ID == p.BindingID {
-					binding = &meta.Bindings[i]
-				}
-			}
-			if binding == nil || binding.SecretID != p.SecretID {
-				return fmt.Errorf("binding changed after approval was staged")
-			}
-			found := false
-			for i := range meta.Grants {
-				if meta.Grants[i].ID == p.GrantID {
-					found = true
-					break
-				}
-			}
-			if !found {
-				return fmt.Errorf("staged grant missing")
-			}
-			// The vault mutation is inside the broker lock so another approval or
-			// rebind cannot interleave between policy change and activation.
-			if err := secret.MutateVaultSession(config.VaultPath(configDir), "", p.VaultKey, secret.SessionMutation{Mutate: func(v *secret.Vault) error {
-				rec := v.Get(p.SecretID)
-				if rec == nil || rec.Archived {
-					return fmt.Errorf("binding target not found or archived")
-				}
-				for _, cap := range p.Capabilities {
-					if cap == broker.CapabilityResolve {
-						rec.Policy.AllowBrokerResolve = true
-					}
-					if cap == broker.CapabilityRotate {
-						rec.Policy.AllowBrokerRotate = true
-					}
-				}
-				rec.Policy.Version = 1
-				return nil
-			}}); err != nil {
-				return err
-			}
-			if approvalCrashPoint != nil {
-				approvalCrashPoint("after-policy")
-			}
-			for i := range meta.Grants {
-				if meta.Grants[i].ID == p.GrantID {
-					meta.Grants[i].Enabled = true
-					intents := meta.PendingApprovals[:0]
-					for _, intent := range meta.PendingApprovals {
-						if intent.GrantID != p.GrantID {
-							intents = append(intents, intent)
-						}
-					}
-					meta.PendingApprovals = intents
-					return nil
-				}
-			}
-			return fmt.Errorf("staged grant missing")
-		})
-		if err != nil {
-			if havePrior {
-				_ = secret.MutateVaultSession(config.VaultPath(configDir), "", p.VaultKey, secret.SessionMutation{Mutate: func(v *secret.Vault) error {
-					rec := v.Get(p.SecretID)
-					if rec == nil {
-						return fmt.Errorf("target disappeared")
-					}
-					rec.Policy = prior
-					return nil
-				}})
-			}
-			_ = cleanupStagedAccessCmdResult(configDir, p.GrantID)
-			return accessMutationDoneMsg{err: err}
-		}
-		if approvalCrashPoint != nil {
-			approvalCrashPoint("after-activate")
-		}
-		return accessMutationDoneMsg{message: "Access grant approved."}
-	}
+	return commitStagedAccessSessionCmd(context.Background(), configDir, p)
 }
 
-func cleanupStagedAccessCmdResult(configDir, grantID string) error {
-	err := broker.MutateBrokerFile(config.BrokerPath(configDir), func(meta *broker.File) error {
-		kept := meta.Grants[:0]
-		for _, g := range meta.Grants {
-			if g.ID != grantID {
-				kept = append(kept, g)
-			}
+func commitStagedAccessSessionCmd(ctx context.Context, configDir string, p accessApprovalPending) tea.Cmd {
+	return func() tea.Msg {
+		err := broker.CommitApprovalObserved(ctx, config.BrokerPath(configDir), config.VaultPath(configDir), p.VaultKey, p.GrantID, approvalCrashPoint)
+		if err == nil && approvalCrashPoint != nil {
+			approvalCrashPoint("after-activate")
 		}
-		meta.Grants = kept
-		intents := meta.PendingApprovals[:0]
-		for _, intent := range meta.PendingApprovals {
-			if intent.GrantID != grantID {
-				intents = append(intents, intent)
-			}
-		}
-		meta.PendingApprovals = intents
-		return nil
-	})
-	return err
+		return accessMutationDoneMsg{err: err, message: "Access grant approved.", sessionGen: p.SessionGen}
+	}
 }
 
 func (m *model) handleAccessModalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -1171,14 +1097,31 @@ func (m *model) handleAccessModalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.modal = modalNone
 		m.focus = focusContent
 		m.addInput.Blur()
-		if mode == modalAccessRebind {
-			return m, rebindAccessBindingCmd(m.configDir, m.modalTarget, value, m.vaultSession.vault)
+		rec := findVaultRecordByLabelOrID(m.vaultSession.vault, value)
+		secretID := ""
+		if rec != nil {
+			secretID = rec.ID
 		}
-		return m, createAccessBindingCmd(m.configDir, m.addValues[0], value, m.vaultSession.vault)
+		if mode == modalAccessRebind {
+			return m, rebindAccessBindingSessionCmd(m.sessionCtx, m.configDir, m.modalTarget, secretID, m.sessionGen, m.vaultSession.key)
+		}
+		return m, createAccessBindingSessionCmd(m.sessionCtx, m.configDir, m.addValues[0], secretID, m.sessionGen)
 	default:
 		var cmd tea.Cmd
 		m.addInput, cmd = m.addInput.Update(k)
 		return m, cmd
+	}
+}
+
+func approvalContextErr(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("missing session context")
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+		return nil
 	}
 }
 
@@ -1199,9 +1142,16 @@ func findVaultRecordByLabelOrID(v *secret.Vault, selector string) *secret.Secret
 }
 
 func createAccessBindingCmd(configDir, name, keySelector string, vault *secret.Vault) tea.Cmd {
+	secretID := ""
+	if rec := findVaultRecordByLabelOrID(vault, keySelector); rec != nil {
+		secretID = rec.ID
+	}
+	return createAccessBindingSessionCmd(context.Background(), configDir, name, secretID, 0)
+}
+
+func createAccessBindingSessionCmd(ctx context.Context, configDir, name, secretID string, sessionGen uint64) tea.Cmd {
 	return func() tea.Msg {
-		rec := findVaultRecordByLabelOrID(vault, keySelector)
-		if rec == nil || rec.Archived || rec.Secret == "" {
+		if secretID == "" {
 			return accessMutationDoneMsg{err: fmt.Errorf("select an existing non-archived vault key")}
 		}
 		path := config.BrokerPath(configDir)
@@ -1214,67 +1164,67 @@ func createAccessBindingCmd(configDir, name, keySelector string, vault *secret.V
 			if meta.FindBinding(name) != nil || !broker.ValidBindingName(name) {
 				return fmt.Errorf("invalid or duplicate binding %q", name)
 			}
-			meta.Bindings = append(meta.Bindings, broker.CredentialBinding{ID: id, Name: name, SecretID: rec.ID, ComponentAllowlist: []string{"primary"}, CreatedAt: now, UpdatedAt: now})
+			if err := approvalContextErr(ctx); err != nil {
+				return err
+			}
+			meta.Bindings = append(meta.Bindings, broker.CredentialBinding{ID: id, Name: name, SecretID: secretID, ComponentAllowlist: []string{"primary"}, CreatedAt: now, UpdatedAt: now})
 			return nil
 		})
-		return accessMutationDoneMsg{err: err, message: "Binding created for selected vault key."}
+		return accessMutationDoneMsg{err: err, message: "Binding created for selected vault key.", sessionGen: sessionGen}
 	}
 }
 
 func rebindAccessBindingCmd(configDir, bindingID, keySelector string, vault *secret.Vault) tea.Cmd {
+	secretID := ""
+	if rec := findVaultRecordByLabelOrID(vault, keySelector); rec != nil {
+		secretID = rec.ID
+	}
+	return rebindAccessBindingSessionCmd(context.Background(), configDir, bindingID, secretID, 0, [32]byte{})
+}
+
+func rebindAccessBindingSessionCmd(ctx context.Context, configDir, bindingID, secretID string, sessionGen uint64, vaultKey [32]byte) tea.Cmd {
 	return func() tea.Msg {
-		rec := findVaultRecordByLabelOrID(vault, keySelector)
-		if rec == nil || rec.Archived || rec.Secret == "" {
+		if secretID == "" {
 			return accessMutationDoneMsg{err: fmt.Errorf("select an existing non-archived vault key")}
 		}
-		err := broker.MutateBrokerFile(config.BrokerPath(configDir), func(meta *broker.File) error {
-			for i := range meta.Bindings {
-				if meta.Bindings[i].ID == bindingID {
-					meta.Bindings[i].SecretID = rec.ID
-					meta.Bindings[i].UpdatedAt = time.Now()
-					for j := range meta.Grants {
-						if meta.Grants[j].BindingID == bindingID {
-							meta.Grants[j].Enabled = false
-						}
-					}
-					return nil
-				}
-			}
-			return fmt.Errorf("binding not found")
-		})
-		return accessMutationDoneMsg{err: err, message: "Binding rebound; prior grants suspended."}
+		if err := approvalContextErr(ctx); err != nil {
+			return accessMutationDoneMsg{err: err, sessionGen: sessionGen}
+		}
+		err := broker.RebindBinding(config.BrokerPath(configDir), config.VaultPath(configDir), vaultKey, bindingID, secretID)
+		return accessMutationDoneMsg{err: err, message: "Binding rebound; prior grants suspended.", sessionGen: sessionGen}
 	}
 }
 
 func (m *model) handleAccessKey(key string) (tea.Model, tea.Cmd) {
+	rowCount := len(m.accessRows())
 	switch key {
 	case "s", "down", "j":
-		m.selected[screenAccess] = m.clampSelected(m.selected[screenAccess] + 1)
+		if rowCount > 0 && m.selected[screenAccess] < rowCount-1 {
+			m.selected[screenAccess]++
+		}
 	case "w", "up", "k":
 		if m.selected[screenAccess] > 0 {
 			m.selected[screenAccess]--
 		}
 	case "r", "enter":
-		return m, loadAccessMetadataCmd(m.configDir)
-	case "x":
-		if m.brokerMeta == nil || m.selected[screenAccess] >= len(m.brokerMeta.Bindings) {
-			return m, nil
-		}
-		binding := m.brokerMeta.Bindings[m.selected[screenAccess]]
-		grantID := ""
-		for _, grant := range m.brokerMeta.Grants {
-			if grant.BindingID == binding.ID && grant.Enabled {
-				grantID = grant.ID
-				break
+		if key == "enter" {
+			if row, ok := m.selectedAccessRow(); ok && row.grant != nil {
+				return m.openDetail()
 			}
 		}
-		if grantID == "" {
+		return m, tea.Batch(loadAccessMetadataCmd(m.configDir), loadBrokerStatusCmd(m.configDir))
+	case "x":
+		row, ok := m.selectedAccessRow()
+		if !ok || row.grant == nil {
+			return m, nil
+		}
+		if !row.grant.Enabled {
 			m.statusMsg = "No active grant to revoke."
 			return m, nil
 		}
 		m.modal = modalConfirmDelete
 		m.focus = focusModal
-		m.modalTarget = "grant:" + grantID
+		m.modalTarget = "grant:" + row.grant.ID
 		return m, nil
 	case "z", "n":
 		if !m.unlocked || m.vaultSession == nil {
@@ -1289,10 +1239,11 @@ func (m *model) handleAccessKey(key string) (tea.Model, tea.Cmd) {
 		m.modalPrompt = "New binding: stable app/credential name"
 		return m, m.addInput.Focus()
 	case "a":
-		if m.brokerMeta == nil || m.selected[screenAccess] >= len(m.brokerMeta.Bindings) {
+		row, ok := m.selectedAccessRow()
+		if !ok || row.binding == nil {
 			return m, nil
 		}
-		binding := m.brokerMeta.Bindings[m.selected[screenAccess]]
+		binding := row.binding
 		m.modal = modalAccessApprove
 		m.focus = focusModal
 		m.accessStep = 0
@@ -1304,10 +1255,11 @@ func (m *model) handleAccessKey(key string) (tea.Model, tea.Cmd) {
 		m.modalPrompt = "Approve executable path for " + binding.Name
 		return m, m.addInput.Focus()
 	case "e":
-		if m.brokerMeta == nil || m.selected[screenAccess] >= len(m.brokerMeta.Bindings) {
+		row, ok := m.selectedAccessRow()
+		if !ok || row.binding == nil {
 			return m, nil
 		}
-		binding := m.brokerMeta.Bindings[m.selected[screenAccess]]
+		binding := row.binding
 		m.modal = modalAccessRebind
 		m.focus = focusModal
 		m.addStep = 0
@@ -1325,6 +1277,46 @@ func loadAccessMetadataCmd(configDir string) tea.Cmd {
 	return func() tea.Msg {
 		meta, err := broker.LoadBrokerFile(config.BrokerPath(configDir))
 		return accessMetadataMsg{meta: meta, err: err}
+	}
+}
+
+type brokerStatusMsg struct {
+	running, locked bool
+	err             string
+}
+
+func loadBrokerStatusCmd(configDir string) tea.Cmd {
+	return func() tea.Msg {
+		socket := config.BrokerSocketPath(configDir)
+		info, err := os.Lstat(socket)
+		if err != nil {
+			return brokerStatusMsg{}
+		}
+		if info.Mode()&os.ModeSocket == 0 {
+			return brokerStatusMsg{err: "unsafe broker socket path"}
+		}
+		client, err := brokerUnixClientForTUI(socket)
+		if err != nil {
+			return brokerStatusMsg{err: err.Error()}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://broker/v1/status", nil)
+		if err != nil {
+			return brokerStatusMsg{err: err.Error()}
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			return brokerStatusMsg{err: "stopped or stale"}
+		}
+		defer resp.Body.Close()
+		var out struct {
+			Locked bool `json:"locked"`
+		}
+		if err := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&out); err != nil {
+			return brokerStatusMsg{err: "invalid status"}
+		}
+		return brokerStatusMsg{running: true, locked: out.Locked}
 	}
 }
 
@@ -1627,6 +1619,16 @@ func (m *model) handleSettingsKey(key string) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) adjustSetting(dir int) (tea.Model, tea.Cmd) {
+	if m.selected[screenSettings] == 5 {
+		return m.adjustAnimationSetting()
+	}
+	previous := m.cfg
+	restorePrevious := func() {
+		m.cfg = previous
+		m.themeName = normalizeTheme(previous.Theme)
+		m.styles = NewStyles(m.themeName)
+		m.autoLockAfter = time.Duration(previous.AutoLock) * time.Minute
+	}
 	switch m.selected[screenSettings] {
 	case 0:
 		m.cfg.AutoLock = cycleInt(m.cfg.AutoLock, []int{0, 5, 15, 30, 60}, dir)
@@ -1654,21 +1656,6 @@ func (m *model) adjustSetting(dir int) (tea.Model, tea.Cmd) {
 	case 4:
 		m.cfg.AdapterVerifyTimeoutSeconds = cycleInt(m.cfg.AdapterVerifyTimeoutSeconds, []int{5, 10, 20, 30, 60, 120}, dir)
 		m.statusMsg = fmt.Sprintf("Adapter verify timeout: %ds", m.cfg.AdapterVerifyTimeoutSeconds)
-	case 5:
-		wasEnabled := m.cfg.EnableAnimations
-		m.cfg.EnableAnimations = !wasEnabled
-		m.statusMsg = fmt.Sprintf("Animations: %t", m.cfg.EnableAnimations)
-		if err := m.persistSetting(5); err != nil {
-			m.statusMsg += " (save failed: " + err.Error() + ")"
-			return m, nil
-		}
-		if !wasEnabled && m.cfg.EnableAnimations {
-			return m, m.startAnimation()
-		}
-		if wasEnabled && !m.cfg.EnableAnimations {
-			m.stopAnimation()
-		}
-		return m, nil
 	case 6:
 		m.cfg.EnableRiskyExport = !m.cfg.EnableRiskyExport
 		m.statusMsg = fmt.Sprintf("Risky export: %t", m.cfg.EnableRiskyExport)
@@ -1693,12 +1680,37 @@ func (m *model) adjustSetting(dir int) (tea.Model, tea.Cmd) {
 		// Inherit env is edited via CLI (it is a free-form list of var names).
 		m.statusMsg = "Edit inherit_env via CLI: aegiskeys settings set inherit_env TMUX,DISPLAY"
 		return m, nil
+	case 11:
+		m.cfg.EnableExternalScratchpadEditor = !m.cfg.EnableExternalScratchpadEditor
+		m.statusMsg = fmt.Sprintf("External scratchpad editor: %t", m.cfg.EnableExternalScratchpadEditor)
 	default:
 		return m, nil
 	}
 	if err := m.persistSetting(m.selected[screenSettings]); err != nil {
+		restorePrevious()
 		m.statusMsg += " (save failed: " + err.Error() + ")"
 	}
+	return m, nil
+}
+
+func (m *model) adjustAnimationSetting() (tea.Model, tea.Cmd) {
+	previous := m.cfg.EnableAnimations
+	desired := !previous
+	// Persist first; the in-memory/effective state changes only after success.
+	if err := config.MutateConfigFile(config.ConfigPath(m.configDir), func(latest *config.Config) error {
+		latest.EnableAnimations = desired
+		return nil
+	}); err != nil {
+		m.cfg.EnableAnimations = previous
+		m.statusMsg = "Animation setting save failed: " + err.Error()
+		return m, nil
+	}
+	m.cfg.EnableAnimations = desired
+	m.statusMsg = fmt.Sprintf("Animations: %t", desired)
+	if desired {
+		return m, m.startAnimation()
+	}
+	m.stopAnimation()
 	return m, nil
 }
 
@@ -1726,6 +1738,8 @@ func (m *model) persistSetting(index int) error {
 			if latest.RuntimePolicy == config.RuntimePolicyStrict {
 				latest.EnableRiskyExport = false
 			}
+		case 11:
+			latest.EnableExternalScratchpadEditor = m.cfg.EnableExternalScratchpadEditor
 		}
 		return nil
 	})
@@ -1899,7 +1913,9 @@ func (m *model) saveScratchPadDraft(closeEditor, autosave bool) tea.Cmd {
 	sp.Title = m.scratchTitleInput.Value()
 	sp.Body = m.scratchBodyInput.Value()
 	if err := m.vaultSession.vault.UpdateScratchPad(sp.ID, *sp); err != nil {
-		return func() tea.Msg { return scratchSavedMsg{err: err} }
+		return func() tea.Msg {
+			return scratchSavedMsg{id: sp.ID, sessionGen: m.sessionGen, revision: m.scratchRevision, err: err}
+		}
 	}
 	// Never start a second vault write while one is in flight. The in-memory
 	// model still receives the latest fields; the completion handler schedules
@@ -1911,12 +1927,12 @@ func (m *model) saveScratchPadDraft(closeEditor, autosave bool) tea.Cmd {
 	// transaction; do not persist this model's potentially stale vault.
 	spCopy := *sp
 	m.scratchSaveInFlight = true
-	key, configDir, id, revision := m.vaultSession.key, m.configDir, sp.ID, m.scratchRevision
+	key, configDir, id, revision, sessionGen := m.vaultSession.key, m.configDir, sp.ID, m.scratchRevision, m.sessionGen
 	return func() tea.Msg {
 		err := secret.MutateVaultWithKey(config.VaultPath(configDir), key, func(latest *secret.Vault) error {
 			return latest.UpdateScratchPad(spCopy.ID, spCopy)
 		})
-		return scratchSavedMsg{id: id, closeEditor: closeEditor, autosave: autosave, revision: revision, err: err}
+		return scratchSavedMsg{id: id, sessionGen: sessionGen, closeEditor: closeEditor, autosave: autosave, revision: revision, err: err}
 	}
 }
 
@@ -2056,36 +2072,38 @@ func (m *model) deleteScratchPad() tea.Cmd {
 	}
 	id, key, path := sp.ID, m.vaultSession.key, config.VaultPath(m.configDir)
 	return func() tea.Msg {
-		return scratchDeletedMsg{id: id, err: secret.MutateVaultWithKey(path, key, func(latest *secret.Vault) error { return latest.RemoveScratchPad(id) })}
+		return scratchDeletedMsg{id: id, sessionGen: m.sessionGen, err: secret.MutateVaultWithKey(path, key, func(latest *secret.Vault) error { return latest.RemoveScratchPad(id) })}
 	}
 }
 
 // editScratchInExternalEditor opens the scratchpad body in $EDITOR.
 func (m *model) editScratchInExternalEditor() tea.Cmd {
+	if !m.cfg.EnableExternalScratchpadEditor {
+		m.statusMsg = "External scratchpad editing is disabled. Enable it in settings only after reviewing editor backup/swap behavior."
+		return nil
+	}
+	if !m.scratchEditing {
+		if cmd := m.editScratchPad(); cmd != nil {
+			_ = cmd()
+		}
+	}
 	sp := m.selectedScratchPad()
-	if sp == nil {
+	if sp == nil || !m.scratchEditing {
 		return nil
 	}
 	current := m.scratchBodyInput.Value()
-	return func() tea.Msg {
-		result, err := openInEditor(current)
-		if err != nil {
-			return statusMsgMsg{msg: "External editor failed: " + err.Error()}
-		}
-		return scratchExternalEditedMsg{body: result}
-	}
+	return prepareExternalEditor(m.configDir, current, m.sessionGen, m.scratchEditingID)
 }
 
 type scratchDeletedMsg struct {
-	id  string
-	err error
-}
-type scratchExternalEditedMsg struct {
-	body string
+	id         string
+	sessionGen uint64
+	err        error
 }
 
 type scratchSavedMsg struct {
 	id          string
+	sessionGen  uint64
 	closeEditor bool
 	autosave    bool
 	revision    uint64
@@ -2102,7 +2120,7 @@ type statusMsgMsg struct {
 }
 
 // settingKeys enumerates the adjustable settings on the Settings screen.
-var settingKeys = []string{"Auto-lock", "Theme", "Default profile", "Clipboard TTL", "Verify timeout", "Animations", "Risky export", "Rotation reminders", "Runtime policy", "Config file", "Inherit env"}
+var settingKeys = []string{"Auto-lock", "Theme", "Default profile", "Clipboard TTL", "Verify timeout", "Animations", "Risky export", "Rotation reminders", "Runtime policy", "Config file", "Inherit env", "External scratchpad editor"}
 
 // cycleTheme returns the next theme name after the current one, wrapping
 // around to the first. Used by the Settings screen to step through themes.
@@ -2589,7 +2607,7 @@ func (m *model) handleModalKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.modal = modalNone
 				m.focus = focusContent
 				m.modalTarget = ""
-				return m, revokeAccessGrantCmd(m.configDir, grantID)
+				return m, revokeAccessGrantSessionCmd(m.sessionCtx, m.configDir, grantID, m.vaultSession.key, m.sessionGen)
 			}
 			if m.deleteConfirmWait {
 				// User confirmed the cascade delete of provider + keys.
@@ -3068,9 +3086,8 @@ func (m *model) applyDelete() bool {
 			return false
 		}
 		if latest, err := secret.LoadVaultByKey(config.VaultPath(m.configDir), m.vaultSession.key); err == nil {
-			m.vaultSession.vault = latest
+			m.replaceVaultSnapshot(latest)
 		}
-		m.keys = secret.ToMaskedList(m.vaultSession.vault.Keys)
 		m.logAudit("key.delete", deletedKeyProvider, "")
 		m.statusMsg = "Key deleted."
 	}
@@ -3227,7 +3244,7 @@ func (m *model) commitRotate() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if latest, err := secret.LoadVaultByKey(config.VaultPath(m.configDir), m.vaultSession.key); err == nil {
-		m.vaultSession.vault = latest
+		m.replaceVaultSnapshot(latest)
 	}
 	m.keys = secret.ToMaskedList(m.vaultSession.vault.Keys)
 	m.modal = modalNone
@@ -3335,7 +3352,7 @@ func (m *model) commitKeyAdd() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if latest, err := secret.LoadVaultByKey(config.VaultPath(m.configDir), m.vaultSession.key); err == nil {
-		m.vaultSession.vault = latest
+		m.replaceVaultSnapshot(latest)
 	}
 	m.keys = secret.ToMaskedList(m.vaultSession.vault.Keys)
 	m.modal = modalNone
@@ -3413,7 +3430,7 @@ func (m *model) commitEdit() (tea.Model, tea.Cmd) {
 				})
 				if err == nil {
 					if latest, loadErr := secret.LoadVaultByKey(config.VaultPath(m.configDir), m.vaultSession.key); loadErr == nil {
-						m.vaultSession.vault = latest
+						m.replaceVaultSnapshot(latest)
 						m.keys = secret.ToMaskedList(latest.Keys)
 					}
 					m.logAudit("key.edit", rec.ProviderSlug, "")
@@ -3457,6 +3474,7 @@ func (m *model) commitProfileEdit(vals []string) (tea.Model, tea.Cmd) {
 	}
 	oldName, newName, keySelector, providerSlug := p.Name, vals[0], vals[2], prov.Slug
 	configDir, keyMaterial := m.configDir, m.vaultSession.key
+	sessionGen := m.sessionGen
 	m.modal = modalNone
 	m.focus = focusContent
 	m.addInput.Blur()
@@ -3478,7 +3496,7 @@ func (m *model) commitProfileEdit(vals []string) (tea.Model, tea.Cmd) {
 			return nil
 		})
 		if err != nil {
-			return profileEditSavedMsg{err: err}
+			return profileEditSavedMsg{err: err, sessionGen: sessionGen}
 		}
 		err = profile.MutateStoreFile(config.ProfilesPath(configDir), func(latest *profile.Store) error {
 			updated := latest.Find(oldName)
@@ -3495,19 +3513,20 @@ func (m *model) commitProfileEdit(vals []string) (tea.Model, tea.Cmd) {
 			return nil
 		})
 		if err != nil {
-			return profileEditSavedMsg{err: err}
+			return profileEditSavedMsg{err: err, sessionGen: sessionGen}
 		}
 		stores, _ := profile.LoadStore(config.ProfilesPath(configDir))
 		vault, _ := secret.LoadVaultByKey(config.VaultPath(configDir), keyMaterial)
-		return profileEditSavedMsg{profiles: stores, vault: vault, name: newName}
+		return profileEditSavedMsg{profiles: stores, vault: vault, name: newName, sessionGen: sessionGen}
 	}
 }
 
 type profileEditSavedMsg struct {
-	profiles *profile.Store
-	vault    *secret.Vault
-	name     string
-	err      error
+	profiles   *profile.Store
+	vault      *secret.Vault
+	name       string
+	sessionGen uint64
+	err        error
 }
 
 // handleLaunchKey routes keys on the Launch screen.
@@ -3667,7 +3686,7 @@ func (m *model) refreshLaunchPreview() tea.Cmd {
 // screenInitCmd runs setup when switching to a screen.
 func (m *model) screenInitCmd(s screen) tea.Cmd {
 	if s == screenAccess {
-		return tea.Batch(cleanupStaleStagedAccessCmd(m.configDir, 30*time.Minute), loadAccessMetadataCmd(m.configDir))
+		return tea.Batch(cleanupStaleStagedAccessCmd(m.configDir, 30*time.Minute), loadAccessMetadataCmd(m.configDir), loadBrokerStatusCmd(m.configDir))
 	}
 	if s == screenLaunch {
 		return m.refreshLaunchPreview()
@@ -3680,7 +3699,7 @@ func (m *model) screenInitCmd(s screen) tea.Cmd {
 
 // --- async commands ---
 
-func unlockCmd(configDir, password string) tea.Cmd {
+func unlockCmd(configDir, password string, requestID uint64) tea.Cmd {
 	return func() tea.Msg {
 		// Prefer the explicit keyring session so an empty password remains a
 		// valid authenticated session path and retains its derived vault key.
@@ -3688,7 +3707,7 @@ func unlockCmd(configDir, password string) tea.Cmd {
 			if key, keyErr := keychain.Load(configDir); keyErr == nil {
 				v, loadErr := secret.LoadVaultByKey(config.VaultPath(configDir), key)
 				if loadErr == nil {
-					return unlockResult(configDir, v, key)
+					return unlockResult(configDir, v, key, requestID)
 				}
 				// Best-effort cleanup on a failed keyring load/unlock path.
 				secret.ZeroVault(v)
@@ -3696,13 +3715,13 @@ func unlockCmd(configDir, password string) tea.Cmd {
 		}
 		v, key, err := secret.LoadVaultWithKey(config.VaultPath(configDir), password)
 		if err != nil {
-			return unlockResultMsg{err: err}
+			return unlockResultMsg{err: err, requestID: requestID}
 		}
-		return unlockResult(configDir, v, key)
+		return unlockResult(configDir, v, key, requestID)
 	}
 }
 
-func unlockResult(configDir string, v *secret.Vault, key [32]byte) unlockResultMsg {
+func unlockResult(configDir string, v *secret.Vault, key [32]byte, requestID uint64) unlockResultMsg {
 	// Re-read the envelope to capture KDF metadata for rekey checks.
 	var env *secret.VaultEnvelope
 	if raw, rerr := os.ReadFile(config.VaultPath(configDir)); rerr == nil {
@@ -3712,10 +3731,11 @@ func unlockResult(configDir string, v *secret.Vault, key [32]byte) unlockResultM
 		}
 	}
 	return unlockResultMsg{
-		vault:    v,
-		envelope: env,
-		key:      key,
-		keys:     secret.ToMaskedList(v.Keys),
+		requestID: requestID,
+		vault:     v,
+		envelope:  env,
+		key:       key,
+		keys:      secret.ToMaskedList(v.Keys),
 	}
 }
 
@@ -3735,6 +3755,11 @@ func (m *model) runDoctor() tea.Cmd {
 		profilesCopy, _ = profile.CloneStore(m.profiles)
 	}
 	return func() tea.Msg {
+		defer func() {
+			if vaultCopy != nil {
+				secret.ZeroVault(vaultCopy)
+			}
+		}()
 		if vaultCopy != nil {
 			return doctorResultMsg{sessionGen: generation, results: security.RunDoctorUnlocked(m.configDir, vaultCopy, profilesCopy)}
 		}
@@ -3774,6 +3799,12 @@ func (m *model) prepareTUILaunch(commandLine string) tea.Cmd {
 		}
 	}
 	key := vaultSnapshot.Get(prof.KeyID)
+	if key == nil || key.Archived {
+		secret.ZeroVault(vaultSnapshot)
+		return func() tea.Msg {
+			return launchPreparedMsg{sessionGen: m.sessionGen, profile: prof.Name, err: fmt.Errorf("profile %q references missing or archived key %q", prof.Name, prof.KeyID)}
+		}
+	}
 	vault := m.vaultSession
 	configDir := m.configDir
 	registry := m.adapterRegistry
@@ -3787,6 +3818,7 @@ func (m *model) prepareTUILaunch(commandLine string) tea.Cmd {
 	inheritEnv := append([]string(nil), m.cfg.InheritEnv...)
 	fields, parseErr := splitCommandLine(commandLine)
 	if parseErr != nil {
+		secret.ZeroVault(vaultSnapshot)
 		return func() tea.Msg { return launchPreparedMsg{profile: prof.Name, err: parseErr} }
 	}
 
@@ -3856,29 +3888,62 @@ func errorText(err error) string {
 func sanitizeLaunchOutput(s string) string {
 	var b strings.Builder
 	runes := []rune(s)
+	consumeString := func(i *int) { // starts after ESC ]
+		for *i+1 < len(runes) {
+			*i++
+			if runes[*i] == '\a' {
+				return
+			}
+			if runes[*i] == '\x1b' && *i+1 < len(runes) && runes[*i+1] == '\\' {
+				*i++
+				return
+			}
+		}
+	}
+	consumeDCS := func(i *int) {
+		for *i+1 < len(runes) {
+			*i++
+			if runes[*i] == '\x1b' && *i+1 < len(runes) && runes[*i+1] == '\\' {
+				*i++
+				return
+			}
+		}
+	}
+	consumeCSI := func(i *int) {
+		for *i+1 < len(runes) {
+			*i++
+			if runes[*i] >= 0x40 && runes[*i] <= 0x7e {
+				return
+			}
+		}
+	}
 	for i := 0; i < len(runes); i++ {
 		r := runes[i]
+		if r == 0x9b {
+			consumeCSI(&i)
+			continue
+		} // 8-bit C1 CSI
+		if r == 0x9d {
+			consumeString(&i)
+			continue
+		} // 8-bit C1 OSC
 		if r == '\x1b' && i+1 < len(runes) {
 			i++
 			switch runes[i] {
 			case '[':
-				for i+1 < len(runes) {
-					i++
-					if runes[i] >= 0x40 && runes[i] <= 0x7e {
-						break
-					}
-				}
-			case ']':
-				for i+1 < len(runes) {
-					i++
-					if runes[i] == '\a' || (runes[i] == '\x1b' && i+1 < len(runes) && runes[i+1] == '\\') {
-						if runes[i] == '\x1b' {
-							i++
-						}
-						break
-					}
-				}
+				consumeCSI(&i)
+			case ']', 'X', '^', '_':
+				consumeString(&i)
+			case 'P':
+				consumeDCS(&i)
+			case 0x9b:
+				consumeCSI(&i)
+			case 0x9d:
+				consumeString(&i)
 			}
+			continue
+		}
+		if (r >= 0x80 && r <= 0x9f) || r < 0x20 && r != '\n' && r != '\t' {
 			continue
 		}
 		if r == '\n' || r == '\t' || r >= 0x20 {

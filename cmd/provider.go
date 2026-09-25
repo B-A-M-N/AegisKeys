@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -221,7 +222,9 @@ var providerAddCmd = &cobra.Command{
 		if err := provider.MutateRegistryFile(config.ProvidersPath(dir), func(latest *provider.Registry) error { return latest.Add(p) }); err != nil {
 			return fmt.Errorf("save providers: %w", err)
 		}
-		audit.NewLogger(config.AuditPath(dir)).Log(audit.Event{Event: "provider_added", Provider: addSlug})
+		if err := audit.NewLogger(config.AuditPath(dir)).Log(audit.Event{Event: "provider_added", Provider: addSlug}); err != nil {
+			fmt.Fprintf(os.Stderr, "audit log write failed: %v\n", err)
+		}
 		fmt.Printf("Added provider %s\n", addSlug)
 		return nil
 	},
@@ -261,7 +264,9 @@ var providerRemoveCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("save providers: %w", err)
 		}
-		audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{Event: "provider_removed", Provider: args[0]})
+		if err := audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{Event: "provider_removed", Provider: args[0]}); err != nil {
+			fmt.Fprintf(os.Stderr, "audit log write failed: %v\n", err)
+		}
 		fmt.Printf("Removed provider %s\n", args[0])
 		return nil
 	},
@@ -308,7 +313,9 @@ var providerEditCmd = &cobra.Command{
 		if err := provider.MutateRegistryFile(config.ProvidersPath(dir), func(latest *provider.Registry) error { return latest.Update(args[0], *p) }); err != nil {
 			return fmt.Errorf("save providers: %w", err)
 		}
-		audit.NewLogger(config.AuditPath(dir)).Log(audit.Event{Event: "provider_edited", Provider: args[0]})
+		if err := audit.NewLogger(config.AuditPath(dir)).Log(audit.Event{Event: "provider_edited", Provider: args[0]}); err != nil {
+			fmt.Fprintf(os.Stderr, "audit log write failed: %v\n", err)
+		}
 		fmt.Printf("Updated provider %s\n", args[0])
 		return nil
 	},

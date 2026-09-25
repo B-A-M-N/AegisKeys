@@ -189,7 +189,9 @@ func (e *InteractiveExec) log(event string, metadata map[string]string) {
 	if e.AuditLogger == nil {
 		return
 	}
-	e.AuditLogger.Log(audit.Event{Event: event, Profile: e.Profile, Provider: e.Provider, Metadata: metadata})
+	if err := e.AuditLogger.Log(audit.Event{Event: event, Profile: e.Profile, Provider: e.Provider, Metadata: metadata}); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "audit log write failed: %v\n", err)
+	}
 }
 
 func isTerminal(value any) bool {

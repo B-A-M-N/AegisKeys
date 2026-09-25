@@ -92,13 +92,13 @@ func TestRun_RestoresConfigAfterChildModifiesIt(t *testing.T) {
 	strategy.Plan.Args = []string{"-c", fmt.Sprintf(`echo '{"child": true}' > %s && true`, path)}
 
 	err := Run(context.Background(), strategy, RunOptions{})
-	if err != nil {
-		t.Fatalf("Run: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "changed after launch") {
+		t.Fatalf("Run conflict error = %v", err)
 	}
 
 	restored, _ := os.ReadFile(path)
-	if string(restored) != string(original) {
-		t.Fatalf("after child overwrite + cleanup: content = %q, want %q", string(restored), string(original))
+	if !strings.Contains(string(restored), `"child"`) {
+		t.Fatalf("child modification was not preserved: %q", string(restored))
 	}
 }
 

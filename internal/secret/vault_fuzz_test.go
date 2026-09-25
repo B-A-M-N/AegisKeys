@@ -100,3 +100,23 @@ func cloneEnvelope(e *VaultEnvelope) *VaultEnvelope {
 	c := *e
 	return &c
 }
+
+func TestValidateEnvelopeRejectsExtremeKDFAndOversizedCiphertext(t *testing.T) {
+	for _, p := range []KDFParams{{Time: 11, MemoryKiB: 4, Threads: 1, KeyLen: 32}, {Time: 1, MemoryKiB: 4, Threads: 9, KeyLen: 32}} {
+		env := &VaultEnvelope{Version: 1, KDF: "argon2id", KDFParams: p, Salt: base64.StdEncoding.EncodeToString(make([]byte, 16)), Nonce: base64.StdEncoding.EncodeToString(make([]byte, 12)), Ciphertext: base64.StdEncoding.EncodeToString(make([]byte, 20))}
+		if err := ValidateEnvelope(env); err == nil {
+			t.Fatalf("accepted extreme params %+v", p)
+		}
+	}
+}
+
+func TestOpenEnvelopeWithRecoveryRejectsDigestTampering(t *testing.T) {
+	env, err := SealEnvelope("password", `{"version":1,"keys":[]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.Digest = "0000000000000000000000000000000000000000000000000000000000000000"
+	if _, _, _, _, err := OpenEnvelopeWithRecovery("password", env); err == nil {
+		t.Fatal("recovery path accepted tampered envelope digest")
+	}
+}

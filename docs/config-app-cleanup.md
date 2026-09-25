@@ -107,7 +107,8 @@ writing raw secrets in the first place.
 Filewriter tests:
 
 - Created config file is removed after cleanup.
-- Existing config file is restored byte-for-byte after cleanup.
+- Existing config file is restored byte-for-byte when unchanged after launch.
+- A child/user modification after launch is preserved and reported as a cleanup conflict.
 - Original file mode is restored.
 - Cleanup runs in reverse order.
 - Cleanup failure is returned.
@@ -115,7 +116,7 @@ Filewriter tests:
 
 Runner tests:
 
-- `Run` restores config after successful child exit.
+- `Run` restores unchanged config after successful child exit and preserves modified config with a conflict error.
 - `Run` restores config after non-zero child exit.
 - `Run` reports cleanup failure.
 - Missing command fails before config is written.

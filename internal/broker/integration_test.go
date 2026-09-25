@@ -125,6 +125,9 @@ func post(t *testing.T, socket, path, body string) (int, string) {
 }
 
 func TestBrokerUnixSocketE2E(t *testing.T) {
+	if os.Getenv("AEGISKEYS_RUN_SOCKET_E2E") == "" {
+		t.Skip("set AEGISKEYS_RUN_SOCKET_E2E=1 on a Unix-socket enabled host")
+	}
 	session, vaultPath, key, auditLog, socket := newE2ESession(t)
 	_ = session
 	code, body := post(t, socket, "/v1/resolve", `{"binding":"athena/e2e"}`)
@@ -153,4 +156,42 @@ func TestBrokerUnixSocketE2E(t *testing.T) {
 		}
 	}
 	_ = json.Marshal
+}
+
+func TestBrokerConcurrentResolveRotateImmediateRevocation(t *testing.T) {
+	if os.Getenv("AEGISKEYS_RUN_SOCKET_E2E") == "" {
+		t.Skip("set on a Unix-socket enabled host")
+	}
+	_, _, _, _, socket := newE2ESession(t)
+	errs := make(chan int, 80)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 10; j++ {
+				code, _ := post(t, socket, "/v1/resolve", `{"binding":"athena/e2e"}`)
+				errs <- code
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for code := range errs {
+		if code != 200 {
+			t.Fatalf("resolve=%d", code)
+		}
+	}
+	metaPath := filepath.Join(filepath.Dir(socket), "broker.json")
+	meta, err := broker.LoadBrokerFile(metaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta.Grants[0].Enabled = false
+	if err := broker.SaveBrokerFile(metaPath, meta); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := post(t, socket, "/v1/resolve", `{"binding":"athena/e2e"}`); code != 403 {
+		t.Fatalf("revoked resolve=%d", code)
+	}
 }

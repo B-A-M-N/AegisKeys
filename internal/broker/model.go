@@ -4,15 +4,19 @@
 package broker
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
+	"strings"
 	"time"
+
+	"aegiskeys/internal/fsutil"
+	"aegiskeys/internal/secret"
 )
 
 // ProtocolVersion is the only broker IPC version understood by this build.
@@ -55,32 +59,85 @@ type ClientConstraint struct {
 	UID            int    `json:"uid,omitempty"`
 	ExecutablePath string `json:"executable_path,omitempty"`
 	ExecutableHash string `json:"executable_sha256,omitempty"`
+	// IdentityScope distinguishes a dedicated executable pin from an explicit
+	// interpreter-wide grant. Interpreter grants do not identify an individual
+	// script and must never be presented as per-application isolation.
+	IdentityScope           IdentityScope `json:"identity_scope,omitempty"`
+	InterpreterAcknowledged bool          `json:"interpreter_acknowledged,omitempty"`
+}
+
+type IdentityScope string
+
+const (
+	IdentityDedicatedExecutable IdentityScope = "dedicated_executable"
+	IdentityInterpreterWide     IdentityScope = "interpreter_wide"
+)
+
+var interpreterExecutables = map[string]bool{
+	"bash": true, "bun": true, "deno": true, "java": true, "node": true,
+	"perl": true, "php": true, "python": true, "python2": true, "python3": true,
+	"ruby": true, "sh": true, "zsh": true,
+}
+
+// ClassifyExecutable reports whether a peer pin identifies a dedicated binary
+// or only a shared interpreter runtime. Script paths are intentionally not
+// consulted: argv is attacker-controlled and is not a security boundary.
+func ClassifyExecutable(path string) IdentityScope {
+	base := strings.ToLower(filepath.Base(filepath.Clean(path)))
+	if version := strings.TrimPrefix(base, "python"); version != base && version != "" && strings.Trim(version, "0123456789.") == "" {
+		base = "python"
+	}
+	if interpreterExecutables[base] {
+		return IdentityInterpreterWide
+	}
+	return IdentityDedicatedExecutable
+}
+
+// NewClientConstraint builds a grant client pin. Shared interpreters are
+// refused unless the caller explicitly acknowledges interpreter-wide scope.
+func NewClientConstraint(uid int, executablePath, executableHash string, allowInterpreterWide bool) (ClientConstraint, error) {
+	scope := ClassifyExecutable(executablePath)
+	if scope == IdentityInterpreterWide && !allowInterpreterWide {
+		return ClientConstraint{}, fmt.Errorf("refusing interpreter-wide grant for %s; use a dedicated launcher or explicitly acknowledge interpreter-wide access", filepath.Base(executablePath))
+	}
+	return ClientConstraint{
+		UID:                     uid,
+		ExecutablePath:          executablePath,
+		ExecutableHash:          executableHash,
+		IdentityScope:           scope,
+		InterpreterAcknowledged: scope == IdentityInterpreterWide,
+	}, nil
 }
 
 // AccessGrant authorizes one constrained client to invoke selected operations
 // against one binding.
 type AccessGrant struct {
-	ID           string           `json:"id"`
-	Name         string           `json:"name"`
-	BindingID    string           `json:"binding_id"`
-	Client       ClientConstraint `json:"client"`
-	Capabilities []Capability     `json:"capabilities"`
-	Enabled      bool             `json:"enabled"`
-	CreatedAt    time.Time        `json:"created_at"`
-	ExpiresAt    *time.Time       `json:"expires_at,omitempty"`
+	ID                 string           `json:"id"`
+	Name               string           `json:"name"`
+	BindingID          string           `json:"binding_id"`
+	Client             ClientConstraint `json:"client"`
+	Capabilities       []Capability     `json:"capabilities"`
+	ComponentAllowlist []string         `json:"component_allowlist,omitempty"`
+	Enabled            bool             `json:"enabled"`
+	CreatedAt          time.Time        `json:"created_at"`
+	ExpiresAt          *time.Time       `json:"expires_at,omitempty"`
 }
 
 // ApprovalIntent durably records a cross-domain approval spanning
 // broker.json and vault.enc. Recovery rolls it back when its staged grant is
 // absent; an enabled grant is the committed terminal state.
 type ApprovalIntent struct {
-	GrantID           string       `json:"grant_id"`
-	BindingID         string       `json:"binding_id"`
-	SecretID          string       `json:"secret_id"`
-	Capabilities      []Capability `json:"capabilities"`
-	PriorAllowResolve bool         `json:"prior_allow_resolve"`
-	PriorAllowRotate  bool         `json:"prior_allow_rotate"`
-	CreatedAt         time.Time    `json:"created_at"`
+	GrantID            string                    `json:"grant_id"`
+	BindingID          string                    `json:"binding_id"`
+	SecretID           string                    `json:"secret_id"`
+	Capabilities       []Capability              `json:"capabilities"`
+	PriorAllowResolve  bool                      `json:"prior_allow_resolve"`
+	PriorAllowRotate   bool                      `json:"prior_allow_rotate"`
+	PriorResolveSource secret.BrokerPolicySource `json:"prior_resolve_source,omitempty"`
+	PriorRotateSource  secret.BrokerPolicySource `json:"prior_rotate_source,omitempty"`
+	PriorPolicyKnown   bool                      `json:"prior_policy_known,omitempty"`
+	AdminRevision      uint64                    `json:"admin_revision,omitempty"`
+	CreatedAt          time.Time                 `json:"created_at"`
 }
 
 // File is the metadata-only broker store persisted as broker.json.
@@ -103,6 +160,18 @@ func NewFile() *File {
 func (f *File) FindBinding(name string) *CredentialBinding {
 	for i := range f.Bindings {
 		if f.Bindings[i].Name == name {
+			return &f.Bindings[i]
+		}
+	}
+	return nil
+}
+
+// FindBindingByID returns a pointer to the binding with the stable generated
+// ID. Name and ID are intentionally separate lookup operations; callers doing
+// transaction rechecks must use the exact identity they captured.
+func (f *File) FindBindingByID(id string) *CredentialBinding {
+	for i := range f.Bindings {
+		if f.Bindings[i].ID == id {
 			return &f.Bindings[i]
 		}
 	}
@@ -147,9 +216,31 @@ func clientMatches(granted, actual ClientConstraint) bool {
 	// At least one pinned identifier must match; when both are present, both
 	// must match so a moved/rebuilt binary cannot satisfy a partial pin.
 	if granted.ExecutablePath != "" && granted.ExecutableHash != "" {
-		return pathOK && hashOK
+		if !pathOK || !hashOK {
+			return false
+		}
 	}
-	return pathOK || hashOK
+	if granted.ExecutablePath != "" && !pathOK {
+		return false
+	}
+	if granted.ExecutableHash != "" && !hashOK {
+		return false
+	}
+	actualScope := ClassifyExecutable(actual.ExecutablePath)
+	grantedScope := granted.IdentityScope
+	if grantedScope == "" {
+		grantedScope = ClassifyExecutable(granted.ExecutablePath)
+	}
+	if actualScope == IdentityInterpreterWide {
+		return grantedScope == IdentityInterpreterWide && granted.InterpreterAcknowledged
+	}
+	return grantedScope == "" || grantedScope == IdentityDedicatedExecutable
+}
+
+// SupportedInterpreter checks whether path is a recognized shared runtime.
+// It is exported for CLI/TUI review copy without duplicating a list.
+func SupportedInterpreter(path string) bool {
+	return ClassifyExecutable(path) == IdentityInterpreterWide
 }
 
 // NewBindingID returns a collision-resistant metadata identifier.
@@ -176,13 +267,12 @@ func HashExecutable(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve executable: %w", err)
 	}
-	f, err := os.Open(canonical)
+	data, err := fsutil.ReadFile(canonical, 64<<20)
 	if err != nil {
 		return "", fmt.Errorf("open executable: %w", err)
 	}
-	defer f.Close()
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	if _, err := io.Copy(h, bytes.NewReader(data)); err != nil {
 		return "", fmt.Errorf("hash executable: %w", err)
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil

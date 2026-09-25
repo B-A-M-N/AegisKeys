@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -80,6 +82,13 @@ func verifyOneAdapter(id string, reg *adapter.Registry, cfg config.Config) adapt
 	if strategy.Plan.Command == "" || (!strategy.Support.CanLaunch && !strategy.Support.CanLaunchArbitraryCommand) {
 		return adapterVerifyResult{"SKIP", "adapter does not launch directly"}
 	}
+	if adapterVerifyInstalled {
+		// Installed smoke executes the strategy; re-run the mandatory gate in
+		// run mode so runner.Run cannot reject a save-only validation marker.
+		if err := adapter.ValidateLaunchStrategyForMode(strategy, prof, prov, key, adapter.DefaultSecurityPolicy(), adapter.ResolveRun); err != nil {
+			return adapterVerifyResult{"FAIL", "run validation: " + err.Error()}
+		}
+	}
 
 	tmp, err := os.MkdirTemp("", "aegiskeys-adapter-verify-*")
 	if err != nil {
@@ -126,12 +135,25 @@ func verifyOneAdapter(id string, reg *adapter.Registry, cfg config.Config) adapt
 		strategy.Plan.Files = nil
 		ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.AdapterVerifyTimeoutSeconds)*time.Second)
 		defer cancel()
-		if err := runner.Run(ctx, strategy, runner.RunOptions{
-			ProfileName: prof.Name,
-			ConfigDir:   tmp,
-			ExtraArgs:   []string{"--help"},
-		}); err != nil {
+		prepared, err := runner.PrepareCommandWithCleanup(ctx, strategy, runner.RunOptions{ProfileName: prof.Name, ConfigDir: tmp, ExtraArgs: []string{"--help"}})
+		if err != nil {
+			return adapterVerifyResult{"FAIL", "smoke prepare: " + err.Error()}
+		}
+		var stderr bytes.Buffer
+		prepared.Cmd.Stderr = &stderr
+		if err := prepared.Cmd.Run(); err != nil {
+			_ = prepared.Cleanup()
+			if errors.Is(err, exec.ErrNotFound) {
+				return adapterVerifyResult{"SKIP", "installed launcher unavailable"}
+			}
+			// Broken Python shims are not adapter contract failures.
+			if bytes.Contains(stderr.Bytes(), []byte("ModuleNotFoundError")) || bytes.Contains(stderr.Bytes(), []byte("No module named")) {
+				return adapterVerifyResult{"SKIP", "installed Python launcher is broken (ModuleNotFoundError)"}
+			}
 			return adapterVerifyResult{"FAIL", "smoke: " + err.Error()}
+		}
+		if err := prepared.Cleanup(); err != nil {
+			return adapterVerifyResult{"FAIL", "smoke cleanup: " + err.Error()}
 		}
 		return adapterVerifyResult{"OK", "render/files/no-leak/installed-smoke"}
 	}

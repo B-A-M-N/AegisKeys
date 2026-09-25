@@ -88,7 +88,7 @@ var envfileCmd = &cobra.Command{
 		if err := os.WriteFile(path, []byte(runner.BuildShellExport(envVars)), 0600); err != nil {
 			return err
 		}
-		audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{
+		logAuditEvent(audit.Event{
 			Event:    "envfile_created",
 			Profile:  prof.Name,
 			Provider: prof.ProviderSlug,

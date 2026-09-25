@@ -203,7 +203,7 @@ func cleanBaseEnvWithAllowlist(base []string, allowlist map[string]bool) []strin
 		// A proxy URL with embedded credentials is a secret. Do not carry it
 		// across the child-process boundary; use a credential-free local proxy
 		// address instead.
-		if strings.Contains(strings.ToLower(k), "proxy") && proxyValueHasCredentials(v) {
+		if strings.Contains(strings.ToLower(k), "proxy") && (proxyValueHasCredentials(v) || !validProxyValue(v)) {
 			continue
 		}
 		if looksSecretName(k) {
@@ -212,6 +212,11 @@ func cleanBaseEnvWithAllowlist(base []string, allowlist map[string]bool) []strin
 		out = append(out, kv)
 	}
 	return out
+}
+
+func validProxyValue(v string) bool {
+	u, err := url.Parse(v)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https" || u.Scheme == "socks5") && u.Host != ""
 }
 
 func proxyValueHasCredentials(value string) bool {
@@ -362,10 +367,16 @@ type PreparedCommand struct {
 // exec.Cmd that should run in the caller's terminal context. CLI launches call
 // Run, while TUI launches use this with tea.ExecProcess so Bubble Tea can
 // release and restore the terminal around the child process.
+// PrepareCommand is retained for source compatibility. It returns an error
+// whenever cleanup exists because callers of this legacy API cannot receive
+// the required cleanup hook.
 func PrepareCommand(ctx context.Context, strategy *adapter.LaunchStrategy, opts RunOptions) (*exec.Cmd, error) {
 	prepared, err := PrepareCommandWithCleanup(ctx, strategy, opts)
 	if err != nil {
 		return nil, err
+	}
+	if prepared.Cleanup != nil {
+		return nil, errors.New("PrepareCommand cannot be used with cleanup-requiring strategy; use PrepareCommandWithCleanup")
 	}
 	return prepared.Cmd, nil
 }

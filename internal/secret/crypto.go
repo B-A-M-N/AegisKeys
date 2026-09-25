@@ -3,19 +3,28 @@ package secret
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
+	"io"
+
+	"aegiskeys/internal/fsutil"
 
 	"golang.org/x/crypto/argon2"
 )
 
 const (
-	Argon2SaltLen = 16
-	Argon2KeyLen  = 32
+	Argon2SaltLen             = 16
+	Argon2KeyLen              = 32
+	maxArgon2Time      uint32 = 10
+	maxArgon2Threads   uint8  = 8
+	maxCiphertextBytes        = 16 << 20
+	maxEnvelopeBytes          = 2 << 20
 )
 
 // DefaultArgon2Params holds the current KDF cost policy for NEW envelopes.
@@ -48,6 +57,7 @@ type KDFParams struct {
 
 type VaultEnvelope struct {
 	Version int    `json:"version"`
+	Digest  string `json:"digest,omitempty"`
 	KDF     string `json:"kdf"` // "argon2id"
 	// KeyMode is empty/password for legacy password-derived vaults and
 	// keyring for vaults sealed with an OS-keyring/recovery key.
@@ -131,6 +141,9 @@ func DeriveKeyWithParams(password, saltB64 string, params KDFParams) ([32]byte, 
 		// Legacy: original code used argon2.Key (Argon2i), Time=1.
 		raw, err = argon2iKeyLegacy(password, saltB64)
 	} else {
+		if err := validateKDFParams(params); err != nil {
+			return key, err
+		}
 		raw, err = argon2idKey(password, saltB64, params)
 	}
 	if err != nil {
@@ -186,14 +199,16 @@ func SealWithKey(key [32]byte, plaintext, saltB64 string, originalParams KDFPara
 	if saltB64 == "" && kdfParams.Time == 0 {
 		kdfParams = DefaultArgon2Params
 	}
-	return &VaultEnvelope{
+	env := &VaultEnvelope{
 		Version:    1,
 		KDF:        "argon2id",
 		KDFParams:  kdfParams,
 		Salt:       salt,
 		Nonce:      nonce,
 		Ciphertext: base64.StdEncoding.EncodeToString(ciphertext),
-	}, nil
+	}
+	env.Digest = envelopeDigest(*env)
+	return env, nil
 }
 
 // SealKeyringEnvelope seals plaintext with a random OS-keyring/recovery key.
@@ -207,6 +222,7 @@ func SealKeyringEnvelope(key [32]byte, plaintext string) (*VaultEnvelope, error)
 	env.KDF = "keyring"
 	env.KeyMode = "keyring"
 	env.KDFParams = KDFParams{}
+	env.Digest = envelopeDigest(*env)
 	return env, nil
 }
 
@@ -218,6 +234,9 @@ func RandomVaultKey() ([32]byte, error) {
 
 // OpenWithKey decrypts an envelope using the given 32-byte key.
 func OpenWithKey(key [32]byte, env *VaultEnvelope) (string, error) {
+	if err := ValidateEnvelopeForDecrypt(env); err != nil {
+		return "", err
+	}
 	block, err := newGCMCipher(key[:])
 	if err != nil {
 		return "", err
@@ -235,6 +254,40 @@ func OpenWithKey(key [32]byte, env *VaultEnvelope) (string, error) {
 		return "", fmt.Errorf("decryption failed (wrong password?): %w", err)
 	}
 	return string(plaintext), nil
+}
+
+// openWithKeyRecovery permits historical short salts only after the caller
+// has bounded the envelope size and validated all KDF/crypto limits separately.
+func openWithKeyRecovery(key [32]byte, env *VaultEnvelope) (string, error) {
+	if env == nil || env.Ciphertext == "" || len(env.Ciphertext) > maxCiphertextBytes {
+		return "", errors.New("invalid recovery envelope")
+	}
+	if env.KDFParams.Time != 0 {
+		if err := validateKDFParams(env.KDFParams); err != nil {
+			return "", err
+		}
+	}
+	nb, err := decodeB64Strict(env.Nonce)
+	if err != nil || len(nb) != argon2ExpectedNonceLen {
+		return "", errors.New("invalid recovery nonce")
+	}
+	block, err := newGCMCipher(key[:])
+	if err != nil {
+		return "", err
+	}
+	nonce, err := decodeB64Strict(env.Nonce)
+	if err != nil {
+		return "", err
+	}
+	ct, err := decodeB64Strict(env.Ciphertext)
+	if err != nil {
+		return "", err
+	}
+	pt, err := block.Open(nil, nonce, ct, nil)
+	if err != nil {
+		return "", fmt.Errorf("decryption failed (wrong password?): %w", err)
+	}
+	return string(pt), nil
 }
 
 // SealEnvelope encrypts plaintext using a key derived from password.
@@ -262,19 +315,21 @@ func SealEnvelope(password, plaintext string) (*VaultEnvelope, error) {
 		return nil, err
 	}
 	ciphertext := block.Seal(nil, nonceBytes, []byte(plaintext), nil)
-	return &VaultEnvelope{
+	env := &VaultEnvelope{
 		Version:    1,
 		KDF:        "argon2id",
 		KDFParams:  DefaultArgon2Params,
 		Salt:       salt,
 		Nonce:      nonce,
 		Ciphertext: base64.StdEncoding.EncodeToString(ciphertext),
-	}, nil
+	}
+	env.Digest = envelopeDigest(*env)
+	return env, nil
 }
 
 func OpenEnvelope(password string, env *VaultEnvelope) (string, error) {
-	if env == nil {
-		return "", errors.New("nil envelope")
+	if err := ValidateEnvelopeForDecrypt(env); err != nil {
+		return "", err
 	}
 	// Derive the key. For old envelopes (Time==0, no KDFParams stored),
 	// the original code used argon2.Key (Argon2i) with Time=1. For new
@@ -400,13 +455,9 @@ func rekeyVaultLocked(path, password string, newParams KDFParams) (RekeyResult, 
 		NewMemoryKiB: newParams.MemoryKiB,
 	}
 
-	data, err := os.ReadFile(path)
+	_, oldEnvelope, err := readEnvelopeFile(path)
 	if err != nil {
-		return result, fmt.Errorf("read vault: %w", err)
-	}
-	var oldEnvelope VaultEnvelope
-	if err := json.Unmarshal(data, &oldEnvelope); err != nil {
-		return result, fmt.Errorf("invalid vault: %w", err)
+		return result, fmt.Errorf("invalid vault envelope: %w", err)
 	}
 	result.OldTime = oldEnvelope.KDFParams.Time
 	result.OldMemoryKiB = oldEnvelope.KDFParams.MemoryKiB
@@ -472,18 +523,13 @@ func rekeyVaultLocked(path, password string, newParams KDFParams) (RekeyResult, 
 	}
 	_ = plaintext // intentionally not zeroed: Go strings cannot be reliably zeroized once allocated
 
-	// 7. Atomic write 0600.
-	tmpPath := path + ".rekey"
+	// 7. Shared secure atomic write; never expose a predictable .rekey file.
 	out, err := json.Marshal(newEnvelope)
 	if err != nil {
 		return result, fmt.Errorf("marshal rekey: %w", err)
 	}
-	if err := os.WriteFile(tmpPath, out, 0600); err != nil {
-		return result, fmt.Errorf("write rekey tmp: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
-		return result, fmt.Errorf("rename rekey: %w", err)
+	if err := fsutil.AtomicWriteFileMode(path, out, 0600); err != nil {
+		return result, fmt.Errorf("atomic rekey write: %w", err)
 	}
 
 	// Wipe old derived key bytes.
@@ -529,12 +575,18 @@ func ValidateEnvelope(env *VaultEnvelope) error {
 	if env.Ciphertext == "" {
 		return errors.New("empty ciphertext")
 	}
+	if len(env.Ciphertext) > maxCiphertextBytes {
+		return fmt.Errorf("ciphertext exceeds maximum size")
+	}
 	// Validate salt length.
 	if sb, err := base64.StdEncoding.DecodeString(env.Salt); err != nil {
 		return fmt.Errorf("invalid salt: %w", err)
-	} else if len(sb) != argon2ExpectedSaltLen {
+	} else if len(sb) < 8 || len(sb) > 64 {
+		return fmt.Errorf("salt length %d outside safe range [8, 64]", len(sb))
+	} else if env.KDFParams.Time != 0 && len(sb) != argon2ExpectedSaltLen {
 		return fmt.Errorf("salt length %d (expected %d)", len(sb), argon2ExpectedSaltLen)
 	}
+
 	// Validate nonce length (GCM requires 12 bytes).
 	if nb, err := base64.StdEncoding.DecodeString(env.Nonce); err != nil {
 		return fmt.Errorf("invalid nonce: %w", err)
@@ -556,6 +608,45 @@ func ValidateEnvelope(env *VaultEnvelope) error {
 		if p.KeyLen != Argon2KeyLen {
 			return fmt.Errorf("key length %d (expected %d)", p.KeyLen, Argon2KeyLen)
 		}
+		if p.Time > maxArgon2Time {
+			return fmt.Errorf("Argon2 time %d exceeds maximum %d", p.Time, maxArgon2Time)
+		}
+		if p.Threads < 1 || p.Threads > maxArgon2Threads {
+			return fmt.Errorf("Argon2 threads %d outside safe range [1, %d]", p.Threads, maxArgon2Threads)
+		}
+	}
+	return nil
+}
+
+// ValidateEnvelopeForDecrypt applies the same resource ceilings used by
+// normal unlock while retaining compatibility with historical short salts.
+func ValidateEnvelopeForDecrypt(env *VaultEnvelope) error { return ValidateEnvelope(env) }
+
+func validateLegacyEnvelope(env *VaultEnvelope) error {
+	if env == nil || env.KDFParams.Time != 0 {
+		return nil
+	}
+	if len(env.Salt) > 128 {
+		return fmt.Errorf("legacy salt field too large")
+	}
+	return nil
+}
+
+func validateKDFParams(p KDFParams) error {
+	if p.Time == 0 {
+		return nil
+	}
+	if p.Time < minArgon2Time || p.Time > maxArgon2Time {
+		return fmt.Errorf("Argon2 time outside safe range")
+	}
+	if p.MemoryKiB < minArgon2Memory || p.MemoryKiB > maxArgon2Memory {
+		return fmt.Errorf("Argon2 memory outside safe range")
+	}
+	if p.Threads < 1 || p.Threads > maxArgon2Threads {
+		return fmt.Errorf("Argon2 threads outside safe range")
+	}
+	if p.KeyLen != Argon2KeyLen {
+		return fmt.Errorf("invalid Argon2 key length")
 	}
 	return nil
 }
@@ -576,4 +667,134 @@ func decodeB64(s string) []byte {
 		return []byte(s)
 	}
 	return b
+}
+
+func envelopeDigest(env VaultEnvelope) string {
+	env.Digest = ""
+	data, _ := json.Marshal(env)
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func validateEnvelopeDigest(raw []byte, env *VaultEnvelope) error {
+	if env == nil || env.Digest == "" {
+		return nil
+	}
+	if !hmac.Equal([]byte(envelopeDigest(*env)), []byte(env.Digest)) {
+		return errors.New("vault envelope digest mismatch")
+	}
+	return nil
+}
+
+// validateEnvelopeDigestForRecovery permits only the historical KDF metadata
+// mismatch that the repair command exists to fix. The ciphertext/salt/nonce
+// digest must still match one of the bounded recovery parameter shapes; an
+// arbitrary digest or arbitrary metadata change fails before derivation.
+func validateEnvelopeDigestForRecovery(env *VaultEnvelope) error {
+	if env == nil || env.Digest == "" {
+		return nil
+	}
+	if err := validateEnvelopeDigest(nil, env); err == nil {
+		return nil
+	}
+	for _, params := range recoveryCandidates(env) {
+		copyEnv := *env
+		copyEnv.KDFParams = params
+		if hmac.Equal([]byte(envelopeDigest(copyEnv)), []byte(env.Digest)) {
+			return nil
+		}
+	}
+	return errors.New("vault envelope digest mismatch")
+}
+
+func readSecureFile(path string, maxBytes int64) ([]byte, error) {
+	f, err := fsutil.OpenReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, maxBytes+1))
+}
+
+func readEnvelopeFile(path string) ([]byte, VaultEnvelope, error) {
+	var env VaultEnvelope
+	raw, err := readSecureFile(path, maxEnvelopeBytes)
+	if err != nil {
+		return nil, env, err
+	}
+	if len(raw) > maxEnvelopeBytes {
+		return nil, env, fmt.Errorf("vault envelope exceeds %d bytes", maxEnvelopeBytes)
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return nil, env, err
+	}
+	if err := ValidateEnvelopeForDecrypt(&env); err != nil {
+		return nil, env, err
+	}
+	if err := validateEnvelopeDigest(raw, &env); err != nil {
+		return nil, env, err
+	}
+	return raw, env, nil
+}
+
+// Diagnose and repair intentionally use a compatibility-validating bounded
+// reader; public decrypt/load paths use readEnvelopeFile and strict bounds.
+
+func validateLegacyEnvelopeOnly(env *VaultEnvelope) error {
+	if env == nil {
+		return errors.New("nil envelope")
+	}
+	if env.Version != 1 {
+		return fmt.Errorf("unsupported envelope version %d", env.Version)
+	}
+	if env.KDF != "argon2id" {
+		return fmt.Errorf("unsupported KDF %q", env.KDF)
+	}
+	if env.Ciphertext == "" || len(env.Ciphertext) > maxCiphertextBytes {
+		return errors.New("invalid ciphertext size")
+	}
+	if _, err := base64.StdEncoding.DecodeString(env.Salt); err != nil {
+		return fmt.Errorf("invalid salt: %w", err)
+	}
+	if _, err := base64.StdEncoding.DecodeString(env.Nonce); err != nil {
+		return fmt.Errorf("invalid nonce: %w", err)
+	}
+	return nil
+}
+
+func readEnvelopeFileRelaxed(path string) ([]byte, VaultEnvelope, error) {
+	var env VaultEnvelope
+	raw, err := readEnvelopeBytes(path)
+	if err != nil {
+		return nil, env, err
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return nil, env, err
+	}
+	if err := validateLegacyEnvelope(&env); err != nil {
+		return nil, env, err
+	}
+	if err := validateLegacyEnvelopeOnly(&env); err != nil {
+		return nil, env, err
+	}
+	if env.KDFParams.Time != 0 {
+		if err := validateKDFParams(env.KDFParams); err != nil {
+			return nil, env, err
+		}
+	}
+	// Repair/diagnose intentionally accepts a metadata-digest mismatch caused
+	// by the historical poisoning this path exists to recover. Normal load
+	// paths remain strict and reject the same envelope before derivation.
+	return raw, env, nil
+}
+
+func readEnvelopeBytes(path string) ([]byte, error) {
+	b, e := readSecureFile(path, maxEnvelopeBytes)
+	if e != nil {
+		return nil, e
+	}
+	if len(b) > maxEnvelopeBytes {
+		return nil, fmt.Errorf("vault envelope too large")
+	}
+	return b, nil
 }

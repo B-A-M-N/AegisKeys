@@ -2,6 +2,7 @@ package adapter
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -1119,5 +1120,56 @@ func TestBedrockViaClaudeCode(t *testing.T) {
 	}
 	if plan.Env["ANTHROPIC_API_KEY"] != "" {
 		t.Errorf("bedrock must not set ANTHROPIC_API_KEY, got %q", plan.Env["ANTHROPIC_API_KEY"])
+	}
+}
+
+func TestWriteEnvFileUsesPrivateRandomPerLaunchPath(t *testing.T) {
+	dir := t.TempDir()
+	w1, err := writeEnvFile(map[string]string{"API_KEY": "secret"}, "../../escape", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w2, err := writeEnvFile(map[string]string{"API_KEY": "secret"}, "../../escape", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w1.Path == w2.Path {
+		t.Fatal("concurrent env files collide")
+	}
+	for _, w := range []*FileWrite{w1, w2} {
+		if strings.Contains(filepath.Base(w.Path), "escape") {
+			t.Fatalf("profile name leaked into env filename: %s", w.Path)
+		}
+		if filepath.Dir(w.Path) != filepath.Join(dir, "tmp", "envfiles") {
+			t.Fatalf("env file escaped private directory: %s", w.Path)
+		}
+	}
+}
+
+func TestWriteEnvFileRejectsAllControlCharacters(t *testing.T) {
+	for _, value := range []string{"a\tb", "a\vb", "a\fb", "a\x00b", "a\nb", "a\rb"} {
+		if _, err := writeEnvFile(map[string]string{"KEY": value}, "../../escape", t.TempDir()); err == nil {
+			t.Errorf("control value %q accepted", value)
+		}
+	}
+}
+
+func TestWriteEnvFileCreatesIndependentConcurrentPaths(t *testing.T) {
+	dir := t.TempDir()
+	results := make(chan *FileWrite, 2)
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			w, err := writeEnvFile(map[string]string{"KEY": "secret"}, "../same", dir)
+			results <- w
+			errs <- err
+		}()
+	}
+	w1, w2 := <-results, <-results
+	if <-errs != nil || <-errs != nil {
+		t.Fatal("concurrent env-file creation failed")
+	}
+	if w1 == nil || w2 == nil || w1.Path == w2.Path {
+		t.Fatal("concurrent env files collided")
 	}
 }

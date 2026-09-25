@@ -22,7 +22,7 @@ var assetsCheckCmd = &cobra.Command{
 				return fmt.Errorf("embedded logo mask unavailable: %s", id)
 			}
 		}
-		fmt.Printf("validated %d embedded logo assets\n", len(logo.DefaultAssets))
+		fmt.Printf("validated %d publication-safe embedded asset(s); %d app identities resolved (generic fallback allowed)\n", logo.PublicationAssetCount(), len(logo.DefaultAssets))
 		return nil
 	},
 }

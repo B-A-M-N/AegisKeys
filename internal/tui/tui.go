@@ -7,6 +7,7 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -31,6 +32,10 @@ import (
 
 // Run launches the interactive TUI against the given config directory.
 func Run(configDir, version string) error {
+	// Best-effort startup cleanup. An unsafe/missing runtime tree disables
+	// external editing when requested but must not prevent the vault/TUI from
+	// starting.
+	_ = cleanupAbandonedEditorDirs(configDir)
 	reg, err := provider.LoadRegistry(config.ProvidersPath(configDir))
 	providersMissing := errors.Is(err, os.ErrNotExist)
 	if err != nil && !providersMissing {
@@ -250,6 +255,13 @@ type model struct {
 	// Vault session for encrypted key operations.
 	vaultSession *vaultSession
 	sessionGen   uint64
+	// sessionCtx is cancelled whenever the vault session ends. Approval and
+	// other session-authorized async commands observe it before every sensitive
+	// mutation; the generation fence is still authoritative at message receipt.
+	sessionCtx      context.Context
+	cancelSession   context.CancelFunc
+	unlockRequestID uint64
+	unlockInFlight  bool
 
 	// Auto-lock session management (P0-9).
 	lastActivity  time.Time
@@ -293,6 +305,7 @@ type model struct {
 	// brokerMeta is a cached immutable snapshot. View never reads broker.json.
 	brokerMeta     *broker.File
 	brokerErr      string
+	brokerRunning  bool
 	accessStep     int
 	accessApproval *accessApprovalPending
 
@@ -352,16 +365,17 @@ type vaultSession struct {
 }
 
 type accessApprovalPending struct {
-	BindingID    string
-	SecretID     string
-	BindingName  string
-	Executable   string
-	Hash         string
-	Capabilities []broker.Capability
-	ExpiresAt    time.Time
-	GrantID      string
-	VaultKey     [32]byte
-	PriorPolicy  secret.SecretPolicy
+	BindingID          string
+	SecretID           string
+	BindingName        string
+	Executable         string
+	Hash               string
+	Capabilities       []broker.Capability
+	ComponentAllowlist []string
+	ExpiresAt          time.Time
+	GrantID            string
+	VaultKey           [32]byte
+	SessionGen         uint64
 }
 
 // keyFormState captures the fields for adding a new API key.
@@ -391,6 +405,33 @@ func (s *vaultSession) Zero() {
 	s.vault = nil
 }
 
+// ReplaceVault installs replacement only when it is distinct from the
+// current snapshot, zeroing the superseded decrypted vault first. All active
+// snapshot assignments must use this helper so lock cleanup cannot lose the
+// only reference to old secret material.
+func (s *vaultSession) ReplaceVault(replacement *secret.Vault) {
+	if s == nil || s.vault == replacement {
+		return
+	}
+	if s.vault != nil {
+		secret.ZeroVault(s.vault)
+	}
+	s.vault = replacement
+}
+
+func (m *model) replaceVaultSnapshot(replacement *secret.Vault) {
+	if m == nil || m.vaultSession == nil {
+		if replacement != nil {
+			secret.ZeroVault(replacement)
+		}
+		return
+	}
+	m.vaultSession.ReplaceVault(replacement)
+	if m.vaultSession.vault != nil {
+		m.keys = secret.ToMaskedList(m.vaultSession.vault.Keys)
+	}
+}
+
 // lockVault clears the unlocked session and all decrypted material.
 // This is the security-critical teardown: wipe the derived key, drop
 // decrypted secrets, and clear every form field that may have held them.
@@ -399,6 +440,13 @@ func (m *model) lockVault() {
 	// plan can contain injected credential values while the vault is unlocked.
 	m.launchPreview = launchPreviewState{requestID: m.launchPreview.requestID + 1}
 	m.sessionGen++
+	m.unlockRequestID++
+	m.unlockInFlight = false
+	if m.cancelSession != nil {
+		m.cancelSession()
+	}
+	m.sessionCtx = nil
+	m.cancelSession = nil
 	m.launchPhase = launchIdle
 	m.stopAnimation()
 	if m.vaultSession != nil {
@@ -425,7 +473,24 @@ func (m *model) lockVault() {
 	m.scratchTitleInput.Reset()
 	m.scratchBodyInput.Reset()
 	m.scratchDirty = false
+	m.scratchSaveInFlight = false
+	m.scratchRevision++
 	m.statusMsg = "Vault locked."
+}
+
+// unlockSessionContext replaces and cancels any prior session context. Every
+// successful unlock receives a nonzero generation even when the previous
+// generation was zero.
+func (m *model) unlockSessionContext() context.Context {
+	if m.cancelSession != nil {
+		m.cancelSession()
+	}
+	m.sessionGen++
+	if m.sessionGen == 0 {
+		m.sessionGen = 1
+	}
+	m.sessionCtx, m.cancelSession = context.WithCancel(context.Background())
+	return m.sessionCtx
 }
 
 // autoLockIfIdle locks the vault if the user has been inactive longer than
@@ -449,11 +514,13 @@ func (m *model) logAudit(event, provider, profile string) {
 	if m.auditLogger == nil {
 		return
 	}
-	m.auditLogger.Log(audit.Event{
+	if err := m.auditLogger.Log(audit.Event{
 		Event:    event,
 		Provider: provider,
 		Profile:  profile,
-	})
+	}); err != nil {
+		m.statusMsg = "Audit log write failed: " + err.Error()
+	}
 }
 
 func (m *model) Init() tea.Cmd {
@@ -482,11 +549,12 @@ var _ tea.Model = (*model)(nil)
 // --- internal messages ---
 
 type unlockResultMsg struct {
-	vault    *secret.Vault
-	envelope *secret.VaultEnvelope
-	key      [32]byte
-	keys     []secret.MaskedKeyItem
-	err      error
+	requestID uint64
+	vault     *secret.Vault
+	envelope  *secret.VaultEnvelope
+	key       [32]byte
+	keys      []secret.MaskedKeyItem
+	err       error
 }
 
 type doctorResultMsg struct {
@@ -544,6 +612,8 @@ type launchFailure struct {
 type wizardModelsFetchedMsg struct {
 	providerSlug string
 	models       []provider.ProviderModel
+	requestID    uint64
+	sessionGen   uint64
 	err          error
 }
 
@@ -552,6 +622,8 @@ type wizardModelsFetchedMsg struct {
 type modelCatalogLoadedMsg struct {
 	providerSlug string
 	models       []provider.ProviderModel
+	requestID    uint64
+	sessionGen   uint64
 	err          error
 }
 

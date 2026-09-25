@@ -69,3 +69,38 @@ func TestLoggerRedactsSecretLookingMetadata(t *testing.T) {
 		t.Fatalf("audit log did not redact secret-looking values: %s", string(data))
 	}
 }
+
+func TestLoggerRejectsSymlinkAndInvalidEvent(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real.log")
+	if err := os.WriteFile(real, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "audit.log")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewLogger(link).Log(Event{Event: "test"}); err == nil {
+		t.Fatal("symlink audit path accepted")
+	}
+	if err := NewLogger(filepath.Join(dir, "safe.log")).Log(Event{}); err == nil {
+		t.Fatal("empty event accepted")
+	}
+	if err := NewLogger(filepath.Join(dir, "schema.log")).Log(Event{Event: "test_event", Metadata: map[string]string{"unexpected": "value"}}); err == nil {
+		t.Fatal("unknown event metadata accepted")
+	}
+}
+
+func TestLoggerRotatesOversizedLog(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.log")
+	l := NewLogger(path)
+	l.maxBytes = 180
+	for i := 0; i < 4; i++ {
+		if err := l.Log(Event{Event: "test_event"}); err != nil {
+			t.Fatalf("log %d: %v", i, err)
+		}
+	}
+	if _, err := os.Stat(path + ".1"); err != nil {
+		t.Fatalf("rotation artifact missing: %v", err)
+	}
+}

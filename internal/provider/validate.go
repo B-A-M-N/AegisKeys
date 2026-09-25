@@ -3,6 +3,7 @@ package provider
 import (
 	"net/url"
 	"regexp"
+	"strings"
 
 	"aegiskeys/internal/sensitive"
 )
@@ -21,7 +22,13 @@ func ValidBaseURL(v string) bool {
 		return true
 	}
 	u, err := url.Parse(v)
-	return err == nil && (u.Scheme == "http" || u.Scheme == "https")
+	if err != nil || u.Host == "" || u.User != nil || strings.ContainsAny(v, "\r\n\x00") {
+		return false
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	return true
 }
 
 // LooksLikeSecret reports whether a free-text value looks like a credential.

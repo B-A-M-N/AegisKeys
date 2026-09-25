@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,7 +10,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"syscall"
 
 	"aegiskeys/internal/config"
 	"aegiskeys/internal/fsutil"
@@ -53,6 +53,15 @@ func (f *File) Validate() error {
 		if g.Client.ExecutablePath == "" && g.Client.ExecutableHash == "" {
 			return errors.New("broker grant requires an executable pin")
 		}
+		if g.Client.IdentityScope != "" && g.Client.IdentityScope != IdentityDedicatedExecutable && g.Client.IdentityScope != IdentityInterpreterWide {
+			return errors.New("invalid broker identity scope")
+		}
+		if g.Client.IdentityScope == IdentityInterpreterWide && !g.Client.InterpreterAcknowledged {
+			return errors.New("interpreter-wide grant requires explicit acknowledgment")
+		}
+		if g.Client.IdentityScope == IdentityInterpreterWide && ClassifyExecutable(g.Client.ExecutablePath) != IdentityInterpreterWide {
+			return errors.New("interpreter-wide scope does not match executable")
+		}
 		for _, c := range g.Capabilities {
 			if !c.Valid() {
 				return errors.New("invalid broker capability")
@@ -78,6 +87,9 @@ func (f *File) Validate() error {
 			}
 			seenCaps[capability] = true
 		}
+		if !intent.PriorResolveSource.Valid() || !intent.PriorRotateSource.Valid() {
+			return errors.New("invalid broker approval policy provenance")
+		}
 	}
 	return nil
 }
@@ -85,14 +97,14 @@ func (f *File) Validate() error {
 // LoadBrokerFile returns a new empty metadata file when broker.json is absent
 // and fails closed on malformed JSON, unknown versions, or invalid metadata.
 func LoadBrokerFile(path string) (*File, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := fsutil.ReadFile(path, 4<<20)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return NewFile(), nil
 		}
 		return nil, fmt.Errorf("read broker metadata: %w", err)
 	}
-	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	var f File
 	if err := dec.Decode(&f); err != nil {
@@ -142,13 +154,10 @@ func SaveBrokerFile(path string, f *File) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	if err := fsutil.EnsureDir(filepath.Dir(path)); err != nil {
 		return err
 	}
-	if err := fsutil.AtomicWriteFile(path, data); err != nil {
-		return err
-	}
-	return os.Chmod(path, 0600)
+	return fsutil.AtomicWriteFileMode(path, data, 0600)
 }
 
 // MutateBrokerFile serializes load/modify/save under a cross-process lock.
@@ -167,15 +176,15 @@ func WithBrokerFileLocked(path string, fn func(*File) error) error {
 		return errors.New("nil broker lock operation")
 	}
 	lockPath := path + ".lock"
-	lf, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	lf, err := fsutil.OpenLockFile(lockPath)
 	if err != nil {
 		return err
 	}
 	defer lf.Close()
-	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); err != nil {
+	if err := fsutil.LockFile(lf); err != nil {
 		return fmt.Errorf("acquire broker metadata lock: %w", err)
 	}
-	defer syscall.Flock(int(lf.Fd()), syscall.LOCK_UN)
+	defer fsutil.UnlockFile(lf)
 	f, err := LoadBrokerFile(path)
 	if err != nil {
 		return err
@@ -188,15 +197,15 @@ func TransactBrokerFile(path string, mutate func(*File) error) error {
 		return errors.New("nil broker mutation")
 	}
 	lockPath := path + ".lock"
-	lf, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	lf, err := fsutil.OpenLockFile(lockPath)
 	if err != nil {
 		return err
 	}
 	defer lf.Close()
-	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); err != nil {
+	if err := fsutil.LockFile(lf); err != nil {
 		return fmt.Errorf("acquire broker metadata lock: %w", err)
 	}
-	defer syscall.Flock(int(lf.Fd()), syscall.LOCK_UN)
+	defer fsutil.UnlockFile(lf)
 	f, err := LoadBrokerFile(path)
 	if err != nil {
 		return err

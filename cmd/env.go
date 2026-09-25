@@ -11,7 +11,6 @@ import (
 
 	"aegiskeys/internal/adapter"
 	"aegiskeys/internal/audit"
-	"aegiskeys/internal/config"
 	"aegiskeys/internal/profile"
 	"aegiskeys/internal/runner"
 	"aegiskeys/internal/secret"
@@ -140,7 +139,7 @@ var envCmd = &cobra.Command{
 			fmt.Print(runner.BuildShellExport(envVars))
 		}
 
-		audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{
+		logAuditEvent(audit.Event{
 			Event:    "env_export_requested",
 			Profile:  prof.Name,
 			Provider: prof.ProviderSlug,

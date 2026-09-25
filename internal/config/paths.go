@@ -3,6 +3,8 @@ package config
 import (
 	"os"
 	"path/filepath"
+
+	"aegiskeys/internal/fsutil"
 )
 
 const (
@@ -31,10 +33,10 @@ func DefaultConfigDir() string {
 
 // EnsureDir creates the config directory with 0700 permissions.
 func EnsureDir(path string) error {
-	if err := os.MkdirAll(path, 0700); err != nil {
+	if err := fsutil.EnsureDir(path); err != nil {
 		return err
 	}
-	return os.Chmod(path, 0700)
+	return fsutil.ChmodNoFollow(path, 0700)
 }
 
 // ConfigPath returns the config.json path inside dir.

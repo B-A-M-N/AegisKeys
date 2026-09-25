@@ -53,8 +53,10 @@ func newTestSession(t *testing.T, allowResolve bool, executable string, capabili
 	meta.Bindings = append(meta.Bindings, binding)
 	meta.Grants = append(meta.Grants, AccessGrant{
 		ID: "grant_1", Name: "Test app", BindingID: binding.ID,
-		Client:       ClientConstraint{UID: os.Getuid(), ExecutablePath: executable},
-		Capabilities: capabilities, Enabled: true, CreatedAt: time.Now(),
+		Client:             ClientConstraint{UID: os.Getuid(), ExecutablePath: executable},
+		Capabilities:       capabilities,
+		ComponentAllowlist: []string{"primary", "secondary"},
+		Enabled:            true, CreatedAt: time.Now(),
 	})
 	if err := SaveBrokerFile(filepath.Join(filepath.Dir(vaultPath), "broker.json"), meta); err != nil {
 		t.Fatal(err)

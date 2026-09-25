@@ -23,6 +23,7 @@ type modelCatalogState struct {
 	source       provider.ModelSource
 
 	fetching  bool
+	requestID uint64
 	filtering bool
 	errMsg    string
 
@@ -144,6 +145,9 @@ func (m *model) refreshModelCatalog() tea.Cmd {
 	pCopy := *prov
 	m.modelCatalog.fetching = true
 	m.modelCatalog.errMsg = ""
+	m.modelCatalog.requestID++
+	requestID := m.modelCatalog.requestID
+	sessionGen := m.sessionGen
 
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 15_000_000_000)
@@ -152,6 +156,8 @@ func (m *model) refreshModelCatalog() tea.Cmd {
 		return modelCatalogLoadedMsg{
 			providerSlug: slug,
 			models:       models,
+			requestID:    requestID,
+			sessionGen:   sessionGen,
 			err:          err,
 		}
 	}

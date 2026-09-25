@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/harmonica"
 
+	"aegiskeys/internal/appcatalog"
 	"aegiskeys/internal/logo"
 )
 
@@ -29,11 +30,7 @@ type matrixLogoReveal struct {
 const logoRotateFrames = 120
 
 func (m *Matrix) initLogoReveals() {
-	ids := []string{
-		"aider", "crush", "qwen", "goose", "cline", "claude", "free-claude", "hermes", "vibe", "codex",
-		"mimo", "opencode", "openhands", "gemini", "copilot", "continue", "zed", "intellij",
-		"anthropic", "mistral", "google",
-	}
+	ids := appcatalog.All()
 	m.logos = make([]matrixLogoReveal, 0, len(ids))
 	for i, id := range ids {
 		m.logos = append(m.logos, matrixLogoReveal{
@@ -50,6 +47,12 @@ func (m *Matrix) initLogoReveals() {
 	// Build the initial shuffle deck.
 	m.rebuildShuffleDeck()
 }
+
+// SetLogoPinned selects artwork for an explicit screen/app selection. Pinned
+// artwork does not auto-rotate. ClearLogoPinned returns to automatic rotation.
+func (m *Matrix) SetLogoPinned(id string) { m.SetLogo(id); m.logoPinned = true }
+func (m *Matrix) ClearLogoPinned()        { m.logoPinned = false; m.setFocusLogo(m.nextShuffledLogoID()) }
+func (m *Matrix) LogoPinned() bool        { return m != nil && m.logoPinned }
 
 func (m *Matrix) SetLogo(id string) {
 	if m == nil {
@@ -89,7 +92,7 @@ func (m *Matrix) updateLogoReveals() {
 		m.initLogoReveals()
 	}
 	// Advance carousel on schedule.
-	if !m.logoAvailable(m.focusLogo) || (m.focusLogo != "" && m.Frame%logoRotateFrames == 0) {
+	if !m.logoPinned && (!m.logoAvailable(m.focusLogo) || (m.focusLogo != "" && m.Frame%logoRotateFrames == 0)) {
 		m.setFocusLogo(m.nextShuffledLogoID())
 	}
 	for i := range m.logos {
@@ -255,16 +258,18 @@ func (m *Matrix) renderLogoSilhouette(buf *MatrixBuffer, logo *matrixLogoReveal)
 	}
 
 	panel := m.logoRevealPanel()
-	renderW := maxInt(1, logo.mask.Width/2)
-	renderH := maxInt(1, logo.mask.Height/4)
 	contentW := maxInt(1, panel.W)
 	contentH := maxInt(1, panel.H)
-	if renderW > contentW {
-		renderW = contentW
+	// Resample the entire mask to the available Braille cell grid instead of
+	// clipping the top-left corner of oversized artwork.
+	scaleX := float64(logo.mask.Width) / float64(maxInt(1, contentW*2))
+	scaleY := float64(logo.mask.Height) / float64(maxInt(1, contentH*4))
+	scale := math.Max(scaleX, scaleY)
+	if scale <= 1 {
+		scale = 1
 	}
-	if renderH > contentH {
-		renderH = contentH
-	}
+	renderW := minInt(contentW, maxInt(1, int(math.Ceil(float64(logo.mask.Width)/scale/2))))
+	renderH := minInt(contentH, maxInt(1, int(math.Ceil(float64(logo.mask.Height)/scale/4))))
 	startX := panel.X + (contentW-renderW)/2
 	startY := panel.Y + (contentH-renderH)/2
 
@@ -286,11 +291,11 @@ func (m *Matrix) renderLogoSilhouette(buf *MatrixBuffer, logo *matrixLogoReveal)
 			if float64(cx) > revealGate && n > 0.08+reveal*0.62 {
 				continue
 			}
-			glyph, inside := logoBrailleGlyph(logo.mask, cx, cy, reveal, n, age)
+			glyph, inside := logoBrailleGlyphScaled(logo.mask, cx, cy, scale, reveal, n, age)
 			if inside <= 0.04 {
 				continue
 			}
-			edge := logoEdgeAccent(logo.mask, cx, cy)
+			edge := logoEdgeAccentScaled(logo.mask, cx, cy, scale)
 			front := logoSweepAccent(float64(cx), revealGate)
 			strength := clampFloat(inside*reveal+edge*0.18+front*0.22+wave*0.06+n*0.02, 0, 1.22)
 
@@ -298,6 +303,78 @@ func (m *Matrix) renderLogoSilhouette(buf *MatrixBuffer, logo *matrixLogoReveal)
 			putMatrixCell(buf, x, y, glyph, colorIdx, false)
 		}
 	}
+}
+
+func logoBrailleGlyphScaled(mask logo.Mask, cellX, cellY int, scale float64, reveal, noise float64, age int) (rune, float64) {
+	dotBits := [4][2]int{{0x01, 0x08}, {0x02, 0x10}, {0x04, 0x20}, {0x40, 0x80}}
+	var bits int
+	var total float64
+	var count int
+	settle := easeOutCubic(float64(age) / 48)
+	threshold := 0.10 + (1-reveal)*0.13 + noise*0.025 - settle*0.025
+	for dy := 0; dy < 4; dy++ {
+		sy := int(float64(cellY*4+dy) * scale)
+		if sy < 0 || sy >= len(mask.Cells) {
+			continue
+		}
+		for dx := 0; dx < 2; dx++ {
+			sx := int(float64(cellX*2+dx) * scale)
+			if sx < 0 || sx >= len(mask.Cells[sy]) {
+				continue
+			}
+			v := mask.Cells[sy][sx]
+			total += v
+			count++
+			if v >= threshold {
+				bits |= dotBits[dy][dx]
+			}
+		}
+	}
+	if bits == 0 || count == 0 {
+		return ' ', 0
+	}
+	return rune(0x2800 + bits), total / float64(count)
+}
+func logoEdgeAccentScaled(mask logo.Mask, cellX, cellY int, scale float64) float64 {
+	center := logoCellMeanScaled(mask, cellX, cellY, scale)
+	if center <= 0 {
+		return 0
+	}
+	maxDelta := 0.0
+	for dy := -1; dy <= 1; dy++ {
+		for dx := -1; dx <= 1; dx++ {
+			if dx == 0 && dy == 0 {
+				continue
+			}
+			d := math.Abs(center - logoCellMeanScaled(mask, cellX+dx, cellY+dy, scale))
+			if d > maxDelta {
+				maxDelta = d
+			}
+		}
+	}
+	return clampFloat(maxDelta*1.4, 0, 1)
+}
+func logoCellMeanScaled(mask logo.Mask, cellX, cellY int, scale float64) float64 {
+	var total float64
+	var count int
+	for dy := 0; dy < 4; dy++ {
+		sy := int(float64(cellY*4+dy) * scale)
+		if sy < 0 || sy >= len(mask.Cells) {
+			continue
+		}
+		for dx := 0; dx < 2; dx++ {
+			sx := int(float64(cellX*2+dx) * scale)
+			if sx < 0 || sx >= len(mask.Cells[sy]) {
+				continue
+			}
+			total += mask.Cells[sy][sx]
+			count++
+		}
+	}
+	if count == 0 {
+		return 0
+	}
+	return total / float64(count)
 }
 
 func (m *Matrix) logoRevealPanel() Rect {

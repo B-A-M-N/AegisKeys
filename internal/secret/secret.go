@@ -3,6 +3,7 @@ package secret
 import (
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -47,11 +48,106 @@ type SecretPolicy struct {
 	// separately from launch injection and clipboard/reveal exposure.
 	AllowBrokerResolve bool `json:"allow_broker_resolve"`
 	AllowBrokerRotate  bool `json:"allow_broker_rotate"`
+	// BrokerResolveSource and BrokerRotateSource distinguish an explicit
+	// administrative policy from a bit temporarily enabled by grant approval.
+	// Empty is legacy/manual: true means preserve; false is not authoritative.
+	BrokerResolveSource BrokerPolicySource `json:"broker_resolve_source,omitempty"`
+	BrokerRotateSource  BrokerPolicySource `json:"broker_rotate_source,omitempty"`
+	BrokerAdminResolve  bool               `json:"broker_admin_resolve,omitempty"`
+	BrokerAdminRotate   bool               `json:"broker_admin_rotate,omitempty"`
+	BrokerAdminRevision uint64             `json:"broker_admin_revision,omitempty"`
 
 	RequireConfirmForReveal bool `json:"require_confirm_for_reveal"`
 	RequireConfirmForExport bool `json:"require_confirm_for_export"`
 
 	MaxClipboardTTLSeconds int `json:"max_clipboard_ttl_seconds,omitempty"`
+}
+
+type BrokerPolicySource string
+
+const (
+	BrokerPolicySourceAdministrative BrokerPolicySource = "administrative"
+	BrokerPolicySourceGrant          BrokerPolicySource = "grant"
+)
+
+func (s BrokerPolicySource) Valid() bool {
+	return s == "" || s == BrokerPolicySourceAdministrative || s == BrokerPolicySourceGrant
+}
+
+func NormalizeBrokerPolicyProvenance(policy *SecretPolicy) {
+	if policy == nil {
+		return
+	}
+	if policy.AllowBrokerResolve && policy.BrokerResolveSource == "" {
+		policy.BrokerResolveSource = BrokerPolicySourceAdministrative
+	}
+	if policy.BrokerAdminResolve {
+		policy.AllowBrokerResolve = true
+		policy.BrokerResolveSource = BrokerPolicySourceAdministrative
+	}
+	if policy.BrokerAdminRotate {
+		policy.AllowBrokerRotate = true
+		policy.BrokerRotateSource = BrokerPolicySourceAdministrative
+	}
+	if policy.AllowBrokerRotate && policy.BrokerRotateSource == "" {
+		policy.BrokerRotateSource = BrokerPolicySourceAdministrative
+	}
+	if !policy.AllowBrokerResolve && policy.BrokerResolveSource == BrokerPolicySourceGrant {
+		policy.BrokerResolveSource = ""
+	}
+	if !policy.AllowBrokerRotate && policy.BrokerRotateSource == BrokerPolicySourceGrant {
+		policy.BrokerRotateSource = ""
+	}
+}
+
+func MarkBrokerAdministrative(policy *SecretPolicy, resolve, rotate bool) {
+	if policy == nil {
+		return
+	}
+	if resolve != policy.BrokerAdminResolve || rotate != policy.BrokerAdminRotate {
+		policy.BrokerAdminRevision++
+	}
+	policy.BrokerAdminResolve, policy.BrokerAdminRotate = resolve, rotate
+	if resolve {
+		policy.AllowBrokerResolve = true
+		policy.BrokerResolveSource = BrokerPolicySourceAdministrative
+	}
+	if rotate {
+		policy.AllowBrokerRotate = true
+		policy.BrokerRotateSource = BrokerPolicySourceAdministrative
+	}
+	if !resolve {
+		policy.AllowBrokerResolve = false
+		policy.BrokerResolveSource = ""
+	}
+	if !rotate {
+		policy.AllowBrokerRotate = false
+		policy.BrokerRotateSource = ""
+	}
+}
+
+func (p SecretPolicy) EffectiveBrokerResolve() bool {
+	if p.Version == 0 {
+		return DefaultSecretPolicy(SecretAPIKey).AllowBrokerResolve
+	}
+	return p.AllowBrokerResolve
+}
+
+func (p SecretPolicy) EffectiveBrokerRotate() bool {
+	if p.Version == 0 {
+		return DefaultSecretPolicy(SecretAPIKey).AllowBrokerRotate
+	}
+	return p.AllowBrokerRotate
+}
+
+func (p SecretPolicy) ValidateBrokerProvenance() error {
+	if !p.BrokerResolveSource.Valid() {
+		return errors.New("invalid broker resolve policy source")
+	}
+	if !p.BrokerRotateSource.Valid() {
+		return errors.New("invalid broker rotate policy source")
+	}
+	return nil
 }
 
 // DefaultSecretPolicy returns the default policy for a secret kind.
@@ -139,11 +235,11 @@ func (r SecretRecord) AllowAccess(mode AccessMode) error {
 			return &AccessError{Mode: string(mode)}
 		}
 	case AccessBrokerResolve:
-		if !policy.AllowBrokerResolve {
+		if !policy.EffectiveBrokerResolve() {
 			return &AccessError{Mode: string(mode)}
 		}
 	case AccessBrokerRotate:
-		if !policy.AllowBrokerRotate {
+		if !policy.EffectiveBrokerRotate() {
 			return &AccessError{Mode: string(mode)}
 		}
 	default:
@@ -223,7 +319,16 @@ func migrateSecretV1ToV2(r *SecretRecord) {
 		r.Kind = SecretAPIKey
 	}
 	if r.Policy.Version == 0 {
+		legacyResolve, legacyRotate := r.Policy.AllowBrokerResolve, r.Policy.AllowBrokerRotate
 		r.Policy = DefaultSecretPolicy(r.Kind)
+		if legacyResolve {
+			r.Policy.AllowBrokerResolve = true
+			r.Policy.BrokerResolveSource = BrokerPolicySourceAdministrative
+		}
+		if legacyRotate {
+			r.Policy.AllowBrokerRotate = true
+			r.Policy.BrokerRotateSource = BrokerPolicySourceAdministrative
+		}
 	}
 	if r.RevealPolicy == "" {
 		r.RevealPolicy = RevealConfirm

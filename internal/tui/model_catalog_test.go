@@ -470,6 +470,8 @@ func TestRefreshModelCatalog_NoAutoSelectNew(t *testing.T) {
 
 	msg := modelCatalogLoadedMsg{
 		providerSlug: m.modelCatalog.providerSlug,
+		requestID:    m.modelCatalog.requestID,
+		sessionGen:   m.sessionGen,
 		models:       newModels,
 		err:          nil,
 	}

@@ -33,3 +33,22 @@ func TestEmbeddedAssetsWorkOutsideRepository(t *testing.T) {
 		t.Fatal("embedded logo unavailable outside repository")
 	}
 }
+
+func TestUnapprovedDedicatedAssetIsNotEmbedded(t *testing.T) {
+	if _, err := embeddedAssets.ReadFile("assets/logos/claudecode.png"); err == nil {
+		t.Fatal("unapproved dedicated artwork remains embedded in release binary")
+	}
+}
+
+func TestUnapprovedDedicatedAssetUsesGenericPublicationFallback(t *testing.T) {
+	asset, ok := PublicationAsset("claude")
+	if !ok {
+		t.Fatal("claude publication asset missing")
+	}
+	if asset.Path != DefaultAssets["generic"].Path {
+		t.Fatalf("unapproved dedicated asset published: %s", asset.Path)
+	}
+	if !DefaultAssetAvailable("claude") {
+		t.Fatal("claude compatibility identity should remain available through fallback")
+	}
+}

@@ -27,6 +27,110 @@ Watch the full end-to-end demo: [`docs/demo/full-flow-launch.mp4`](docs/demo/ful
   apps resolve stable binding names, so one vault rotation reaches the next
   provider-client reconnect without rewriting `.env` files.
 
+## Feature tour
+
+### Vault and secret lifecycle
+
+- Encrypts vault contents with Argon2id-derived keys and AES-256-GCM.
+- Supports password unlock, optional OS-keyring convenience unlock, and
+  explicit keyring-required vaults with protected recovery files.
+- Keeps provider metadata and secret records in separate stores so rotating a
+  credential does not rewrite application profiles.
+- Supports primary secrets, named secondary components, private notes,
+  labels, tags, expiration metadata, rotation reminders, and per-record
+  reveal/copy/export/launch policy.
+- Provides transactional mutations, backup/rekey/repair flows, and fail-closed
+  handling for malformed or resource-exhausting vault envelopes.
+
+### Provider and model management
+
+- Ships with a broad catalog of hosted, OpenAI-compatible, Anthropic-compatible,
+  Google-compatible, and local providers.
+- Stores base URLs, auth specifications, endpoint templates, capabilities, and
+  model catalogs as non-secret metadata.
+- Validates remote destinations, endpoint substitutions, redirect policy, and
+  credential-origin decisions before a provider request can carry a secret.
+- Refreshes supported model catalogs with bounded response parsing and writes
+  the refreshed catalog atomically.
+- Supports local providers such as Ollama and LM Studio without requiring a
+  hosted credential.
+
+### Profiles and launch configuration
+
+- Binds a provider, vault key, target app, model roles, and optional runtime
+  environment into a reusable profile.
+- Provides app-specific model slots such as main/fast/weak/editor/planner/actor
+  and adapter-specific catalog, fallback, summary, and subagent roles.
+- Resolves a profile through the same mandatory contract gate for CLI previews,
+  CLI launches, TUI launches, saves, and tests.
+- Supports command overrides, working directories, environment variables, and
+  explicit arbitrary-command launches where the adapter permits them.
+- Renders parser-backed JSON, JSONC, YAML, TOML, and XML configuration overlays
+  while preserving unrelated user settings.
+- Provides conflict-aware cleanup: AegisKeys restores its own unchanged overlay
+  after launch, while preserving child/user modifications and reporting
+  conflicts.
+
+### Adapter catalog and honest support
+
+- Includes adapters for generic launches, Aider, Crush, Qwen Code, Goose,
+  Claude Code, Hermes, Cline, Mistral Vibe, Codex, MiMo, OpenCode, OpenHands,
+  Gemini CLI, Copilot CLI, Continue, Zed, IntelliJ IDEA, Roo, Kilo, and Cursor.
+- Declares credential-control mode, launch surface, model slots, hazards,
+  validation checks, and manual steps in an explicit `AppSupportContract`.
+- Runs render, no-secret-leak, config-merge, and fake-executable launch gates.
+- Keeps synthetic verification separate from version-pinned real-app
+  qualification; `verified` never claims universal third-app compatibility.
+- Falls back to generic visual identity artwork for unreviewed third-party logo
+  assets without changing the app’s integration or model behavior.
+
+### Interactive TUI
+
+- Provides dashboard, provider, key, profile, launch, doctor, audit, settings,
+  Access, scratchpad, and help screens.
+- Uses asynchronous commands for slow vault, doctor, model, and access
+  operations rather than blocking the terminal event loop.
+- Fences stale unlock, doctor, editor, approval, and launch results against the
+  active vault session generation.
+- Supports idle auto-lock, explicit lock, derived-key zeroization, model
+  selection, scratchpad notes, and optional external-editor handoff.
+- Presents a Matrix-rain logo reveal using a generic identity fallback when a
+  dedicated third-party illustration is not publication-approved.
+
+### Credential broker and access control
+
+- Exposes an optional Linux-only Unix-domain broker; it does not listen on TCP.
+- Authenticates peers with Linux UID plus executable path/hash constraints and
+  requires an independent secret policy for every resolve/rotate operation.
+- Supports named bindings, expiring grants, per-grant capability and
+  credential-component allowlists, interpreter-wide acknowledgement, and
+  rotation through a dedicated broker operation.
+- Keeps broker metadata separate from raw vault values and fails closed on
+  unexpected pre-existing listeners or unsafe runtime paths.
+- Reconciles grant-derived policy when grants expire, are revoked, rebind, or
+  are deleted, while preserving administrative policy.
+
+### Diagnostics, audit, and recovery
+
+- Records metadata-only audit events for vault, provider, profile, launch,
+  broker, doctor, and access operations.
+- Validates audit event schemas, redacts secret-shaped output, bounds reads,
+  rotates oversized logs, and reports write failures.
+- Provides `doctor`, adapter verification, encrypted-vault backup, repair-unlock,
+  rekey, and recovery-oriented diagnostics.
+- Uses secure atomic storage for sensitive files and no-follow filesystem
+  primitives on supported Unix and Windows targets.
+
+### Portability and release tooling
+
+- Builds on Linux, macOS, and Windows; the credential broker is intentionally
+  Linux-only because peer identity uses Linux `SO_PEERCRED`.
+- Uses portable `charm.land/.../v2` dependencies without machine-local module
+  replacements.
+- Pins release actions to reviewed commit SHAs, validates release inputs and
+  signed tags, verifies artifact checksums, and keeps per-asset logo review
+  separate from application compatibility.
+
 ## Why this exists
 
 Personally, I kind of suck at keeping track of this kind of stuff. For the
@@ -43,6 +147,17 @@ and no more wondering whether that `.env` I just committed had a secret in it.
 
 It's the tool I wished I had every time I spun up a new agent and groaned at
 the thought of wiring credentials in by hand again.
+
+## Third-party identity notice
+
+Third-party application names and any dedicated marks used in compatibility
+screens identify supported integrations only. AegisKeys is independent and does
+not imply sponsorship or endorsement. Dedicated artwork is subject to the
+per-asset review manifest; unresolved assets use the generic identity fallback.
+In the current release build, only the generic identity artwork is embedded;
+dedicated third-party illustrations remain source-tree review artifacts until
+individually approved. The fallback affects presentation only, not the app's
+name, adapter, integration, or model configuration.
 
 ## Supported apps
 
@@ -100,7 +215,7 @@ based.
 |-----|--------|------|
 | Cursor | account-based auth; no safe secret injection path | configure credentials in Cursor settings |
 
-**Confidence levels:** `experimental` = adapter renders but no real launch proof; `manual_proof` = user has launched it successfully with a real provider/model and has fake-executable launch smoke, but automated gates have not all passed; `verified` = tested end-to-end with secret-non-leak assertions AND all verification gates passed (render golden, no-secret-leak, config merge, launch smoke); `guided` = config/model setup only, credential handoff is manual/keychain.
+**Confidence levels:** `experimental` = adapter renders but has no real launch proof; `manual_proof` = a maintainer/user has recorded a successful real launch with a pinned provider/model, but automated gates have not all passed; `verified` = automated contract gates passed (render golden, no-secret-leak, config merge, fake-executable launch smoke). `verified` is not proof that every current third-party app accepts the generated configuration; real-app compatibility requires a version-pinned qualification record. `guided` = config/model setup only, credential handoff is manual/keychain.
 
 Each app's contract declares its hazards (e.g. "Aider loads `.env` files that
 can shadow injected secrets"; "Zed macOS app bundle may not inherit env vars").
@@ -161,7 +276,7 @@ make install PREFIX="$HOME/.local"
 make release VERSION=0.1.0
 ```
 
-Requires Go 1.25.12 or newer. Dependencies resolve from `go.mod`/`go.sum`; no
+Requires Go 1.25.13 or newer. Dependencies resolve from `go.mod`/`go.sum`; no
 machine-local module replacement paths are required.
 
 Maintainer release steps are documented in `docs/release.md`.
@@ -179,7 +294,8 @@ aegiskeys completion powershell
 
 ```bash
 ./aegiskeys init                              # create vault + seed providers (interactive password)
-./aegiskeys init --password "$PW"             # non-interactive; ONLY for automation (visible in shell history/process table)
+# Automation: pipe the password through a protected input descriptor instead
+printf %s "$PW" | ./aegiskeys init            # avoids putting the password in argv/history
 ./aegiskeys key add --provider openrouter     # add an API key (encrypted)
 ./aegiskeys profile create --name or-main \
     --provider openrouter --key <key-id> \
@@ -424,9 +540,15 @@ go test -race ./...
 go build -buildvcs=false ./...
 go vet ./...
 test -z "$(gofmt -l .)"
-go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 go run . adapter verify
+make release VERSION=0.1.0
+sha256sum -c dist/SHA256SUMS
 ```
+
+`adapter verify` is synthetic contract evidence. It is intentionally not a
+substitute for the version-pinned real-application records under
+`testdata/adapter_qualification/`.
 
 See `docs/testing.md` for the coverage map and `docs/release.md` for the
 complete public release checklist, artifact build, tag, and GitHub release

@@ -52,6 +52,7 @@ type Matrix struct {
 	semanticEvents []semanticEvent
 	logos          []matrixLogoReveal
 	focusLogo      string
+	logoPinned     bool
 	focusLogoFrame int
 	shuffleDeck    []string
 

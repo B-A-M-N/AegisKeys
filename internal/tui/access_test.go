@@ -1,11 +1,16 @@
 package tui
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/textinput"
 
 	"aegiskeys/internal/broker"
 	"aegiskeys/internal/config"
@@ -99,11 +104,16 @@ func TestRecoverPendingApprovalRollsBackIncompleteAndFinalizesCommitted(t *testi
 	}
 	meta.Grants = []broker.AccessGrant{g("incomplete", "b1", false), g("committed", "b2", true)}
 	resolve := []broker.Capability{broker.CapabilityResolve}
-	meta.PendingApprovals = []broker.ApprovalIntent{{GrantID: "incomplete", BindingID: "b1", SecretID: "k1", Capabilities: resolve, CreatedAt: time.Now()}, {GrantID: "committed", BindingID: "b2", SecretID: "k2", Capabilities: resolve, PriorAllowResolve: true, CreatedAt: time.Now()}}
+	meta.PendingApprovals = []broker.ApprovalIntent{{GrantID: "incomplete", BindingID: "b1", SecretID: "k1", Capabilities: resolve, PriorPolicyKnown: true, CreatedAt: time.Now()}, {GrantID: "committed", BindingID: "b2", SecretID: "k2", Capabilities: resolve, PriorAllowResolve: true, PriorPolicyKnown: true, CreatedAt: time.Now()}}
 	if err := broker.SaveBrokerFile(config.BrokerPath(dir), meta); err != nil {
 		t.Fatal(err)
 	}
-	if err := secret.MutateVaultWithKey(vaultPath, key, func(v *secret.Vault) error { v.Get("k1").Policy.AllowBrokerResolve = true; return nil }); err != nil {
+	if err := secret.MutateVaultWithKey(vaultPath, key, func(v *secret.Vault) error {
+		rec := v.Get("k1")
+		rec.Policy.AllowBrokerResolve = true
+		rec.Policy.BrokerResolveSource = secret.BrokerPolicySourceGrant
+		return nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	msg := recoverPendingApprovalsCmd(dir, key)().(accessMutationDoneMsg)
@@ -131,7 +141,7 @@ func TestRecoveryPreservesPolicyRequiredBySurvivingSameSecretGrant(t *testing.T)
 	}
 	_, key, _ := secret.LoadVaultWithKey(vaultPath, "pw")
 	if err := secret.MutateVaultWithKey(vaultPath, key, func(v *secret.Vault) error {
-		return v.Add(secret.SecretRecord{ID: "k", Label: "Key", Secret: "s", Policy: secret.SecretPolicy{Version: 1, AllowBrokerResolve: true, AllowBrokerRotate: true}})
+		return v.Add(secret.SecretRecord{ID: "k", Label: "Key", Secret: "s", Policy: secret.SecretPolicy{Version: 1, AllowBrokerResolve: true, AllowBrokerRotate: true, BrokerResolveSource: secret.BrokerPolicySourceGrant, BrokerRotateSource: secret.BrokerPolicySourceGrant}})
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +151,7 @@ func TestRecoveryPreservesPolicyRequiredBySurvivingSameSecretGrant(t *testing.T)
 		{ID: "survivor", Name: "survivor", BindingID: "b", Client: broker.ClientConstraint{UID: 1, ExecutablePath: "/survivor"}, Capabilities: []broker.Capability{broker.CapabilityResolve}, Enabled: true, CreatedAt: time.Now()},
 		{ID: "stale", Name: "stale", BindingID: "b", Client: broker.ClientConstraint{UID: 1, ExecutablePath: "/stale"}, Capabilities: []broker.Capability{broker.CapabilityRotate}, CreatedAt: time.Now()},
 	}
-	meta.PendingApprovals = []broker.ApprovalIntent{{GrantID: "stale", BindingID: "b", SecretID: "k", Capabilities: []broker.Capability{broker.CapabilityRotate}, PriorAllowResolve: true, PriorAllowRotate: false, CreatedAt: time.Now()}}
+	meta.PendingApprovals = []broker.ApprovalIntent{{GrantID: "stale", BindingID: "b", SecretID: "k", Capabilities: []broker.Capability{broker.CapabilityRotate}, PriorAllowResolve: true, PriorAllowRotate: false, PriorResolveSource: secret.BrokerPolicySourceAdministrative, PriorPolicyKnown: true, CreatedAt: time.Now()}}
 	if err := broker.SaveBrokerFile(config.BrokerPath(dir), meta); err != nil {
 		t.Fatal(err)
 	}
@@ -241,10 +251,110 @@ func TestAccessScreenShowsMetadataOnly(t *testing.T) {
 	m.vaultSession = &vaultSession{vault: &secret.Vault{Keys: []secret.SecretRecord{{ID: "key_1", Label: "Primary", Secret: "raw-never-shown-123456"}}}}
 	m.active = screenAccess
 	content := stripANSIForTest(m.View().Content)
-	if !strings.Contains(content, "athena/openrouter") || !strings.Contains(content, "athena resolve") {
+	if !strings.Contains(content, "athena/openrouter") || !strings.Contains(content, "athena") || !strings.Contains(content, "resolve") {
 		t.Fatalf("access metadata missing: %q", content)
 	}
 	if strings.Contains(content, "raw-never-shown") {
 		t.Fatalf("access screen exposed sensitive or internal identifier: %q", content)
+	}
+}
+
+func TestFirstSessionGenerationFencesPreparedApproval(t *testing.T) {
+	m := newTestModel(t)
+	m.scratchBodyInput = textarea.New()
+	m.scratchTitleInput = textinput.New()
+	m.unlocked = true
+	m.vaultSession = &vaultSession{}
+	m.unlockSessionContext()
+	gen := m.sessionGen
+	if gen == 0 {
+		t.Fatal("first unlock retained zero generation")
+	}
+	_, cmd := m.Update(accessApprovalPreparedMsg{sessionGen: gen - 1, pending: accessApprovalPending{GrantID: "stale"}})
+	if cmd == nil {
+		t.Fatal("stale prepared approval was not cleaned")
+	}
+	if m.modal == modalAccessConfirm {
+		t.Fatal("stale approval opened confirmation modal")
+	}
+}
+
+func TestStaleScratchDeleteNeverDereferencesLockedSession(t *testing.T) {
+	m := newTestModel(t)
+	m.scratchBodyInput = textarea.New()
+	m.scratchBodyInput.SetWidth(40)
+	m.scratchBodyInput.SetHeight(8)
+	m.scratchTitleInput = textinput.New()
+	m.unlocked = true
+	m.vaultSession = &vaultSession{}
+	m.unlockSessionContext()
+	m.lockVault()
+	_, _ = m.Update(scratchDeletedMsg{id: "x", sessionGen: m.sessionGen - 1})
+	if m.unlocked || m.vaultSession != nil {
+		t.Fatal("locked session changed")
+	}
+}
+
+func TestAccessEnterInspectsSelectedGrant(t *testing.T) {
+	m := newTestModel(t)
+	m.brokerMeta = broker.NewFile()
+	m.brokerMeta.Bindings = append(m.brokerMeta.Bindings, broker.CredentialBinding{ID: "b", Name: "app/key", SecretID: "k"})
+	m.brokerMeta.Grants = append(m.brokerMeta.Grants, broker.AccessGrant{ID: "g", Name: "App", BindingID: "b", Client: broker.ClientConstraint{UID: 1, ExecutablePath: "/x/app/very-long-path"}, Capabilities: []broker.Capability{broker.CapabilityResolve}, Enabled: true})
+	m.active = screenAccess
+	m.focus = focusContent
+	m.selected[screenAccess] = 1
+	sendKey(t, m, "enter")
+	if m.modal != modalDetail {
+		t.Fatal("selected grant did not open detail")
+	}
+	out := stripANSIForTest(m.View().Content)
+	for _, want := range []string{"/x/app/very-long-path", "ENABLED"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("grant detail missing %q: %s", want, out)
+		}
+	}
+}
+
+func TestBindingMutationCommandsAreSessionFenced(t *testing.T) {
+	dir := t.TempDir()
+	if err := secret.InitVault(config.VaultPath(dir), "pw"); err != nil {
+		t.Fatal(err)
+	}
+	if err := broker.SaveBrokerFile(config.BrokerPath(dir), broker.NewFile()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	created := createAccessBindingSessionCmd(ctx, dir, "app/key", "key_1", 7)().(accessMutationDoneMsg)
+	if !errors.Is(created.err, context.Canceled) || created.sessionGen != 7 {
+		t.Fatalf("create was not session-fenced: %+v", created)
+	}
+	rebound := rebindAccessBindingSessionCmd(ctx, dir, "binding_1", "key_2", 7, [32]byte{})().(accessMutationDoneMsg)
+	if !errors.Is(rebound.err, context.Canceled) || rebound.sessionGen != 7 {
+		t.Fatalf("rebind was not session-fenced: %+v", rebound)
+	}
+	meta, err := broker.LoadBrokerFile(config.BrokerPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(meta.Bindings) != 0 {
+		t.Fatalf("cancelled binding mutation changed metadata: %+v", meta.Bindings)
+	}
+}
+
+func TestApprovalCommitCompletionCarriesSessionGeneration(t *testing.T) {
+	m := newTestModel(t)
+	m.unlocked = true
+	m.vaultSession = &vaultSession{}
+	m.unlockSessionContext()
+	msg := accessMutationDoneMsg{message: "Access grant approved.", sessionGen: m.sessionGen}
+	_, _ = m.Update(msg)
+	if m.statusMsg != msg.message {
+		t.Fatalf("current completion was not accepted: %q", m.statusMsg)
+	}
+	stale := accessMutationDoneMsg{message: "stale", sessionGen: m.sessionGen - 1}
+	_, _ = m.Update(stale)
+	if m.statusMsg != msg.message {
+		t.Fatalf("stale completion changed current session: %q", m.statusMsg)
 	}
 }

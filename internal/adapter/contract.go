@@ -243,6 +243,9 @@ type FileWrite struct {
 	Mode         os.FileMode
 	RedactCheck  bool
 	Description  string
+	// TempRoot is required for ScopeTemp writes and bounds the write to an
+	// owner-verified private directory.
+	TempRoot string
 
 	// ManagedBlockID identifies which profile owns a managed config block. When
 	// set, the merge marker incorporates it so profiles sharing a config file

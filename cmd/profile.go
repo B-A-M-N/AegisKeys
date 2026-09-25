@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -154,7 +155,7 @@ var profileCreateCmd = &cobra.Command{
 		if err := profile.MutateStoreFile(config.ProfilesPath(resolvedConfigDir()), func(latest *profile.Store) error { return latest.Add(p) }); err != nil {
 			return err
 		}
-		audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{
+		logAuditEvent(audit.Event{
 			Event:    "profile_created",
 			Profile:  profCreateName,
 			Provider: profCreateProvider,
@@ -282,7 +283,9 @@ var profileDeleteCmd = &cobra.Command{
 		if err := profile.MutateStoreFile(config.ProfilesPath(resolvedConfigDir()), func(latest *profile.Store) error { return latest.Remove(args[0]) }); err != nil {
 			return err
 		}
-		audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{Event: "profile_deleted", Profile: args[0]})
+		if err := audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{Event: "profile_deleted", Profile: args[0]}); err != nil {
+			fmt.Fprintf(os.Stderr, "audit log write failed: %v\n", err)
+		}
 		fmt.Printf("Deleted profile %s\n", args[0])
 		return nil
 	},

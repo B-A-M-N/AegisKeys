@@ -70,15 +70,16 @@ func IsSecretValue(value string) bool {
 // Extend this list rather than loosening IsSecretName.
 func IsAllowedNonSecretEnv(name string) bool {
 	upper := strings.ToUpper(name)
-	allowed := []string{
-		"MODEL", "BASE_URL", "API_PATH", "ENDPOINT", "URL",
-		"PORT", "HOST", "TIMEOUT", "RETRIES", "PROXY",
-		"LANG", "LOCALE", "REGION", "COMPAT",
-	}
-	for _, a := range allowed {
-		if strings.Contains(upper, a) {
+	// Only exact, reviewed names are allowed. Broad suffix exemptions can
+	// classify attacker-controlled names such as DB_URL_TOKEN as non-secret.
+	for _, a := range []string{"MODEL", "BASE_URL", "API_PATH", "ENDPOINT", "PORT", "HOST", "TIMEOUT", "RETRIES", "LANG", "LOCALE", "REGION", "COMPAT"} {
+		if upper == a || strings.HasSuffix(upper, "_"+a) {
 			return true
 		}
+	}
+	switch upper {
+	case "URL", "PROXY", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy":
+		return true
 	}
 	return false
 }

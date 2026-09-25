@@ -102,6 +102,7 @@ type wizardState struct {
 	fetchedModels []provider.ProviderModel
 	// fetchingModels is true while a model-catalog fetch is in flight.
 	fetchingModels bool
+	modelRequestID uint64
 
 	// nameInput captures the desired profile name before saving.
 	nameInput textinput.Model

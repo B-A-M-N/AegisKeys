@@ -69,4 +69,4 @@ release: assets-check cross-build clean
 		ln -sf aegiskeys_$(VERSION)_linux_arm64 ak_$(VERSION)_linux_arm64 && \
 		ln -sf aegiskeys_$(VERSION)_darwin_amd64 ak_$(VERSION)_darwin_amd64 && \
 		ln -sf aegiskeys_$(VERSION)_darwin_arm64 ak_$(VERSION)_darwin_arm64
-	cd "$(DIST_DIR)" && sha256sum aegiskeys_$(VERSION)_* > SHA256SUMS
+	sha256sum "$(DIST_DIR)/aegiskeys_$(VERSION)_linux_amd64" "$(DIST_DIR)/aegiskeys_$(VERSION)_linux_arm64" "$(DIST_DIR)/aegiskeys_$(VERSION)_darwin_amd64" "$(DIST_DIR)/aegiskeys_$(VERSION)_darwin_arm64" > "$(DIST_DIR)/SHA256SUMS"

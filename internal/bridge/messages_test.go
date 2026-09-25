@@ -4,11 +4,20 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
 
+func requireTCPTest(t *testing.T) {
+	t.Helper()
+	if os.Getenv("AEGISKEYS_ALLOW_TCP_TESTS") == "" {
+		t.Skip("sandbox denies TCP listener; set on a network-enabled host")
+	}
+}
+
 func TestBridgeBlocksCrossHostRedirect(t *testing.T) {
+	requireTCPTest(t)
 	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { t.Fatal("attacker received request") }))
 	defer attacker.Close()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, attacker.URL, http.StatusFound) }))
@@ -31,6 +40,7 @@ func TestBridgeBlocksCrossHostRedirect(t *testing.T) {
 }
 
 func TestBridgeTranslatesMessageAndToolCalls(t *testing.T) {
+	requireTCPTest(t)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" || r.Header.Get("Authorization") != "Bearer test-key" {
 			t.Fatalf("unexpected upstream request: %s %q", r.URL.Path, r.Header.Get("Authorization"))

@@ -36,9 +36,12 @@ var (
 	accessGrantExec          string
 	accessGrantName          string
 	accessGrantCapabilities  []string
+	accessGrantComponents    []string
 	accessGrantExpiry        string
 	accessGrantID            string
 	accessBindingID          string
+	accessAllowInterpreter   bool
+	accessGrantInterpreter   bool
 )
 
 func loadBrokerMeta() (*broker.File, string) {
@@ -129,6 +132,9 @@ var brokerServeCmd = &cobra.Command{
 		}()
 
 		if autoLockMinutes := loadAppConfig().BrokerAutoLockMinutes; autoLockMinutes > 0 {
+			// This setting is an absolute session lifetime, not inactivity. The
+			// broker still handles requests while unlocked; after this deadline
+			// all resolve/rotate calls fail closed until restarted/unlocked.
 			go func() {
 				lock := time.NewTicker(time.Duration(autoLockMinutes) * time.Minute)
 				defer lock.Stop()
@@ -156,7 +162,9 @@ func (l brokerAuditLogger) Log(event, result string, metadata map[string]string)
 		clean[k] = v
 	}
 	clean["result"] = result
-	l.logger.Log(audit.Event{Event: event, Metadata: clean})
+	if err := l.logger.Log(audit.Event{Event: event, Metadata: clean}); err != nil {
+		fmt.Fprintf(os.Stderr, "audit log write failed: %v\n", err)
+	}
 }
 
 var brokerStatusCmd = &cobra.Command{
@@ -209,6 +217,42 @@ var brokerStatusCmd = &cobra.Command{
 var accessCmd = &cobra.Command{
 	Use:   "access",
 	Short: "Manage application credential bindings and grants",
+}
+
+// accessReviewFn and accessVaultKeyFn are narrow test seams. Production calls
+// the real interactive prompt/keyring flow; end-to-end tests inject explicit
+// confirmations and a session key without capturing terminal input.
+var (
+	accessReviewFn   func(*cobra.Command, *broker.AccessGrant, *broker.CredentialBinding, string, string, []broker.Capability, *time.Time) (bool, error)
+	accessVaultKeyFn func() [32]byte
+)
+
+func reviewAccessGrant(cmd *cobra.Command, grant *broker.AccessGrant, binding *broker.CredentialBinding, canonical, hash string, capabilities []broker.Capability, expires *time.Time) (bool, error) {
+	if accessReviewFn != nil {
+		return accessReviewFn(cmd, grant, binding, canonical, hash, capabilities, expires)
+	}
+	fmt.Println("Review access grant:")
+	fmt.Printf("  Application:      %s\n", grant.Name)
+	fmt.Printf("  Executable path:  %s\n", canonical)
+	fmt.Printf("  SHA-256:          %s\n", hash)
+	fmt.Printf("  Binding:          %s\n", binding.Name)
+	fmt.Printf("  Operations:       %s\n", strings.Join(capabilityStrings(capabilities), ","))
+	components := accessGrantComponents
+	if len(components) == 0 {
+		components = []string{"primary"}
+	}
+	fmt.Printf("  Components:      %s\n", strings.Join(components, ","))
+	if expires != nil {
+		fmt.Printf("  Expiration:       %s\n", expires.Format(time.RFC3339))
+	}
+	return confirmPrompt("Type GRANT to authorize this application: ", "GRANT")
+}
+
+func accessSessionKey() [32]byte {
+	if accessVaultKeyFn != nil {
+		return accessVaultKeyFn()
+	}
+	return requireVaultKeyForBroker()
 }
 
 var accessBindingCmd = &cobra.Command{
@@ -269,8 +313,7 @@ var accessBindingAddCmd = &cobra.Command{
 					if rec == nil {
 						return fmt.Errorf("secret %q not found", accessBindingSecret)
 					}
-					rec.Policy.AllowBrokerResolve = rec.Policy.AllowBrokerResolve || accessBrokerResolve
-					rec.Policy.AllowBrokerRotate = rec.Policy.AllowBrokerRotate || accessBrokerRotate
+					secret.MarkBrokerAdministrative(&rec.Policy, rec.Policy.BrokerAdminResolve || accessBrokerResolve, rec.Policy.BrokerAdminRotate || accessBrokerRotate)
 					rec.Policy.Version = 1
 					return nil
 				},
@@ -371,30 +414,16 @@ var accessBindingRebindCmd = &cobra.Command{
 		}); err != nil {
 			return err
 		}
-		oldID, newID := "", ""
-		if err := broker.MutateBrokerFile(path, func(latest *broker.File) error {
-			var found *broker.CredentialBinding
-			for i := range latest.Bindings {
-				if latest.Bindings[i].ID == accessBindingID || latest.Bindings[i].Name == accessBindingID {
-					found = &latest.Bindings[i]
-					break
-				}
-			}
-			if found == nil {
-				return fmt.Errorf("binding %q not found", accessBindingID)
-			}
-			oldID, newID = found.SecretID, accessBindingSecret
-			found.SecretID = accessBindingSecret
-			found.UpdatedAt = time.Now()
-			for i := range latest.Grants {
-				if latest.Grants[i].BindingID == found.ID {
-					latest.Grants[i].Enabled = false
-				}
-			}
-			return nil
-		}); err != nil {
+		binding, _ := findBinding(meta, accessBindingID)
+		oldID := binding.SecretID
+		_, key, err := secret.LoadVaultWithKey(config.VaultPath(resolvedConfigDir()), pw)
+		if err != nil {
 			return err
 		}
+		if err := broker.RebindBinding(path, config.VaultPath(resolvedConfigDir()), key, accessBindingID, accessBindingSecret); err != nil {
+			return err
+		}
+		newID := accessBindingSecret
 		logAudit("credential_binding_rebound", "", map[string]string{"binding_id": accessBindingID, "old_secret_id": oldID, "new_secret_id": newID})
 		fmt.Printf("Rebound %s from %s to %s\n", accessBindingID, oldID, newID)
 		return nil
@@ -410,33 +439,7 @@ var accessBindingDeleteCmd = &cobra.Command{
 		if _, err := findBinding(meta, accessBindingID); err != nil {
 			return err
 		}
-		if err := broker.MutateBrokerFile(path, func(latest *broker.File) error {
-			var found *broker.CredentialBinding
-			for i := range latest.Bindings {
-				if latest.Bindings[i].ID == accessBindingID || latest.Bindings[i].Name == accessBindingID {
-					found = &latest.Bindings[i]
-					break
-				}
-			}
-			if found == nil {
-				return fmt.Errorf("binding %q not found", accessBindingID)
-			}
-			kept := latest.Bindings[:0]
-			for _, b := range latest.Bindings {
-				if b.ID != found.ID {
-					kept = append(kept, b)
-				}
-			}
-			latest.Bindings = kept
-			grants := latest.Grants[:0]
-			for _, g := range latest.Grants {
-				if g.BindingID != found.ID {
-					grants = append(grants, g)
-				}
-			}
-			latest.Grants = grants
-			return nil
-		}); err != nil {
+		if err := broker.DeleteBinding(path, config.VaultPath(resolvedConfigDir()), accessSessionKey(), accessBindingID); err != nil {
 			return err
 		}
 		logAudit("credential_binding_deleted", "", map[string]string{"binding_id": accessBindingID})
@@ -490,6 +493,15 @@ var accessAllowCmd = &cobra.Command{
 		if err != nil || !ok {
 			return fmt.Errorf("aborted")
 		}
+		client, err := broker.NewClientConstraint(os.Getuid(), canonical, hash, accessAllowInterpreter)
+		if err != nil {
+			return err
+		}
+		if client.IdentityScope == broker.IdentityInterpreterWide {
+			fmt.Println("WARNING: this grant covers every script run by this interpreter, not one application.")
+			fmt.Println("It cannot provide per-script isolation from other same-user code.")
+		}
+		vaultKey := accessSessionKey()
 		// Stage the grant disabled before enabling the secret policy. A crash
 		// can leave inactive metadata, never an unexpectedly live grant.
 		bindingID, err := broker.NewBindingID()
@@ -501,42 +513,13 @@ var accessAllowCmd = &cobra.Command{
 			return err
 		}
 		now := time.Now()
-		if err := broker.MutateBrokerFile(path, func(meta *broker.File) error {
-			if meta.FindBinding(bindingName) != nil {
-				return fmt.Errorf("binding already exists")
-			}
-			meta.Bindings = append(meta.Bindings, broker.CredentialBinding{ID: bindingID, Name: bindingName, SecretID: accessAllowKey, ComponentAllowlist: []string{"primary"}, Description: "Created by access allow", CreatedAt: now, UpdatedAt: now})
-			meta.Grants = append(meta.Grants, broker.AccessGrant{ID: grantID, Name: name, BindingID: bindingID, Client: broker.ClientConstraint{UID: os.Getuid(), ExecutablePath: canonical, ExecutableHash: hash}, Capabilities: capabilities, Enabled: false, CreatedAt: now, ExpiresAt: &expiration})
-			return nil
-		}); err != nil {
+		intent, err := broker.StageNewBindingApproval(cmd.Context(), path, config.VaultPath(dir), vaultKey,
+			broker.CredentialBinding{ID: bindingID, Name: bindingName, SecretID: accessAllowKey, ComponentAllowlist: []string{"primary"}, Description: "Created by access allow", CreatedAt: now, UpdatedAt: now},
+			broker.ApprovalGrantSpec{ID: grantID, Name: name, BindingID: bindingID, Client: client, Capabilities: capabilities, ComponentAllowlist: accessGrantComponents, ExpiresAt: &expiration})
+		if err != nil {
 			return err
 		}
-		if err := mutateVault("", secret.SessionMutation{Mutate: func(v *secret.Vault) error {
-			rec := v.Get(accessAllowKey)
-			if rec == nil {
-				return fmt.Errorf("key %q not found", accessAllowKey)
-			}
-			for _, capability := range capabilities {
-				if capability == broker.CapabilityResolve {
-					rec.Policy.AllowBrokerResolve = true
-				}
-				if capability == broker.CapabilityRotate {
-					rec.Policy.AllowBrokerRotate = true
-				}
-			}
-			rec.Policy.Version = 1
-			return nil
-		}}); err != nil {
-			return err
-		}
-		if err := broker.MutateBrokerFile(path, func(meta *broker.File) error {
-			for i := range meta.Grants {
-				if meta.Grants[i].ID == grantID {
-					meta.Grants[i].Enabled = true
-				}
-			}
-			return nil
-		}); err != nil {
+		if err := broker.CommitApproval(cmd.Context(), path, config.VaultPath(dir), vaultKey, intent.GrantID); err != nil {
 			return err
 		}
 		logAudit("credential_access_granted", "", map[string]string{"binding_id": bindingID, "grant_id": grantID})
@@ -576,25 +559,28 @@ var accessGrantCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		client, err := broker.NewClientConstraint(os.Getuid(), canonical, hash, accessGrantInterpreter)
+		if err != nil {
+			return err
+		}
+		if client.IdentityScope == broker.IdentityInterpreterWide {
+			fmt.Println("WARNING: this grant covers every script run by this interpreter, not one application.")
+			fmt.Println("It cannot provide per-script isolation from other same-user code.")
+		}
 		meta, path := loadBrokerMeta()
 		binding, err := findBinding(meta, accessBindingID)
 		if err != nil {
 			return err
 		}
-		pw, err := promptPassword()
+		vaultKey := accessSessionKey()
+		latestVault, err := secret.LoadVaultByKey(config.VaultPath(resolvedConfigDir()), vaultKey)
 		if err != nil {
 			return err
 		}
-		var rec *secret.SecretRecord
-		if err := precheckVault(pw, func(latest *secret.Vault) error {
-			found := latest.Get(binding.SecretID)
-			if found == nil {
-				return fmt.Errorf("binding target %q not found", binding.SecretID)
-			}
-			rec = found
-			return nil
-		}); err != nil {
-			return err
+		rec := latestVault.Get(binding.SecretID)
+		if rec == nil || rec.Archived {
+			secret.ZeroVault(latestVault)
+			return fmt.Errorf("binding target %q not found", binding.SecretID)
 		}
 		var expires *time.Time
 		if accessGrantExpiry != "" {
@@ -618,59 +604,28 @@ var accessGrantCmd = &cobra.Command{
 		if expires != nil {
 			fmt.Printf("  Expiration:       %s\n", expires.Format(time.RFC3339))
 		}
-		ok, err := confirmPrompt("Type GRANT to authorize this application: ", "GRANT")
+		grant := broker.AccessGrant{Name: accessGrantName, Client: client, Capabilities: capabilities, ExpiresAt: expires}
+		ok, err := reviewAccessGrant(cmd, &grant, binding, canonical, hash, capabilities, expires)
 		if err != nil {
 			return err
 		}
 		if !ok {
+			secret.ZeroVault(latestVault)
 			return fmt.Errorf("aborted")
 		}
+		secret.ZeroVault(latestVault)
 		now := time.Now()
 		id, err := broker.NewGrantID()
 		if err != nil {
 			return err
 		}
-		grant := broker.AccessGrant{ID: id, Name: accessGrantName, BindingID: binding.ID, Client: broker.ClientConstraint{UID: os.Getuid(), ExecutablePath: canonical, ExecutableHash: hash}, Capabilities: capabilities, Enabled: false, CreatedAt: now, ExpiresAt: expires}
-		prior := rec.Policy
-		err = broker.TransactBrokerFile(path, func(latest *broker.File) error {
-			current := latest.FindBinding(binding.ID)
-			if current == nil || current.SecretID != binding.SecretID {
-				return fmt.Errorf("binding changed during grant setup")
-			}
-			latest.Grants = append(latest.Grants, grant)
-			if err := mutateVault(pw, secret.SessionMutation{Mutate: func(v *secret.Vault) error {
-				r := v.Get(binding.SecretID)
-				if r == nil {
-					return fmt.Errorf("binding target not found")
-				}
-				for _, c := range capabilities {
-					if c == broker.CapabilityResolve {
-						r.Policy.AllowBrokerResolve = true
-					}
-					if c == broker.CapabilityRotate {
-						r.Policy.AllowBrokerRotate = true
-					}
-				}
-				r.Policy.Version = 1
-				return nil
-			}}); err != nil {
-				return err
-			}
-			for i := range latest.Grants {
-				if latest.Grants[i].ID == id {
-					latest.Grants[i].Enabled = true
-					return nil
-				}
-			}
-			return fmt.Errorf("staged grant missing")
-		})
+		grant.ID, grant.BindingID, grant.CreatedAt, grant.Enabled = id, binding.ID, now, false
+		intent, err := broker.StageApproval(cmd.Context(), path, config.VaultPath(resolvedConfigDir()), vaultKey, binding.ID,
+			broker.ApprovalGrantSpec{ID: id, Name: grant.Name, BindingID: binding.ID, Client: client, Capabilities: capabilities, ComponentAllowlist: accessGrantComponents, ExpiresAt: expires})
 		if err != nil {
-			_ = mutateVault(pw, secret.SessionMutation{Mutate: func(v *secret.Vault) error {
-				if r := v.Get(binding.SecretID); r != nil {
-					r.Policy = prior
-				}
-				return nil
-			}})
+			return err
+		}
+		if err := broker.CommitApproval(cmd.Context(), path, config.VaultPath(resolvedConfigDir()), vaultKey, intent.GrantID); err != nil {
 			return err
 		}
 		logAudit("credential_access_granted", "", map[string]string{"binding_id": binding.ID, "grant_id": id})
@@ -688,17 +643,23 @@ var accessRevokeCmd = &cobra.Command{
 			return fmt.Errorf("--grant is required")
 		}
 		_, path := loadBrokerMeta()
+		key := accessSessionKey()
 		bindingID := ""
 		if err := broker.MutateBrokerFile(path, func(latest *broker.File) error {
 			for i := range latest.Grants {
 				if latest.Grants[i].ID == accessGrantID {
-					latest.Grants[i].Enabled = false
 					bindingID = latest.Grants[i].BindingID
-					return nil
+					break
 				}
 			}
-			return fmt.Errorf("grant %q not found", accessGrantID)
+			if bindingID == "" {
+				return fmt.Errorf("grant %q not found", accessGrantID)
+			}
+			return nil
 		}); err != nil {
+			return err
+		}
+		if err := broker.RevokeGrant(path, config.VaultPath(resolvedConfigDir()), key, accessGrantID); err != nil {
 			return err
 		}
 		logAudit("credential_access_revoked", "", map[string]string{"binding_id": bindingID, "grant_id": accessGrantID})
@@ -766,7 +727,9 @@ func capabilityStrings(caps []broker.Capability) []string {
 }
 
 func logAudit(event, provider string, metadata map[string]string) {
-	audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{Event: event, Provider: provider, Metadata: metadata})
+	if err := audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{Event: event, Provider: provider, Metadata: metadata}); err != nil {
+		fmt.Fprintf(os.Stderr, "audit log write failed: %v\n", err)
+	}
 }
 
 func brokerUnixClient(socket string) (*http.Client, error) {
@@ -786,6 +749,7 @@ func init() {
 	accessAllowCmd.Flags().StringSliceVar(&accessGrantCapabilities, "capability", nil, "resolve and/or rotate")
 	accessAllowCmd.Flags().StringVar(&accessGrantExpiry, "expires", "", "required future RFC3339 expiration")
 	accessAllowCmd.Flags().BoolVar(&accessAllowPermanent, "permanent", false, "explicitly request permanent access (rejected by quick workflow)")
+	accessAllowCmd.Flags().BoolVar(&accessAllowInterpreter, "allow-interpreter-wide", false, "acknowledge that a Python/Node/etc. grant covers every script run by that interpreter")
 	accessBindingCmd.AddCommand(accessBindingAddCmd, accessBindingListCmd, accessBindingInspectCmd, accessBindingRebindCmd, accessBindingDeleteCmd)
 	accessBindingAddCmd.Flags().StringVar(&accessBindingName, "name", "", "stable binding name, e.g. athena/openrouter")
 	accessBindingAddCmd.Flags().StringVar(&accessBindingSecret, "secret", "", "existing vault secret ID")
@@ -802,6 +766,8 @@ func init() {
 	accessGrantCmd.Flags().StringVar(&accessGrantName, "name", "", "application display name")
 	accessGrantCmd.Flags().StringSliceVar(&accessGrantCapabilities, "capability", nil, "resolve and/or rotate")
 	accessGrantCmd.Flags().StringVar(&accessGrantExpiry, "expires", "", "RFC3339 expiration")
+	accessGrantCmd.Flags().StringSliceVar(&accessGrantComponents, "component", []string{"primary"}, "credential components granted to this application")
+	accessGrantCmd.Flags().BoolVar(&accessGrantInterpreter, "allow-interpreter-wide", false, "acknowledge interpreter-wide rather than per-script authorization")
 	accessRevokeCmd.Flags().StringVar(&accessGrantID, "grant", "", "grant ID")
 	accessInspectCmd.Flags().StringVar(&accessGrantID, "grant", "", "grant ID")
 	rootCmd.AddCommand(brokerCmd, accessCmd)

@@ -21,13 +21,34 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Validate release version input
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" != "tag" && ! "${INPUT_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then exit 1; fi
+
+      - name: Verify signed release tag and trusted signer
+        if: github.ref_type == 'tag'
+        shell: bash
+        env:
+          TRUSTED_SIGNER_FINGERPRINT: ${{ vars.RELEASE_SIGNING_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          test -n "${TRUSTED_SIGNER_FINGERPRINT}"
+          git verify-tag "${GITHUB_REF_NAME}"
+          signer_fingerprint=$(git show -s --format='%GF' "${GITHUB_REF_NAME}")
+          test "${signer_fingerprint}" = "${TRUSTED_SIGNER_FINGERPRINT}"
 
       - name: Resolve version
         id: version
@@ -36,10 +57,13 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="${{ inputs.version }}"
+            VERSION="${INPUT_VERSION}"
           fi
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "invalid version"; exit 1; }
           test -n "${VERSION}"
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
 
       - name: Format check
         run: test -z "$(gofmt -l .)"
@@ -50,11 +74,45 @@ jobs:
       - name: Embedded asset gate
         run: make assets-check
 
+      - name: Logo per-asset review and fallback gate
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, pathlib
+          manifest = json.loads(pathlib.Path("docs/logo-assets.manifest.json").read_text())
+          if manifest.get("schema") != 3 or not isinstance(manifest.get("assets"), list) or not manifest["assets"]:
+              raise SystemExit("invalid per-asset logo manifest")
+          files = sorted(pathlib.Path("internal/logo/assets/logos").glob("*.png"))
+          listed = {a["path"] for a in manifest["assets"]}
+          if listed != {str(p) for p in files}:
+              raise SystemExit("logo manifest does not cover exactly the shipped PNGs")
+          required = {"represented_apps", "provenance", "generation_tool", "generation_terms", "intended_presentation", "brand_guidelines", "publication", "review_basis", "attribution_notice"}
+          for asset in manifest["assets"]:
+              if not required.issubset(asset):
+                  raise SystemExit("incomplete per-asset review: " + asset["path"])
+              data = pathlib.Path(asset["path"]).read_bytes()
+              if hashlib.sha256(data).hexdigest() != asset.get("sha256"):
+                  raise SystemExit("logo checksum mismatch: " + asset["path"])
+              if asset["publication"] == "approved" and asset.get("represented_apps") != ["generic"] and not asset.get("reviewed_by"):
+                  raise SystemExit("approved third-party asset lacks reviewer: " + asset["path"])
+              if asset["publication"] not in ("approved", "generic-fallback"):
+                  raise SystemExit("invalid publication disposition: " + asset["path"])
+          PY
+
       - name: Mandatory macOS cross-build
         run: make cross-build
 
       - name: Test
         run: go test ./...
+
+      - name: TCP integration tests
+        env:
+          AEGISKEYS_ALLOW_TCP_TESTS: "1"
+        run: go test ./internal/bridge ./internal/provider
+
+      - name: Unix-socket broker integration tests
+        env:
+          AEGISKEYS_RUN_SOCKET_E2E: "1"
+        run: go test ./internal/broker -run 'TestBrokerUnixSocketE2E|TestBrokerConcurrentResolveRotateImmediateRevocation' -count=1
 
       - name: Race test
         run: go test -race ./...
@@ -63,7 +121,7 @@ jobs:
         run: go vet ./...
 
       - name: Vulnerability scan
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 
       - name: Adapter render/no-leak verification
         run: go run . adapter verify
@@ -71,13 +129,16 @@ jobs:
       - name: Build release binaries
         run: make release VERSION="${{ steps.version.outputs.version }}"
 
+      - name: Verify release artifact checksums
+        run: sha256sum -c dist/SHA256SUMS
+
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@e8998f949152b193b0cb484e820d1a1894bdae0b1 # v2
         with:
           subject-path: "dist/*"
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: aegiskeys-${{ steps.version.outputs.version }}
           path: dist/*

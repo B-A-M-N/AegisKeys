@@ -40,6 +40,7 @@ var settingsShowCmd = &cobra.Command{
 		printSetting("rotation_reminder_days", strconv.Itoa(cfg.RotationReminderDays))
 		printSetting("runtime_policy", cfg.RuntimePolicy)
 		printSetting("broker_auto_lock_minutes", strconv.Itoa(cfg.BrokerAutoLockMinutes))
+		printSetting("enable_external_scratchpad_editor", strconv.FormatBool(cfg.EnableExternalScratchpadEditor))
 		printSetting("inherit_env", strings.Join(cfg.InheritEnv, ","))
 		return nil
 	},
@@ -121,6 +122,12 @@ func applySetting(cfg *config.Config, key, value string) error {
 			return err
 		}
 		cfg.BrokerAutoLockMinutes = n
+	case "enable_external_scratchpad_editor":
+		b, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("%s must be true or false", key)
+		}
+		cfg.EnableExternalScratchpadEditor = b
 	case "runtime_policy":
 		switch value {
 		case config.RuntimePolicyStrict, config.RuntimePolicyStandard, config.RuntimePolicyPermissive:

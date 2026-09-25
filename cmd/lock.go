@@ -45,6 +45,7 @@ var unlockCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		defer secret.ZeroVault(v)
 		fmt.Printf("Vault unlocked: %d key(s).\n", len(v.Keys))
 		return nil
 	},

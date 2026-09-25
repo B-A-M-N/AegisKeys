@@ -68,8 +68,10 @@ secret values, prefixes/suffixes, request bodies, or replacement values.
   values through no-echo prompts.
 - Raw secret values are not accepted through secret flags, avoiding shell
   history and process-list exposure.
-- `init --password` exists for automation but is less secure because the master
-  password can appear in shell history or process tables.
+- `init --password` remains only as a deprecated automation compatibility
+  path; the master password can appear in shell history or process tables.
+  Prefer piping one password line through stdin from a protected input
+  descriptor, for example `printf %s "$PASSWORD" | aegiskeys init`.
 
 ## Launch Boundary
 
@@ -97,7 +99,8 @@ The validator checks:
 ## Adapter Confidence
 
 - `verified` means render golden, no-secret-leak, config merge/write, and
-  launch-smoke gates pass.
+  fake-executable launch-smoke gates pass. It is automated contract evidence,
+  not a version-pinned real-application compatibility claim.
 - `experimental` means the adapter renders a useful plan and passes no-leak
   checks but lacks full launch proof.
 - `guided` means AegisKeys can guide setup but does not inject raw secrets.
@@ -155,6 +158,38 @@ runs:
 ```bash
 go test ./...
 go test -race ./...
-go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 go run . adapter verify
 ```
+
+## Scratchpad External Editing
+
+External scratchpad editing is disabled by default. When explicitly enabled,
+AegisKeys writes through Bubble Tea terminal handoff to a new current-user-owned
+`0700` directory under the configured private runtime tree. The editor argv is
+parsed without a shell. AegisKeys removes its original and private directory on
+normal completion or failure and cleans abandoned directories at the next TUI
+start. Editors may still create backup or swap files containing plaintext;
+enable the feature only after reviewing the selected editor's behavior. There is
+no claim that an arbitrary editor is a secure plaintext-free boundary.
+
+## Broker Metadata Rollback Boundary
+
+`broker.json` is local metadata protected by filesystem permissions and
+transaction locks, but it is not cryptographically authenticated. An attacker
+who can replace the entire file with an older valid copy may attempt to restore
+revoked grants. The grant check and the independent vault policy still fail
+closed unless the restored state corresponds to an active grant and an enabled
+secret policy; the build does not claim durable rollback detection against a
+same-user filesystem adversary. Operators must protect the config directory
+and treat broker metadata rollback as an unresolved local threat-model boundary.
+
+## Third-Party Logo Review
+
+Logo review is per asset, not a single blanket approval. The manifest records
+represented application identities, provenance, generation tool/terms,
+intended presentation, brand-guideline disposition, and a publication choice.
+Third-party names identify compatibility only and do not imply endorsement.
+Dedicated assets without an affirmative per-asset review are not used for
+publication; the runtime resolves those applications to the generic identity
+asset while preserving their application name and integration.

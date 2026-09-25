@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"syscall"
 	"time"
 
 	"aegiskeys/internal/fsutil"
@@ -111,8 +110,8 @@ func (r *Registry) Find(slug string) *Provider {
 }
 
 // SaveRegistry persists the registry to disk. Returns an error if the write fails.
-func lockFile(f *os.File) error { return syscall.Flock(int(f.Fd()), syscall.LOCK_EX) }
-func unlockFile(f *os.File)     { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }
+func lockFile(f *os.File) error { return fsutil.LockFile(f) }
+func unlockFile(f *os.File)     { fsutil.UnlockFile(f) }
 
 func MutateRegistryFile(path string, mutate func(*Registry) error) error {
 	return MutateRegistryFileWithFallback(path, NewRegistry(), mutate)
@@ -122,7 +121,7 @@ func MutateRegistryFileWithFallback(path string, fallback *Registry, mutate func
 	if mutate == nil {
 		return errors.New("nil provider mutation")
 	}
-	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
+	lock, err := fsutil.OpenLockFile(path + ".lock")
 	if err != nil {
 		return err
 	}

@@ -1931,6 +1931,8 @@ func TestScratchSaveKeepsEditorOpenUntilEncryptedWriteSucceeds(t *testing.T) {
 		t.Fatalf("LoadVaultWithKey: %v", err)
 	}
 	m.vaultSession = &vaultSession{vault: &secret.Vault{ScratchPads: []secret.ScratchPadRecord{{ID: "note", Title: "Old"}}}, key: key}
+	m.unlocked = true
+	m.unlockSessionContext()
 	if err := secret.MutateVaultWithKey(config.VaultPath(m.configDir), key, func(latest *secret.Vault) error {
 		return latest.AddScratchPad(secret.ScratchPadRecord{ID: "note", Title: "Old"})
 	}); err != nil {
@@ -2224,5 +2226,123 @@ func TestScratchPad_ViewShowsSelectionControls(t *testing.T) {
 		if !strings.Contains(view, want) {
 			t.Fatalf("scratch view missing %q:\n%s", want, view)
 		}
+	}
+}
+
+func TestSanitizeLaunchOutputDropsDCSAndC1Controls(t *testing.T) {
+	input := "before\x1bPq\x1b]0;title\x07payload\x1b\\after\x1b[31mred\u009b31;1mhidden\u009d0;title\x07visible"
+	got := sanitizeLaunchOutput(input)
+	for _, bad := range []string{"payload", "title", "\x1b", "\x9b", "\x9d"} {
+		if strings.Contains(got, bad) {
+			t.Fatalf("sanitizer retained %q in %q", bad, got)
+		}
+	}
+	if !strings.Contains(got, "before") || !strings.Contains(got, "after") || !strings.Contains(got, "visible") {
+		t.Fatalf("sanitizer removed safe text: %q", got)
+	}
+}
+
+func TestCtrlCAndQZeroVaultSession(t *testing.T) {
+	for _, key := range []string{"ctrl+c", "q"} {
+		t.Run(key, func(t *testing.T) {
+			m := newTestModel(t)
+			m.scratchBodyInput = textarea.New()
+			m.scratchBodyInput.SetWidth(40)
+			m.scratchBodyInput.SetHeight(8)
+			m.scratchTitleInput = textinput.New()
+			unlockTestVault(t, m, secret.SecretRecord{ID: "k", Label: "k", Secret: "secret-value", Policy: secret.DefaultSecretPolicy(secret.SecretAPIKey)})
+			m.active = screenDashboard
+			m.focus = focusContent
+			sendKey(t, m, key)
+			if m.unlocked || m.vaultSession != nil {
+				t.Fatalf("%s retained vault session", key)
+			}
+		})
+	}
+}
+
+func TestStaleModelFetchRequestCannotOverwriteNewerSelection(t *testing.T) {
+	m := newTestModel(t)
+	m.unlocked = true
+	m.vaultSession = &vaultSession{}
+	m.unlockSessionContext()
+	gen := m.sessionGen
+	m.modelCatalog = modelCatalogState{active: true, providerSlug: "new", requestID: 2, models: []provider.ProviderModel{{ID: "new-model"}}, selected: map[string]bool{}}
+	_, _ = m.Update(modelCatalogLoadedMsg{requestID: 1, sessionGen: gen, providerSlug: "new", models: []provider.ProviderModel{{ID: "stale-model"}}})
+	if len(m.modelCatalog.models) != 1 || m.modelCatalog.models[0].ID != "new-model" {
+		t.Fatalf("stale fetch overwrote catalog: %+v", m.modelCatalog.models)
+	}
+}
+
+func TestStaleWizardModelFetchDoesNotClearCurrentLoadingState(t *testing.T) {
+	m := newTestModel(t)
+	m.unlocked = true
+	m.vaultSession = &vaultSession{}
+	m.unlockSessionContext()
+	generation := m.sessionGen
+	m.wizard.modelRequestID = 2
+	m.wizard.fetchingModels = true
+	_, _ = m.Update(wizardModelsFetchedMsg{requestID: 1, sessionGen: generation})
+	if !m.wizard.fetchingModels {
+		t.Fatal("stale wizard response cleared current loading state")
+	}
+}
+
+func TestReplaceVaultSnapshotZeroesSupersededSecrets(t *testing.T) {
+	old := &secret.Vault{Keys: []secret.SecretRecord{{ID: "k", Secret: "old-secret-value"}}}
+	replacement := &secret.Vault{Keys: []secret.SecretRecord{{ID: "k", Secret: "new-secret-value"}}}
+	session := &vaultSession{vault: old}
+	m := &model{vaultSession: session, keys: secret.ToMaskedList(old.Keys)}
+	m.replaceVaultSnapshot(replacement)
+	if old.Keys[0].Secret != "" || old.Keys[0].ExtraSecrets != nil || old.ScratchPads != nil {
+		t.Fatalf("superseded snapshot was not zeroed: %+v", old)
+	}
+	if session.vault != replacement {
+		t.Fatal("replacement snapshot not installed")
+	}
+	m.replaceVaultSnapshot(replacement)
+	if replacement.Keys[0].Secret == "" {
+		t.Fatal("same snapshot was incorrectly zeroed")
+	}
+}
+
+func TestConcurrentUnlockAttemptsAreFenced(t *testing.T) {
+	m := newTestModel(t)
+	m.vaultExists = true
+	m.passwordInput.SetValue("pw")
+	m.unlockInFlight = true
+	_, cmd := m.handleLockedKey(tea.KeyPressMsg{Code: 13})
+	if cmd != nil {
+		t.Fatal("queued second unlock while one in flight")
+	}
+	old := &secret.Vault{Keys: []secret.SecretRecord{{ID: "old", Secret: "old-secret"}}}
+	current := m.unlockRequestID + 1
+	m.unlockRequestID = current
+	_, _ = m.Update(unlockResultMsg{requestID: current - 1, vault: old})
+	if old.Keys[0].Secret != "" {
+		t.Fatal("stale unlock result not zeroized")
+	}
+	if m.unlocked {
+		t.Fatal("stale unlock installed session")
+	}
+}
+
+func TestOldUnlockResultAfterLockIsZeroized(t *testing.T) {
+	m := newTestModel(t)
+	m.scratchBodyInput = textarea.New()
+	m.scratchBodyInput.SetWidth(40)
+	m.scratchBodyInput.SetHeight(8)
+	m.scratchTitleInput = textinput.New()
+	m.vaultExists = true
+	m.unlockRequestID = 5
+	m.unlockInFlight = true
+	m.lockVault()
+	old := &secret.Vault{Keys: []secret.SecretRecord{{ID: "old", Secret: "old-secret"}}}
+	_, _ = m.Update(unlockResultMsg{requestID: 5, vault: old})
+	if old.Keys[0].Secret != "" {
+		t.Fatal("post-lock unlock result not zeroized")
+	}
+	if m.unlocked {
+		t.Fatal("post-lock result reopened vault")
 	}
 }

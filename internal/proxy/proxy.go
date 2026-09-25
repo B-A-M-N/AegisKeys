@@ -7,15 +7,171 @@ package proxy
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"aegiskeys/internal/fsutil"
 )
+
+var cryptoRandRead = rand.Read
+
+var validProxyName = func(name string) bool {
+	return name != "" && name != "." && name != ".." && !strings.ContainsAny(name, "/\\\x00\r\n") && filepath.Base(name) == name
+}
+
+func (m *ProxyManager) runtimeDir() (string, error) {
+	if m.dataDir == "" {
+		return "", errors.New("proxy data directory is required")
+	}
+	abs, err := filepath.Abs(m.dataDir)
+	if err != nil {
+		return "", err
+	}
+	run := filepath.Join(abs, "run")
+	if err := fsutil.EnsureDir(run); err != nil {
+		return "", err
+	}
+	if err := fsutil.ChmodNoFollow(run, 0700); err != nil {
+		return "", err
+	}
+	info, err := os.Lstat(run)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0700 {
+		return "", errors.New("unsafe proxy runtime directory")
+	}
+	return run, nil
+}
+
+func readPrivateFile(path string) ([]byte, error) {
+	f, err := fsutil.OpenReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
+		return nil, errors.New("proxy identity file permissions are too broad")
+	}
+	data, err := io.ReadAll(io.LimitReader(f, 4097))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > 4096 {
+		return nil, errors.New("proxy identity file exceeds limit")
+	}
+	return data, nil
+}
+
+func (m *ProxyManager) secureLog(p Proxy) (*os.File, error) {
+	if !validProxyName(p.Name) {
+		return nil, errors.New("invalid proxy name")
+	}
+	run, err := m.runtimeDir()
+	if err != nil {
+		return nil, err
+	}
+	root := filepath.Join(run, "proxy-logs")
+	if err := fsutil.EnsureDir(root); err != nil {
+		return nil, err
+	}
+	if err := fsutil.ChmodNoFollow(root, 0700); err != nil {
+		return nil, err
+	}
+	info, err := os.Lstat(root)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0700 {
+		return nil, errors.New("unsafe proxy log directory")
+	}
+	path := filepath.Join(root, p.Name+".log")
+	if err := rejectLogSymlink(path); err != nil {
+		return nil, err
+	}
+	f, err := fsutil.OpenAppendFile(path, 0600)
+	if err != nil {
+		return nil, err
+	}
+	if err := f.Chmod(0600); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+func rejectLogSymlink(path string) error {
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("proxy log path is a symlink")
+	}
+	return nil
+}
+
+func (m *ProxyManager) writeIdentity(p Proxy, cmd *exec.Cmd) error {
+	if !validProxyName(p.Name) {
+		return errors.New("invalid proxy name")
+	}
+	root, err := m.runtimeDir()
+	if err != nil {
+		return err
+	}
+	data := fmt.Sprintf("%d\n", cmd.Process.Pid)
+	if err := fsutilAtomicWrite(filepath.Join(root, "proxy-"+p.Name+".pid"), []byte(data)); err != nil {
+		return err
+	}
+	tokenBytes := make([]byte, 32)
+	if _, err := cryptoRandRead(tokenBytes); err != nil {
+		return err
+	}
+	token := hex.EncodeToString(tokenBytes)
+	if err := fsutilAtomicWrite(filepath.Join(root, "proxy-"+p.Name+".token"), []byte(token)); err != nil {
+		return err
+	}
+	return fsutilAtomicWrite(filepath.Join(root, "proxy-"+p.Name+".exe"), []byte(cmd.Path))
+}
+func fsutilAtomicWrite(path string, data []byte) error { return fsutil.AtomicWriteFile(path, data) }
+
+func (m *ProxyManager) managedIdentity(p Proxy) bool {
+	if !validProxyName(p.Name) {
+		return false
+	}
+	run, err := m.runtimeDir()
+	if err != nil {
+		return false
+	}
+	data, err := readPrivateFile(filepath.Join(run, "proxy-"+p.Name+".pid"))
+	if err != nil || len(data) > 64 {
+		return false
+	}
+	token, err := readPrivateFile(filepath.Join(run, "proxy-"+p.Name+".token"))
+	if err != nil || len(token) != 64 {
+		return false
+	}
+	exe, err := readPrivateFile(filepath.Join(run, "proxy-"+p.Name+".exe"))
+	if err != nil || len(exe) == 0 {
+		return false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return false
+	}
+	procPath := filepath.Join("/proc", strconv.Itoa(pid))
+	proc, err := os.Stat(procPath)
+	if err != nil || !proc.IsDir() {
+		return false
+	}
+	actual, err := os.Readlink(filepath.Join(procPath, "exe"))
+	return err == nil && actual == strings.TrimSpace(string(exe))
+}
 
 // Proxy describes a local proxy that can be started on demand.
 type Proxy struct {
@@ -100,40 +256,35 @@ func IsReachable(address string, timeout time.Duration) bool {
 // Returns the proxy address (possibly from an already-running external proxy).
 func (m *ProxyManager) EnsureRunning(p Proxy) (string, error) {
 	// If no auto-start command, just check reachability.
+	if !validProxyName(p.Name) {
+		return "", errors.New("invalid proxy name")
+	}
 	if p.StartCommand == "" {
-		if IsReachable(p.Address, 2*time.Second) {
-			return p.Address, nil
+		if !IsReachable(p.Address, 2*time.Second) {
+			return "", fmt.Errorf("proxy %s at %s is not reachable and has no auto-start command", p.Name, p.Address)
 		}
-		return "", fmt.Errorf("proxy %s at %s is not reachable and has no auto-start command", p.Name, p.Address)
+		return "", fmt.Errorf("refusing unauthenticated pre-existing proxy %s at %s; configure an AegisKeys-managed launcher", p.Name, p.Address)
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Already managed by us?
-	if _, ok := m.running[p.Name]; ok {
-		if IsReachable(p.Address, 1*time.Second) {
-			return p.Address, nil
-		}
-		// Stale entry; clean up.
-		delete(m.running, p.Name)
-	}
-
-	// External proxy already running?
-	if IsReachable(p.Address, 1*time.Second) {
+	if _, ok := m.running[p.Name]; ok && IsReachable(p.Address, 1*time.Second) {
 		return p.Address, nil
+	}
+	if IsReachable(p.Address, 1*time.Second) {
+		// There is no authenticated challenge in the generic proxy protocol.
+		// A PID/executable record is not proof against another same-user
+		// process, so all pre-existing listeners fail closed.
+		return "", fmt.Errorf("refusing unexpected pre-existing listener for proxy %s", p.Name)
 	}
 
 	// Start it with a clean environment — proxy doesn't need parent secrets.
 	cmd := exec.Command(p.StartCommand, p.StartArgs...)
 	cmd.Env = cleanEnv()
-	logPath := filepath.Join(m.dataDir, "tmp", p.Name+".log")
-	if err := os.MkdirAll(filepath.Dir(logPath), 0700); err != nil {
-		return "", fmt.Errorf("proxy log dir: %w", err)
-	}
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	logFile, err := m.secureLog(p)
 	if err != nil {
-		return "", fmt.Errorf("proxy log open: %w", err)
+		return "", fmt.Errorf("proxy log: %w", err)
 	}
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -149,6 +300,12 @@ func (m *ProxyManager) EnsureRunning(p Proxy) (string, error) {
 	logFile.Close()
 
 	m.running[p.Name] = cmd
+	if err := m.writeIdentity(p, cmd); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		delete(m.running, p.Name)
+		return "", err
+	}
 
 	// Wait for it to become reachable.
 	deadline := time.Now().Add(15 * time.Second)

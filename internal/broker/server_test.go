@@ -4,11 +4,17 @@ import (
 	"aegiskeys/internal/secret"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestStatusHandler(t *testing.T) {
@@ -146,6 +152,7 @@ func TestProtocolValidation(t *testing.T) {
 		{http.MethodPost, "/v1/resolve", "", http.StatusBadRequest},
 		{http.MethodPost, "/v1/resolve", `{"binding":"","value":"x"}`, http.StatusBadRequest},
 		{http.MethodPost, "/v1/resolve", `{"binding":"x","unknown":1}`, http.StatusBadRequest},
+		{http.MethodPost, "/v1/resolve", `{"binding":"x"} garbage`, http.StatusBadRequest},
 		{http.MethodPost, "/v1/rotate", `{"binding":"x"}`, http.StatusBadRequest},
 	}
 	for _, c := range cases {
@@ -162,5 +169,129 @@ func TestRequestDecoderRejectsUnknownFields(t *testing.T) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err == nil {
 		t.Fatal("expected unknown request field to be rejected")
+	}
+}
+
+func TestLockWaitsForInflightCredentialFence(t *testing.T) {
+	ctx0, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	session := &Session{sessionCtx: ctx0, cancelSession: cancel}
+	session.activeCond = sync.NewCond(&session.mu)
+	ctx, gen, ok := session.requestContext()
+	if !ok {
+		t.Fatal("request context unavailable")
+	}
+	if !session.requestValid(ctx, gen) {
+		t.Fatal("fresh request unexpectedly invalid")
+	}
+	entered := make(chan struct{})
+	done := make(chan struct{})
+	go func() { close(entered); session.Lock(); close(done) }()
+	<-entered
+	if !session.Locked() {
+		t.Fatal("lock did not set locked state")
+	}
+	if session.requestValid(ctx, gen) {
+		t.Fatal("lock did not invalidate active generation")
+	}
+	session.finishRequest()
+	<-done
+	if !session.Locked() {
+		t.Fatal("session not locked")
+	}
+}
+
+func newBarrierTestSession(t *testing.T) (*Session, PeerIdentity, string) {
+	t.Helper()
+	_, vaultPath, key, secretID := testVault(t, true)
+	meta := NewFile()
+	meta.Bindings = append(meta.Bindings, CredentialBinding{ID: "binding", Name: "app/key", SecretID: secretID, CreatedAt: time.Now()})
+	meta.Grants = append(meta.Grants, AccessGrant{ID: "grant", Name: "app", BindingID: "binding", Client: ClientConstraint{UID: os.Getuid(), ExecutablePath: "/opt/app"}, Capabilities: []Capability{CapabilityResolve, CapabilityRotate}, Enabled: true, CreatedAt: time.Now()})
+	if err := SaveBrokerFile(filepath.Join(filepath.Dir(vaultPath), "broker.json"), meta); err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(meta, vaultPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	s := &Session{service: service, vaultKey: key, sessionCtx: ctx, cancelSession: cancel}
+	s.activeCond = sync.NewCond(&s.mu)
+	return s, PeerIdentity{UID: os.Getuid(), ExecutablePath: "/opt/app", VaultKey: key}, vaultPath
+}
+
+func addFakePeer(ctx context.Context, peer PeerIdentity) context.Context {
+	return context.WithValue(ctx, peerIdentityKey{}, peer)
+}
+
+func TestLockBarrierFencesResolveAndRotate(t *testing.T) {
+	for _, rotate := range []bool{false, true} {
+		t.Run(fmt.Sprintf("rotate=%v", rotate), func(t *testing.T) {
+			s, peer, _ := newBarrierTestSession(t)
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			once := sync.Once{}
+			hook := func() { once.Do(func() { close(entered); <-release }) }
+			if rotate {
+				s.beforeRotateSuccess = hook
+			} else {
+				s.beforeResolveRelease = hook
+			}
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest("POST", "http://broker/v1/"+map[bool]string{false: "resolve", true: "rotate"}[rotate], strings.NewReader(fmt.Sprintf(`{"binding":"app/key"%s}`, map[bool]string{true: `,"value":"rotated"`}[rotate])))
+			req.Header.Set("Content-Type", "application/json")
+			req = req.WithContext(context.WithValue(req.Context(), peerIdentityKey{}, peer))
+			done := make(chan struct{})
+			go func() {
+				if rotate {
+					s.handleRotate(rec, req)
+				} else {
+					s.handleResolve(rec, req)
+				}
+				close(done)
+			}()
+			<-entered
+			lockDone := make(chan struct{})
+			go func() { s.Lock(); close(lockDone) }()
+			deadline := time.Now().Add(time.Second)
+			for !s.Locked() && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			if !s.Locked() {
+				t.Fatal("lock did not invalidate the paused request generation")
+			}
+			select {
+			case <-lockDone:
+				t.Fatal("Lock completed before paused credential operation drained")
+			default:
+			}
+			close(release)
+			select {
+			case <-done:
+			case <-time.After(2 * time.Second):
+				t.Fatal("operation did not finish")
+			}
+			select {
+			case <-lockDone:
+			case <-time.After(time.Second):
+				t.Fatal("Lock did not finish after drain")
+			}
+			if !s.Locked() {
+				t.Fatal("session not locked")
+			}
+			if rec.Code != http.StatusLocked {
+				t.Fatalf("credential operation completed after lock barrier: status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if rotate {
+				v, err := secret.LoadVaultByKey(s.service.vaultPath, peer.VaultKey)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := v.Get("key_broker").Secret; got != "primary-secret-value" {
+					t.Fatalf("rotation committed after lock barrier: got %q", got)
+				}
+			}
+		})
 	}
 }

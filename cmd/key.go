@@ -8,7 +8,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"aegiskeys/internal/audit"
-	"aegiskeys/internal/config"
 	"aegiskeys/internal/secret"
 )
 
@@ -123,7 +122,7 @@ var keyAddCmd = &cobra.Command{
 		}); err != nil {
 			return err
 		}
-		audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{
+		logAuditEvent(audit.Event{
 			Event:    "key_added",
 			Provider: keyAddProvider,
 		})
@@ -243,7 +242,7 @@ var keyRotateCmd = &cobra.Command{
 		}); err != nil {
 			return err
 		}
-		audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{
+		logAuditEvent(audit.Event{
 			Event:    "key_rotated",
 			Provider: rec.ProviderSlug,
 		})
@@ -282,7 +281,7 @@ var keyDeleteCmd = &cobra.Command{
 		}); err != nil {
 			return err
 		}
-		audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{
+		logAuditEvent(audit.Event{
 			Event:    "key_deleted",
 			Provider: providerSlug,
 		})

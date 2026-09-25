@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 
 	"aegiskeys/internal/fsutil"
@@ -24,15 +23,11 @@ func LoadVaultWithKey(path, password string) (*Vault, [32]byte, error) {
 	if password == "" {
 		return nil, zero, errors.New("master password is required")
 	}
-	raw, err := os.ReadFile(path)
+	_, env, err := readEnvelopeFile(path)
 	if err != nil {
-		return nil, zero, fmt.Errorf("read vault: %w", err)
+		return nil, zero, err
 	}
-	var env VaultEnvelope
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return nil, zero, fmt.Errorf("parse vault envelope: %w", err)
-	}
-	if err := ValidateEnvelope(&env); err != nil {
+	if err := ValidateEnvelopeForDecrypt(&env); err != nil {
 		return nil, zero, fmt.Errorf("invalid vault envelope: %w", err)
 	}
 	if env.KeyMode == "keyring" {
@@ -70,17 +65,9 @@ func LoadVault(path, password string) (*Vault, error) {
 	if password == "" {
 		return nil, errors.New("master password is required")
 	}
-	raw, err := os.ReadFile(path)
+	_, env, err := readEnvelopeFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read vault: %w", err)
-	}
-	var env VaultEnvelope
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return nil, fmt.Errorf("parse vault envelope: %w", err)
-	}
-	// Validate envelope metadata before KDF so hostile params are rejected.
-	if err := ValidateEnvelope(&env); err != nil {
-		return nil, fmt.Errorf("invalid vault envelope: %w", err)
+		return nil, err
 	}
 	if env.KeyMode == "keyring" {
 		return nil, errors.New("vault requires its OS keyring or recovery key; password unlock is disabled")
@@ -128,15 +115,15 @@ func migrateVaultRecords(v *Vault) {
 // file (cross-process safe) and runs fn while the lock is held.
 func withVaultWriteLock(path string, fn func() error) error {
 	lockPath := path + ".lock"
-	lf, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	lf, err := fsutil.OpenLockFile(lockPath)
 	if err != nil {
 		return err
 	}
 	defer lf.Close()
-	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); err != nil {
+	if err := fsutil.LockFile(lf); err != nil {
 		return fmt.Errorf("acquire vault lock: %w", err)
 	}
-	defer syscall.Flock(int(lf.Fd()), syscall.LOCK_UN)
+	defer fsutil.UnlockFile(lf)
 	return fn()
 }
 
@@ -144,16 +131,9 @@ func withVaultWriteLock(path string, fn func() error) error {
 // password required). Used during save to merge keys written by a concurrent
 // process that are not present in the in-memory vault.
 func loadVaultByKey(path string, key [32]byte) (*Vault, error) {
-	raw, err := os.ReadFile(path)
+	_, env, err := readEnvelopeFile(path)
 	if err != nil {
 		return nil, err
-	}
-	var env VaultEnvelope
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return nil, fmt.Errorf("parse vault envelope: %w", err)
-	}
-	if err := ValidateEnvelope(&env); err != nil {
-		return nil, fmt.Errorf("invalid vault envelope: %w", err)
 	}
 	plaintext, err := OpenWithKey(key, &env)
 	if err != nil {
@@ -209,6 +189,7 @@ func MutateVault(path, password string, mutate func(*Vault) error) error {
 		if err != nil {
 			return err
 		}
+		defer ZeroVault(v)
 		if err := mutate(v); err != nil {
 			return err
 		}
@@ -228,11 +209,22 @@ func MutateVaultWithKey(path string, key [32]byte, mutate func(*Vault) error) er
 		if err != nil {
 			return err
 		}
+		defer ZeroVault(v)
 		if err := mutate(v); err != nil {
 			return err
 		}
+		normalizeVaultBrokerPolicyProvenance(v)
 		return writeVaultWithKeyLocked(path, key, v)
 	})
+}
+
+func normalizeVaultBrokerPolicyProvenance(v *Vault) {
+	if v == nil {
+		return
+	}
+	for i := range v.Keys {
+		NormalizeBrokerPolicyProvenance(&v.Keys[i].Policy)
+	}
 }
 
 // SaveVault serializes the vault (including secrets), encrypts it with
@@ -294,6 +286,7 @@ func writeVaultWithPasswordLocked(path, password string, v *Vault) error {
 	if v.Version == 0 {
 		v.Version = 1
 	}
+	normalizeVaultBrokerPolicyProvenance(v)
 	plaintext, err := json.MarshalIndent(toStore(v), "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal vault: %w", err)
@@ -315,6 +308,7 @@ func writeVaultWithKeyLocked(path string, key [32]byte, v *Vault) error {
 	if v.Version == 0 {
 		v.Version = 1
 	}
+	normalizeVaultBrokerPolicyProvenance(v)
 	plaintext, err := json.MarshalIndent(toStore(v), "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal vault: %w", err)
@@ -322,7 +316,7 @@ func writeVaultWithKeyLocked(path string, key [32]byte, v *Vault) error {
 	salt := ""
 	var existingParams KDFParams
 	var existingMode, existingKDF string
-	if raw, err := os.ReadFile(path); err == nil {
+	if raw, err := readSecureFile(path, maxEnvelopeBytes); err == nil {
 		var existing VaultEnvelope
 		if err := json.Unmarshal(raw, &existing); err == nil {
 			salt = existing.Salt
@@ -347,17 +341,15 @@ func writeVaultWithKeyLocked(path string, key [32]byte, v *Vault) error {
 }
 
 func writeVaultEnvelopeLocked(path string, env *VaultEnvelope) error {
+	env.Digest = envelopeDigest(*env)
 	data, err := json.MarshalIndent(env, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	if err := fsutil.EnsureDir(filepath.Dir(path)); err != nil {
 		return err
 	}
-	if err := fsutil.AtomicWriteFile(path, data); err != nil {
-		return err
-	}
-	return os.Chmod(path, 0600)
+	return fsutil.AtomicWriteFileMode(path, data, 0600)
 }
 
 // AtomicWriteFile is an alias for fsutil.AtomicWriteFile for backward compatibility.
@@ -369,10 +361,15 @@ func AtomicWriteFile(path string, data []byte) error {
 // InitVault creates a new empty encrypted vault at path. It is an error
 // to call this when a vault already exists (call VaultExists first).
 func InitVault(path, password string) error {
-	if VaultExists(path) {
-		return errors.New("vault already exists: " + path)
+	if password == "" {
+		return errors.New("master password is required")
 	}
-	return SaveVault(path, password, &Vault{Version: 1})
+	return withVaultWriteLock(path, func() error {
+		if VaultExists(path) {
+			return errors.New("vault already exists: " + path)
+		}
+		return writeVaultWithPasswordLocked(path, password, &Vault{Version: 1})
+	})
 }
 
 // MigrateToKeyringRequiredWithKey atomically converts a password vault to a
@@ -402,10 +399,7 @@ func MigrateToKeyringRequiredWithKey(path, password string, key [32]byte) error 
 		if err != nil {
 			return err
 		}
-		if err := fsutil.AtomicWriteFile(path, data); err != nil {
-			return err
-		}
-		return os.Chmod(path, 0600)
+		return fsutil.AtomicWriteFileMode(path, data, 0600)
 	})
 }
 
@@ -434,7 +428,7 @@ func VaultExists(path string) bool {
 // It is metadata only: "password" for legacy/password-derived envelopes and
 // "keyring" for a keyring-required vault.
 func VaultKeyMode(path string) (string, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := readSecureFile(path, maxEnvelopeBytes)
 	if err != nil {
 		return "", fmt.Errorf("read vault: %w", err)
 	}
@@ -442,7 +436,7 @@ func VaultKeyMode(path string) (string, error) {
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return "", fmt.Errorf("parse vault envelope: %w", err)
 	}
-	if err := ValidateEnvelope(&env); err != nil {
+	if err := ValidateEnvelopeForDecrypt(&env); err != nil {
 		return "", fmt.Errorf("invalid vault envelope: %w", err)
 	}
 	if env.KeyMode == "keyring" {
@@ -502,6 +496,8 @@ func (v *Vault) FindByLabel(providerSlug, label string) *SecretRecord {
 func (v *Vault) Remove(id string) error {
 	for i := range v.Keys {
 		if v.Keys[i].ID == id {
+			var zero SecretRecord
+			v.Keys[i] = zero
 			v.Keys = append(v.Keys[:i], v.Keys[i+1:]...)
 			return nil
 		}
@@ -599,6 +595,8 @@ func (v *Vault) UpdateScratchPad(id string, update ScratchPadRecord) error {
 func (v *Vault) RemoveScratchPad(id string) error {
 	for i := range v.ScratchPads {
 		if v.ScratchPads[i].ID == id {
+			var zero ScratchPadRecord
+			v.ScratchPads[i] = zero
 			v.ScratchPads = append(v.ScratchPads[:i], v.ScratchPads[i+1:]...)
 			return nil
 		}

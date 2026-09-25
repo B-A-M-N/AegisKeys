@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1217,5 +1218,109 @@ func TestRegistry_AllNewAdaptersRegistered(t *testing.T) {
 		if _, ok := r.Get(id); !ok {
 			t.Errorf("missing adapter: %s", id)
 		}
+	}
+}
+
+func TestApplyFileWritesWithRestorePreservesChildModification(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	if err := os.WriteFile(path, []byte(`{"user":true}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	restore, err := ApplyFileWritesWithRestore([]FileWrite{{Path: path, Format: "json", Content: `{"managed":true}`, Scope: ScopeUser, MergePolicy: MergeJSON, Mode: 0600}}, map[string]string{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"user":true,"child":true}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := restore(); err == nil || !strings.Contains(err.Error(), "changed after launch") {
+		t.Fatalf("expected conflict, got %v", err)
+	}
+	got, _ := os.ReadFile(path)
+	if !strings.Contains(string(got), `"child"`) {
+		t.Fatalf("child edit lost: %s", got)
+	}
+}
+
+func TestApplyFileWritesRollsBackEveryBoundaryAndJoinsErrors(t *testing.T) {
+	for _, failAt := range []int{0, 1, 2} {
+		t.Run(fmt.Sprintf("write-%d", failAt), func(t *testing.T) {
+			dir := t.TempDir()
+			paths := []string{filepath.Join(dir, "a.json"), filepath.Join(dir, "b.json"), filepath.Join(dir, "c.json")}
+			writes := make([]FileWrite, 3)
+			for i, p := range paths {
+				writes[i] = FileWrite{Path: p, Format: "json", Content: fmt.Sprintf(`{"aegiskeys":%d}`, i), Scope: ScopeUser, MergePolicy: MergeNone, Mode: 0600}
+			}
+			fileWriteFaultHook = func(i int) error {
+				if i == failAt {
+					return errors.New("injected write failure")
+				}
+				return nil
+			}
+			restore, err := ApplyFileWritesWithRestore(writes, map[string]string{})
+			fileWriteFaultHook = nil
+			if err == nil {
+				t.Fatal("expected failure")
+			}
+			_ = restore
+			for _, p := range paths {
+				if _, e := os.Stat(p); !os.IsNotExist(e) {
+					t.Fatalf("partial overlay remains at %s: %v", p, e)
+				}
+			}
+		})
+	}
+	t.Run("verification", func(t *testing.T) {
+		dir := t.TempDir()
+		p := filepath.Join(dir, "a.json")
+		fileWriteVerificationHook = func(string) error { return errors.New("injected verify failure") }
+		_, err := ApplyFileWritesWithRestore([]FileWrite{{Path: p, Content: "{}", Scope: ScopeUser, MergePolicy: MergeNone}}, nil)
+		fileWriteVerificationHook = nil
+		if err == nil {
+			t.Fatal("expected verification failure")
+		}
+		if _, e := os.Stat(p); !os.IsNotExist(e) {
+			t.Fatalf("overlay survived verify failure: %v", e)
+		}
+	})
+	t.Run("duplicate-path", func(t *testing.T) {
+		dir := t.TempDir()
+		p := filepath.Join(dir, "a.json")
+		restore, err := ApplyFileWritesWithRestore([]FileWrite{{Path: p, Content: "{\"x\":1}", Scope: ScopeUser, MergePolicy: MergeNone}, {Path: p, Content: "{\"x\":2}", Scope: ScopeUser, MergePolicy: MergeNone}}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := restore(); err != nil {
+			t.Fatal(err)
+		}
+		if _, e := os.Stat(p); !os.IsNotExist(e) {
+			t.Fatalf("duplicate path not restored: %v", e)
+		}
+	})
+}
+
+func TestBackupEncryptedFailsClosedWithoutArtifact(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	secret := "unfamiliar-" + "credential-without-token-shape"
+	if err := os.WriteFile(path, []byte(`{"value":"`+secret+`"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	err := backupWithPolicy(path, BackupEncrypted, ScopeUser, nil)
+	if err == nil || !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("encrypted backup did not fail closed: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), ".bak") {
+			t.Fatalf("encrypted backup failure left artifact %q", entry.Name())
+		}
+	}
+	if data, err := os.ReadFile(path); err != nil || !strings.Contains(string(data), secret) {
+		t.Fatal("encrypted backup failure modified source file")
 	}
 }

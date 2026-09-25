@@ -1,7 +1,9 @@
 package provider
 
 import (
+	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
 	"time"
@@ -159,10 +161,16 @@ type Provider struct {
 	// region) whose requirements exceed a single API key.
 	Setup []SetupParam `json:"setup,omitempty"`
 
-	Tags      []string  `json:"tags,omitempty"`
-	Notes     string    `json:"notes,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Tags  []string `json:"tags,omitempty"`
+	Notes string   `json:"notes,omitempty"`
+	// AllowCredentialOrigin explicitly authorizes authenticated model refreshes
+	// to a different origin from the provider base URL.
+	AllowCredentialOrigin bool `json:"allow_credential_origin,omitempty"`
+	// AllowQueryAuth is an independent, explicit consent to place credentials
+	// in URL query parameters. Query strings commonly enter intermediary logs.
+	AllowQueryAuth bool      `json:"allow_query_auth,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 // ModelCatalogPolicy controls model discovery and refresh behavior.
@@ -251,24 +259,84 @@ func (p Provider) ResolveEndpoint(fields map[string]string) string {
 	if tpl == "" {
 		return p.CanonicalBaseURL()
 	}
+	declared := make(map[string]SetupParam)
+	for _, param := range p.Setup {
+		declared[param.Key] = param
+	}
 	var sb strings.Builder
 	for i := 0; i < len(tpl); i++ {
-		if tpl[i] == '{' {
-			end := strings.IndexByte(tpl[i:], '}')
-			if end > 0 {
-				key := tpl[i+1 : i+end]
-				if v, ok := fields[key]; ok && v != "" {
-					sb.WriteString(v)
-				} else {
-					sb.WriteString(tpl[i : i+end+1])
-				}
-				i += end
-				continue
-			}
+		if tpl[i] != '{' {
+			sb.WriteByte(tpl[i])
+			continue
 		}
-		sb.WriteByte(tpl[i])
+		end := strings.IndexByte(tpl[i:], '}')
+		if end <= 1 {
+			return ""
+		}
+		key := tpl[i+1 : i+end]
+		param, ok := declared[key]
+		if !ok || !param.Endpoint {
+			return ""
+		}
+		v, ok := fields[key]
+		if !ok || !validTemplateValue(key, v) {
+			return ""
+		}
+		sb.WriteString(v)
+		i += end
 	}
-	return sb.String()
+	endpoint := sb.String()
+	if !validResolvedEndpoint(endpoint) {
+		return ""
+	}
+	return endpoint
+}
+
+func validTemplateValue(field, v string) bool {
+	if v == "" || len(v) > 128 || strings.ContainsAny(v, "/\\?#@:[]{}%\r\n\t") {
+		return false
+	}
+	for _, r := range v {
+		if !(r == '-' || r == '_' || r == '.' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9') {
+			return false
+		}
+	}
+	// Region and API version are DNS-ish labels; resource/deployment values
+	// are also host-label material. Reject leading/trailing separators and
+	// empty labels so a substitution cannot manufacture a new host component.
+	if strings.HasPrefix(v, ".") || strings.HasSuffix(v, ".") || strings.Contains(v, "..") || strings.HasPrefix(v, "-") || strings.HasSuffix(v, "-") {
+		return false
+	}
+	if field == "region" && strings.ContainsAny(v, "_") {
+		return false
+	}
+	if strings.Contains(v, ".") && (field == "resource" || field == "region") {
+		return false
+	}
+	return true
+}
+
+func validResolvedEndpoint(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.User != nil {
+		return false
+	}
+	if strings.ContainsAny(raw, "\r\n\t\x00") {
+		return false
+	}
+	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopbackHost(u.Hostname())) {
+		return false
+	}
+	if u.Hostname() == "0.0.0.0" || u.Hostname() == "[::]" {
+		return false
+	}
+	if strings.ContainsAny(u.Host, "[]{}") {
+		return false
+	}
+	if strings.HasPrefix(u.Hostname(), ".") || strings.Contains(u.Hostname(), "..") {
+		return false
+	}
+	return true
 }
 
 // ModelRefreshURL resolves the best endpoint for fetching this provider's model
@@ -512,12 +580,18 @@ func (p *Provider) ValidateStrict() error {
 	if err := p.validateBaseURLSecurity(); err != nil {
 		return err
 	}
+	if err := p.validateEndpointMetadata(); err != nil {
+		return err
+	}
 	// Validate auth type is a known value.
 	switch p.Auth.Type {
 	case "bearer", "header", "query", "none", "aws":
 		// ok
 	default:
 		return fmt.Errorf("provider %q has unknown auth type %q", p.Slug, p.Auth.Type)
+	}
+	if p.Auth.Type == "query" && !p.AllowQueryAuth {
+		return fmt.Errorf("provider %q uses query authentication; explicit query-auth consent is required", p.Slug)
 	}
 	// Reject secrets accidentally pasted into metadata fields.
 	if sensitive.IsSecretValue(p.BaseURL) {
@@ -555,8 +629,67 @@ func validSlug(s string) bool {
 
 // isLoopbackHost reports whether host refers to localhost or a link-local address.
 func isLoopbackHost(host string) bool {
-	host = strings.ToLower(strings.Split(host, ":")[0])
-	return host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "0.0.0.0"
+	host = strings.ToLower(strings.Trim(host, "[]"))
+	return host == "localhost" || host == "127.0.0.1" || host == "::1"
+}
+
+func (p *Provider) validateEndpointMetadata() error {
+	if err := validateOptionalURL(p.Endpoints.ModelsURL, "models URL"); err != nil {
+		return err
+	}
+	if err := validateOptionalURL(p.Catalog.RefreshURL, "catalog refresh URL"); err != nil {
+		return err
+	}
+	if err := validateOptionalURL(p.ModelPolicy.RefreshURL, "model policy refresh URL"); err != nil {
+		return err
+	}
+	if p.Endpoints.URLTemplate == "" {
+		return nil
+	}
+	if strings.ContainsAny(p.Endpoints.URLTemplate, "\r\n\t\x00") {
+		return errors.New("endpoint URL template contains control characters")
+	}
+	params := make(map[string]SetupParam)
+	for _, param := range p.Setup {
+		params[param.Key] = param
+	}
+	for i := 0; i < len(p.Endpoints.URLTemplate); i++ {
+		if p.Endpoints.URLTemplate[i] != '{' {
+			continue
+		}
+		end := strings.IndexByte(p.Endpoints.URLTemplate[i:], '}')
+		if end <= 1 {
+			return errors.New("malformed endpoint URL template")
+		}
+		key := p.Endpoints.URLTemplate[i+1 : i+end]
+		param, ok := params[key]
+		if !ok || !param.Endpoint {
+			return fmt.Errorf("endpoint template references unsupported field %q", key)
+		}
+		i += end
+	}
+	return nil
+}
+
+func validateOptionalURL(raw, label string) error {
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.User != nil || strings.ContainsAny(raw, "\r\n\t\x00") {
+		return fmt.Errorf("invalid %s", label)
+	}
+	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopbackHost(u.Hostname())) {
+		return fmt.Errorf("%s must use https unless loopback", label)
+	}
+	host := strings.ToLower(strings.Trim(u.Hostname(), "[]"))
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		return fmt.Errorf("%s uses a wildcard address", label)
+	}
+	if ip := net.ParseIP(host); ip != nil && !ip.IsLoopback() && !ip.IsUnspecified() && u.Scheme == "http" {
+		return fmt.Errorf("%s must use https for a remote address", label)
+	}
+	return nil
 }
 
 // validateBaseURLSecurity enforces that non-local providers use HTTPS.
@@ -569,13 +702,23 @@ func (p *Provider) validateBaseURLSecurity() error {
 	if err != nil {
 		return err
 	}
+	if u.User != nil || strings.ContainsAny(raw, "\r\n\t\x00") {
+		return errors.New("invalid base URL credentials/control characters")
+	}
+	if u.Hostname() == "0.0.0.0" {
+		return errors.New("wildcard base URL is not a loopback destination")
+	}
+	host := strings.ToLower(strings.Trim(u.Hostname(), "[]"))
+	if host == "" || host == "0.0.0.0" || host == "::" || host == "[::]" {
+		return errors.New("wildcard or empty base URL is not a loopback destination")
+	}
+	if ip := net.ParseIP(host); ip != nil && !ip.IsLoopback() && !ip.IsUnspecified() {
+		return fmt.Errorf("remote provider %q must use https base URL", p.Slug)
+	}
 	if u.Scheme == "https" {
 		return nil
 	}
-	if u.Scheme == "http" && isLoopbackHost(u.Hostname()) {
-		return nil
-	}
-	if p.Compatibility == CompatLocal || p.Protocol == ProtocolLocal {
+	if u.Scheme == "http" && isLoopbackHost(host) {
 		return nil
 	}
 	return fmt.Errorf("remote provider %q must use https base URL", p.Slug)
@@ -697,9 +840,10 @@ var defaultProviders = []Provider{
 		ID: "gemini", Name: "Google Gemini", Slug: "gemini",
 		BaseURL: "https://generativelanguage.googleapis.com", EnvVar: "GEMINI_API_KEY",
 		Compatibility: CompatGoogle, Protocol: ProtocolGoogle,
-		Auth:      AuthSpec{Type: "query", EnvVar: "GEMINI_API_KEY"},
-		Endpoints: EndpointSpec{BaseURL: "https://generativelanguage.googleapis.com"},
-		Catalog:   ModelCatalogSpec{Source: "static"},
+		Auth:           AuthSpec{Type: "query", EnvVar: "GEMINI_API_KEY"},
+		AllowQueryAuth: true,
+		Endpoints:      EndpointSpec{BaseURL: "https://generativelanguage.googleapis.com"},
+		Catalog:        ModelCatalogSpec{Source: "static"},
 		Models: []ProviderModel{
 			{ID: "gemini-3-pro", Name: "Gemini 3 Pro", ContextSize: 1000000},
 			{ID: "gemini-3-flash", Name: "Gemini 3 Flash", ContextSize: 1000000},
@@ -796,7 +940,7 @@ var defaultProviders = []Provider{
 		// agents call it through their own AWS SDK using these AWS_* env vars.
 		Setup: []SetupParam{
 			{Key: "secret_access_key", Label: "AWS Secret Access Key", EnvVar: "AWS_SECRET_ACCESS_KEY", Secret: true, Required: true, Help: "The secret access key paired with the access key id above."},
-			{Key: "region", Label: "AWS Region", EnvVar: "AWS_REGION", Default: "us-east-1", Required: true, Help: "Bedrock region, e.g. us-east-1."},
+			{Key: "region", Label: "AWS Region", EnvVar: "AWS_REGION", Default: "us-east-1", Required: true, Endpoint: true, Help: "Bedrock region, e.g. us-east-1."},
 		},
 		Notes: "Bedrock authenticates via AWS SigV4 (the agent's AWS SDK), not an OpenAI key. AegisKeys injects AWS_ACCESS_KEY_ID (primary secret), AWS_SECRET_ACCESS_KEY (secondary secret), and AWS_REGION. Set the profile model to the Bedrock model ID (e.g. anthropic.claude-v2 or amazon.titan-text-express-v1).",
 	},

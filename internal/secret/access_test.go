@@ -57,3 +57,14 @@ func TestDefaultSecretPolicy_AllowsModelRefresh(t *testing.T) {
 		}
 	}
 }
+
+func TestLegacyBrokerPolicyTrueMigratesToAdministrativeProvenance(t *testing.T) {
+	rec := SecretRecord{Kind: SecretAPIKey, Policy: SecretPolicy{AllowBrokerResolve: true, AllowBrokerRotate: true}}
+	migrateSecretV1ToV2(&rec)
+	if !rec.Policy.AllowBrokerResolve || rec.Policy.BrokerResolveSource != BrokerPolicySourceAdministrative {
+		t.Fatalf("resolve provenance = %+v", rec.Policy)
+	}
+	if !rec.Policy.AllowBrokerRotate || rec.Policy.BrokerRotateSource != BrokerPolicySourceAdministrative {
+		t.Fatalf("rotate provenance = %+v", rec.Policy)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -109,7 +110,8 @@ func (s *Service) resolveSnapshot(meta *File, name string, peer PeerIdentity) (R
 	if binding == nil {
 		return ResolvedCredential{}, ErrBindingUnavailable
 	}
-	if meta.FindGrant(binding.ID, peer.ClientConstraint(), CapabilityResolve) == nil {
+	grant := meta.FindGrant(binding.ID, peer.ClientConstraint(), CapabilityResolve)
+	if grant == nil {
 		return ResolvedCredential{}, ErrAccessDenied
 	}
 	v, err := s.load(peer.VaultKey)
@@ -126,12 +128,12 @@ func (s *Service) resolveSnapshot(meta *File, name string, peer PeerIdentity) (R
 	}
 
 	out := ResolvedCredential{Binding: binding.Name, Kind: string(rec.Kind)}
-	if rec.Secret != "" && componentAllowed(binding, "primary") {
+	if rec.Secret != "" && componentAllowed(binding, "primary") && grantComponentAllowed(grant, "primary") {
 		out.EnvVar = rec.EnvVarHint
 		out.Value = rec.Secret
 	}
 	for _, component := range rec.ExtraSecrets {
-		if !componentAllowed(binding, component.Key) {
+		if !componentAllowed(binding, component.Key) || !grantComponentAllowed(grant, component.Key) {
 			continue
 		}
 		if component.Secret == "" || component.EnvVar == "" {
@@ -146,6 +148,39 @@ func (s *Service) resolveSnapshot(meta *File, name string, peer PeerIdentity) (R
 		return ResolvedCredential{}, ErrBindingUnavailable
 	}
 	return out, nil
+}
+
+func grantComponentAllowlist(components []string) []string {
+	if len(components) == 0 {
+		return []string{"primary"}
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(components))
+	for _, c := range components {
+		c = strings.TrimSpace(c)
+		if c != "" && !seen[c] {
+			seen[c] = true
+			out = append(out, c)
+		}
+	}
+	if len(out) == 0 {
+		return []string{"primary"}
+	}
+	return out
+}
+func grantComponentAllowed(g *AccessGrant, component string) bool {
+	if g == nil {
+		return false
+	}
+	if len(g.ComponentAllowlist) == 0 {
+		return component == "primary"
+	}
+	for _, v := range g.ComponentAllowlist {
+		if v == component {
+			return true
+		}
+	}
+	return false
 }
 
 // Rotate replaces only the primary secret material on the binding target.

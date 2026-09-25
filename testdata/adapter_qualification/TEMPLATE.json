@@ -1,0 +1,14 @@
+{
+  "app": "",
+  "version": "",
+  "os": "",
+  "arch": "",
+  "provider": "",
+  "model": "",
+  "secret_non_disclosure": false,
+  "exit_handling": false,
+  "configuration_restoration": false,
+  "evidence": "",
+  "date": "",
+  "commit": ""
+}

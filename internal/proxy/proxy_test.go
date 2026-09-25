@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"net"
 	"testing"
 	"time"
 )
@@ -55,5 +56,24 @@ func TestDefaultProxies(t *testing.T) {
 		if p.Address == "" {
 			t.Error("proxy missing address")
 		}
+	}
+}
+
+func TestProxyRejectsMaliciousName(t *testing.T) {
+	m := NewManager(t.TempDir())
+	if _, err := m.EnsureRunning(Proxy{Name: "../escape", Address: "127.0.0.1:1"}); err == nil {
+		t.Fatal("malicious proxy name accepted")
+	}
+}
+func TestProxyRejectsUnexpectedPreexistingListener(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	m := NewManager(t.TempDir())
+	p := Proxy{Name: "preempt", Address: listener.Addr().String(), StartCommand: "/bin/false"}
+	if _, err := m.EnsureRunning(p); err == nil {
+		t.Fatal("unexpected listener accepted")
 	}
 }

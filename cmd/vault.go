@@ -119,7 +119,7 @@ Examples:
 		}); err != nil {
 			return err
 		}
-		audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{
+		logAuditEvent(audit.Event{
 			Event:    "vault_item_added",
 			Provider: vaultAddProvider,
 		})
@@ -198,6 +198,8 @@ var vaultShowCmd = &cobra.Command{
 	},
 }
 
+// A process crash can prevent the TTL cleanup step, so clipboard contents may
+// remain after AegisKeys exits. Prefer launch injection or revoke exposed secrets.
 var vaultCopyCmd = &cobra.Command{
 	Use:   "copy --id <id>",
 	Short: "Copy a secret to the clipboard (confirmation required)",
@@ -229,7 +231,7 @@ var vaultCopyCmd = &cobra.Command{
 		if err := copyToClipboard(rec.Secret); err != nil {
 			return fmt.Errorf("clipboard not available: %w (use `aegiskeys vault reveal` instead)", err)
 		}
-		audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{
+		logAuditEvent(audit.Event{
 			Event: "secret_copied",
 		})
 		ttl := rec.Policy.MaxClipboardTTLSeconds
@@ -239,10 +241,14 @@ var vaultCopyCmd = &cobra.Command{
 		if ttl > 0 {
 			fmt.Printf("Copied to clipboard. Clearing in %d seconds...\n", ttl)
 			time.Sleep(time.Duration(ttl) * time.Second)
-			if err := clearClipboard(); err != nil {
-				return fmt.Errorf("clear clipboard: %w", err)
+			if current, err := readClipboard(); err == nil && current == rec.Secret {
+				if err := clearClipboard(); err != nil {
+					return fmt.Errorf("clear clipboard: %w", err)
+				}
+				fmt.Println("Clipboard cleared.")
+			} else {
+				fmt.Println("Clipboard changed; leaving current contents untouched.")
 			}
-			fmt.Println("Clipboard cleared.")
 			return nil
 		}
 		fmt.Println("Copied to clipboard. Clear it manually when done.")
@@ -278,7 +284,7 @@ var vaultRevealCmd = &cobra.Command{
 			return fmt.Errorf("aborted")
 		}
 		fmt.Println(rec.Secret)
-		audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{
+		logAuditEvent(audit.Event{
 			Event: "secret_revealed",
 		})
 		return nil
@@ -303,6 +309,9 @@ var vaultEnvCmd = &cobra.Command{
 		keyName := vaultEnvKeyName
 		if keyName == "" {
 			keyName = rec.EnvVarHint
+		}
+		if !validEnvExportName(keyName) {
+			return fmt.Errorf("invalid environment variable name %q", keyName)
 		}
 		if keyName == "" {
 			keyName = "SECRET"
@@ -346,15 +355,25 @@ var vaultEnvCmd = &cobra.Command{
 				return err
 			}
 		} else {
-			fmt.Printf("%s=%s\n", keyName, rec.Secret)
+			fmt.Printf("export %s=%s\n", keyName, shellQuote(rec.Secret))
 		}
 
-		audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{
+		logAuditEvent(audit.Event{
 			Event: "secret_env_exported",
 		})
 		return nil
 	},
 }
+
+func validEnvExportName(s string) bool {
+	for i, r := range s {
+		if !(r == '_' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || i > 0 && r >= '0' && r <= '9') {
+			return false
+		}
+	}
+	return s != ""
+}
+func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
 
 var vaultRotateCmd = &cobra.Command{
 	Use:   "rotate --id <id>",
@@ -381,7 +400,7 @@ var vaultRotateCmd = &cobra.Command{
 		}); err != nil {
 			return err
 		}
-		audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{
+		logAuditEvent(audit.Event{
 			Event:    "vault_item_rotated",
 			Provider: rec.ProviderSlug,
 		})
@@ -565,7 +584,7 @@ var vaultDeleteCmd = &cobra.Command{
 		}); err != nil {
 			return err
 		}
-		audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{
+		logAuditEvent(audit.Event{
 			Event: "vault_item_deleted",
 		})
 		fmt.Printf("Deleted vault item %s\n", keyID)
@@ -729,7 +748,7 @@ policy. The password does not change. Backs up the vault first.`,
 		if err != nil {
 			return fmt.Errorf("rekey failed: %w", err)
 		}
-		audit.NewLogger(config.AuditPath(resolvedConfigDir())).Log(audit.Event{
+		logAuditEvent(audit.Event{
 			Event:    "vault_rekeyed",
 			Metadata: map[string]string{"reason": result.Reason, "old_time": fmt.Sprint(result.OldTime), "new_time": fmt.Sprint(result.NewTime)},
 		})

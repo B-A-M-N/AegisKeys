@@ -16,7 +16,8 @@ Deferred work for post-stable AegisKeys releases.
 
 ## Operations
 
-- Interactive Access TUI workflows for creating/rebinding bindings, granting/revoking access, and broker running-state controls.
+- Stronger broker-supervised application identity (dedicated launchers or OS-user/sandbox separation) for interpreter-hosted applications.
+- Broker running-state controls in the TUI beyond the current status display and start command.
 - Optional broker integration examples for additional language ecosystems.
 - Hash-only grant workflows with signed update/rebuild flows.
 - Automatic stale temporary env-file cleanup.
@@ -30,3 +31,4 @@ Deferred work for post-stable AegisKeys releases.
 - Signed release artifacts and provenance.
 - Package-manager distribution, such as Homebrew, Arch, Nix, or Scoop.
 - SBOM generation for release artifacts.
+- A recorded real-application qualification matrix for every adapter that may claim verified support; fake-executable smoke tests remain contract tests, not app compatibility proof.
