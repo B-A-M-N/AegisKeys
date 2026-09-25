@@ -45,10 +45,43 @@ jobs:
           TRUSTED_SIGNER_FINGERPRINT: ${{ vars.RELEASE_SIGNING_FINGERPRINT }}
         run: |
           set -euo pipefail
+
           test -n "${TRUSTED_SIGNER_FINGERPRINT}"
-          git verify-tag "${GITHUB_REF_NAME}"
-          signer_fingerprint=$(git show -s --format='%GF' "${GITHUB_REF_NAME}")
-          test "${signer_fingerprint}" = "${TRUSTED_SIGNER_FINGERPRINT}"
+
+          tag="refs/tags/${GITHUB_REF_NAME}"
+
+          # Fetch the actual annotated tag object.
+          git fetch --force origin "${tag}:${tag}"
+
+          # Reject lightweight tags.
+          test "$(git cat-file -t "$tag")" = "tag"
+
+          # Require the tag to point to this workflow's commit.
+          test "$(git rev-parse "${tag}^{commit}")" = \
+            "$GITHUB_SHA"
+
+          # Import only the repository's designated public key.
+          gpg --batch --import \
+            .github/keys/release-signing.asc
+
+          # Verify that the imported primary key is trusted.
+          imported=$(gpg --with-colons --show-keys \
+            .github/keys/release-signing.asc |
+            awk -F: '$1 == "fpr" {print $10; exit}')
+
+          test "$imported" = \
+            "$TRUSTED_SIGNER_FINGERPRINT"
+
+          # Verify tag signature and check the signing fingerprint.
+          verification=$(git verify-tag --raw "$tag" 2>&1) || {
+            echo "$verification"
+            exit 1
+          }
+
+          echo "$verification" |
+            awk -v expected="$TRUSTED_SIGNER_FINGERPRINT" \
+              '$1 == "[GNUPG:]" && $2 == "VALIDSIG" && $3 == expected {found=1}
+               END {exit !found}'
 
       - name: Resolve version
         id: version
