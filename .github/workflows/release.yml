@@ -64,13 +64,14 @@ jobs:
           gpg --batch --import \
             .github/keys/release-signing.asc
 
-          # Verify that the imported primary key is trusted.
-          imported=$(gpg --with-colons --show-keys \
+          # Verify that the configured signing fingerprint belongs to the
+          # imported designated key. GPG reports the primary fingerprint and
+          # signing-subkey fingerprints as separate fpr records.
+          trusted_in_key=$(gpg --with-colons --show-keys \
             .github/keys/release-signing.asc |
-            awk -F: '$1 == "fpr" {print $10; exit}')
-
-          test "$imported" = \
-            "$TRUSTED_SIGNER_FINGERPRINT"
+            awk -F: -v expected="$TRUSTED_SIGNER_FINGERPRINT" \
+              '$1 == "fpr" && $10 == expected {found=1} END {print found ? "yes" : "no"}')
+          test "$trusted_in_key" = yes
 
           # Verify tag signature and check the signing fingerprint.
           verification=$(git verify-tag --raw "$tag" 2>&1) || {
