@@ -554,19 +554,10 @@ See `docs/testing.md` for the coverage map and `docs/release.md` for the
 complete public release checklist, artifact build, tag, and GitHub release
 workflow.
 
-## Infrastructure acknowledgment
+---
 
-AegisKeys was independently developed and is not intended to encourage people
-to use FreeInference instead of paid or self-hosted inference. While developing
-and validating AegisKeys, I used model-inference access provided by
-[FreeInference.org](https://freeinference.org/).
+## Disclaimer
 
-For clarity, FreeInference did not commission, direct, review, endorse, or pay
-for AegisKeys. This is not a sponsored contribution or an endorsement by
-FreeInference or the AegisKeys project.
+This is an independent project by the repository author. FreeInference.org ("FI") did not sponsor, commission, direct, review, approve, or endorse it, and has no involvement in its design, development, or publication. Every decision to create, modify, and publish this work was made by me at my own discretion.
 
-I am acknowledging FreeInference because access to capable inference
-infrastructure can enable meaningful open-source work by developers and
-researchers who do not have the hardware or budget to run these models
-themselves. If AegisKeys has been useful to you, please consider supporting
-FreeInference through the donation options on their website.
+The inference access FI supplied was vital in bringing this project to its current state. If you find this project useful or helpful, I encourage you to support FreeInference.org through the donation options on their website. FI provides a vital service for independent developers and researchers who would otherwise lack access to this kind of infrastructure, and sustained community support is what keeps that access available.
